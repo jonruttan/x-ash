@@ -1,0 +1,15 @@
+; personality.xon -- what this bundle IS.
+
+(personality "ash")
+
+; RADON, and the only one of the five that needs it.  ash forks, execs, dup2s
+; and opens files; Sys's process and file doors are radon opt-ins, exactly as
+; the contract's worked example says of Logo.  Declaring anything lighter would
+; mean an unbound symbol at the first pipeline instead of a legible refusal at
+; acquisition -- which is the whole argument for this row being a requirement
+; rather than a preference.
+(dialect rn)
+
+(requires-release "0.5.2")
+
+(entry "run.x")

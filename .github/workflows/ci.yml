@@ -1,0 +1,102 @@
+name: CI
+
+# THE MATRIX IS THE POINT.  The 2024 generation of these personalities had
+# genuinely good spec suites that nothing ever ran once they left the x-lang
+# tree, and that is the whole of why they rotted -- not the missing digests,
+# not the path literals on their own.  A personality without its suite in its
+# own CI is the last generation with a fresh coat of paint.
+#
+# TWO RELEASES, DELIBERATELY.  A bundle names the x-lang it was built against
+# in personality.xon's (requires-release ...); the matrix runs that one AND
+# whatever main is now.  The pairing row is what turns "the platform moved
+# underneath us" from something discovered years later into a red build on the
+# day it happens.  The `main` leg is allowed to fail -- it is an early warning
+# about the platform, not a verdict on this bundle.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, because the interesting failure here is one nothing in this
+  # repository triggers: x-lang moving while this bundle sits still.
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  specs:
+    name: specs @ x-lang ${{ matrix.x-lang }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.x-lang == 'main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep the pinned row equal to personality.xon's (requires-release).
+        # Release strings are compared for equality here and never parsed,
+        # matching the platform's own rule.
+        x-lang: ['0.5.2', 'main']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out x-lang
+        uses: actions/checkout@v4
+        with:
+          repository: jonruttan/x-lang
+          ref: ${{ matrix.x-lang == 'main' && 'main' || format('v{0}', matrix.x-lang) }}
+          path: .x-lang
+
+      # The bundle declares a release; CI proves the declaration is not
+      # decoration.  A drifted pin is a loud failure on the pinned leg, never
+      # a silently-green build against a platform nobody checked.
+      - name: Check the declared release against the checkout
+        if: matrix.x-lang != 'main'
+        run: |
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' personality.xon)
+          if [ "$declared" != "${{ matrix.x-lang }}" ]; then
+            echo "personality.xon declares $declared, matrix leg is ${{ matrix.x-lang }}" >&2
+            echo "update one or the other -- they are the same fact" >&2
+            exit 1
+          fi
+
+      # The engine is acquired, not built: x-lang pins one and knows how to
+      # fetch it.  Nothing here reimplements that.
+      - name: Build the platform
+        working-directory: .x-lang
+        run: |
+          make engine
+          make boot        # the launcher-free amalgams the harness loads
+
+      - name: Run the ASH specs
+        run: X="$PWD/.x-lang/x.sh" sh tests/spec-runner.sh
+
+  relocatable:
+    # THE RULE THAT ACTUALLY KILLED THE LAST GENERATION, as a gate.  Exactly
+    # one file may carry a root-relative load literal: the entry.  A bundle
+    # that breaks this is nailed to the directory it was written in, and the
+    # symptom does not appear until someone moves it -- which is to say, never
+    # in the repository where it was developed.
+    name: one entry file, and one only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No path literals outside run.x
+        run: |
+          # Match the entry however grep spells its path (./run.x or run.x),
+          # and ignore COMMENTS -- a file may legitimately quote the literal it
+          # no longer uses, which is exactly what a port's notes do.
+          hits=$(grep -rn '(include "[a-zA-Z]' --include='*.x' . \
+                 | grep -Ev '(^|/)run\.x:' \
+                 | grep -Ev ':[0-9]+:[[:space:]]*;' || true)
+          if [ -n "$hits" ]; then
+            echo "root-relative include outside the entry:" >&2
+            echo "$hits" >&2
+            exit 1
+          fi
+      - name: The generated harness is not committed
+        run: |
+          if [ -e tests/lib/harness.gen.x ]; then
+            echo "tests/lib/harness.gen.x is generated and machine-specific;" >&2
+            echo "it must not be committed (see .gitignore)" >&2
+            exit 1
+          fi
