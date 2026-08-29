@@ -38,7 +38,36 @@ mkdir -p "$OUT"
 # The prefix is a plain directory name so the archive unpacks into one place;
 # Pin bundle unpacks into a staging directory it owns, so the prefix is for a
 # human untarring it by hand, not for the tool.
-git archive --format=tar --prefix="$NAME/" "$TAG" \
+# THE STAMP IS THE ONE THING THE COMMIT CANNOT CARRY.  Everything else in
+# this archive is exactly what was committed, deliberately -- but a version
+# row in lang.xon could only be true at the single commit that gets tagged,
+# and would be a lie in the tree both before and after it.  So the tag says
+# what this is, and the archive carries that as a file the checkout has not
+# got, matching what `make install` writes from git describe.
+#
+# git archive --add-file (2.38+) keeps the determinism: entries are sorted
+# and stamped with the COMMIT's time, added ones included.  The one thing it
+# takes from the local file is its MODE, so that is pinned -- otherwise two
+# rollers with different umasks produce different bytes, which is precisely
+# the failure the -n on gzip below exists to prevent.
+STAMP=$(mktemp -d)/version
+trap 'rm -rf "$(dirname "$STAMP")"' EXIT
+printf '%s\n' "$TAG" > "$STAMP"
+chmod 644 "$STAMP"
+
+# Probed with the REAL stamp, not with /dev/null: git rejects a non-regular
+# file for being non-regular, which looks exactly like not supporting the
+# option at all and quietly drops the stamp from every tarball.
+if git archive "--add-file=$STAMP" --format=tar "$TAG" >/dev/null 2>&1; then
+	ADD_STAMP="--add-file=$STAMP"
+else
+	ADD_STAMP=""
+	echo "bundle: git $(git --version | sed 's/.* //') has no --add-file (needs 2.38);" >&2
+	echo "  the tarball will carry no version stamp, so a consumer's" >&2
+	echo "  (requires-lang \"...\" \"$TAG\") cannot be checked against it." >&2
+fi
+
+git archive --format=tar --prefix="$NAME/" $ADD_STAMP "$TAG" \
 	| gzip -n -9 > "$OUT/$NAME.tar.gz"
 
 if command -v shasum >/dev/null 2>&1; then

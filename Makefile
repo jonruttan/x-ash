@@ -15,6 +15,18 @@
 # you just want `x -l ash` to work.
 
 X ?= x
+
+# THE VERSION IS DERIVED, NEVER COMMITTED, and that is deliberate.
+#
+# A version row in lang.xon can only be true at ONE commit: the one you tag.
+# Bump it and tag it and the tree is honest for exactly that moment; every
+# commit after claims a release it is not, and a checkout of main always lies.
+# git describe does not -- v0.2.0-3-gabc123-dirty says precisely where you are.
+#
+# So lang.xon declares what this lang REQUIRES, and the installed artifact
+# carries what it IS.  Same split, and the same mechanism, as x-lang's own
+# $(X_RELEASE) -> <lib>/contract/release.
+LANG_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # PREFIX wins when given, so this matches x-lang's own `PREFIX=... make
 # install`.  Otherwise ask the x on PATH where its tree is -- the question
 # --share-dir exists to answer.
@@ -33,6 +45,7 @@ install: ## Install into <share>/langs/ash
 	rm -rf "$(DEST)"
 	mkdir -p "$(DEST)"
 	cp -R $(PAYLOAD) "$(DEST)/"
+	printf '%s\n' '$(LANG_VERSION)' > "$(DEST)/version"
 	@echo "x-ash: installed to $(DEST)"
 	@echo "x-ash: try  x -l ash"
 

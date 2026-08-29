@@ -10,6 +10,8 @@
 ;   (lang "NAME")               the -l name
 ;   (dialect NAME)              he | xe | rn -- a REQUIREMENT, not a taste
 ;   (requires-release "TAG")    the x-lang this bundle was built against
+;   (requires-lang "NAME" ["V"]) another lang this one is written on top
+;                               of, optionally at an exact version
 ;   (entry "FILE")              loaded AFTER the dialect, not instead of it
 
 (lang "ash")
