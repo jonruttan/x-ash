@@ -15,10 +15,10 @@ c
 
 ## Status
 
-**80 of 82 specs green** against x-lang **0.5.2** and an x-engine-c carrying the
+**80 of 82 specs green** against x-lang **v0.6.0** and an x-engine-c carrying the
 [#528](https://github.com/jonruttan/x-lang/issues/528) fix.
 
-Last of the five 2024-era personalities to come back, the largest, and the only
+Last of the five 2024-era langs to come back, the largest, and the only
 one that is not a Lisp. It is also the only one that was blocked on an engine
 bug rather than on drift — see below.
 
@@ -31,25 +31,20 @@ guessing from outside.
 ## Running it
 
 ```bash
-X=/path/to/x-lang/x.sh sh tests/spec-runner.sh
+make test        # the spec suite
+make install     # into the x on PATH
 ```
 
-For a prompt, the bridge every bundle needs
-([#519](https://github.com/jonruttan/x-lang/issues/519)):
-
-```bash
-ln -s "$PWD" /path/to/x-lang/apps/ash
-```
-
-then `./x.sh -l ash` from the x-lang repo root. **This bundle declares
-`(dialect rn)`** — it forks, execs, dup2s and opens files, and those are radon
-opt-ins.
+then `x -l ash`. `make install` puts the bundle where `-l` looks — an installed
+x searches `<share>/langs/*/lang.xon`, so a lang is installed when its files
+are there. No registry, no per-project pin. Use `lang.pin.xon` and `Pin bundle`
+instead when it matters which version.
 
 ## Layout
 
 ```
-personality.xon   name, dialect, release pairing
-run.x             THE entry -- the only file that may know a path
+lang.xon          name, dialect, release pairing
+run.x             THE entry -- and it knows no paths at all
 ash/prims.x       the platform layer, under the names ash was written against
 ash/tokens.x      shell token types, on an isolated tokenizer base
 ash/eval.x        parser and evaluator in one pass

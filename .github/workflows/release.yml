@@ -1,0 +1,83 @@
+name: Release
+
+# A TAG PUBLISHES A BUNDLE.  x-lang's Pin bundle fetches a tarball by URL and
+# verifies it against a sha256 the consumer's lang.pin.xon carries, so a
+# release is exactly two artifacts: the tarball, and the digest of it.
+#
+# THE SUITE RUNS FIRST.  A tag on a red tree publishes nothing -- the same
+# ruling x-lang's own release workflow follows.  A bundle whose specs fail is
+# not a release, it is a trap with a digest on it.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to roll (dry run -- publishes nothing)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # tools/bundle.sh archives FROM a tag
+
+      - name: Check out the x-lang this bundle declares
+        run: |
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
+          echo "lang.xon declares $declared"
+          git clone --depth 1 --branch "$declared" \
+            https://github.com/jonruttan/x-lang.git .x-lang
+
+      - name: Build the platform
+        working-directory: .x-lang
+        run: |
+          make engine
+          make boot
+
+      # THE GATE, not a formality: this is the last point at which a bad
+      # bundle can be stopped from acquiring a digest and a URL.
+      - name: Run the ASH specs
+        run: X="$PWD/.x-lang/x.sh" sh tests/spec-runner.sh
+
+      - name: Roll the bundle
+        id: roll
+        run: |
+          TAG="${{ github.event_name == 'push' && github.ref_name || inputs.tag }}"
+          sh tools/bundle.sh "$TAG" dist | tee roll.out
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # The pin a consumer needs, in the release notes rather than in a wiki
+      # that drifts: the digest is only useful next to the URL it belongs to.
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.roll.outputs.tag }}"
+          {
+            echo '## Install'
+            echo
+            echo '```sh'
+            echo "x --install-lang https://github.com/jonruttan/x-ash/releases/download/$TAG/lang.pin.xon"
+            echo '```'
+            echo
+            echo '## Or pin it, for a project'
+            echo
+            echo 'Put this in the project'"'"'s `lang.pin.xon`:'
+            echo
+            echo '```x'
+            sed -n '/^  (lang /,$p' roll.out | sed 's/^  //'
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" \
+            --title "x-ash $TAG" \
+            --notes-file notes.md \
+            "dist/x-ash-$TAG.tar.gz" \
+            "dist/x-ash-$TAG.tar.gz.sha256" \
+            "dist/lang.pin.xon"

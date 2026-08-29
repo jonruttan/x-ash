@@ -32,24 +32,15 @@ command -v "$X" >/dev/null 2>&1 || {
 	exit 1
 }
 
-# ASKED FROM THE WRAPPER'S OWN DIRECTORY, and that is not a stylistic choice.
-# x.sh detects repo mode by testing for lib/x.x under the CWD, so --share-dir
-# answers with `pwd` in a checkout -- correct only when the caller already
-# stands in the x-lang repo, which a bundle by definition does not.  Asked
-# from anywhere else a checkout's wrapper reports
-#   Error: install root does not exist: .../x-lang/../share/x
-# and the flag whose own comment says it exists "so a tool outside this
-# repository can ASK instead of guessing" cannot be asked from outside.
-#
-# cd'ing to the wrapper's directory first makes the detection true for both
-# modes: a checkout's x.sh sits beside lib/x.x, and an installed x sits in
-# bin/ where lib/x.x is absent, so the install branch runs as designed.
-# Reported upstream; remove this dance once --share-dir answers from any cwd.
-_x_dir="$(cd "$(dirname "$(command -v "$X")")" && pwd)"
-X_ROOT="$(cd "$_x_dir" && "$X" --share-dir)"
+# --share-dir answers from ANY cwd as of x-lang 990c4a35.  It did not at first:
+# mode detection is cwd-based, so a checkout's x.sh asked from outside took the
+# installed branch and computed a share/x no checkout has.  This runner used to
+# cd to the wrapper's own directory before asking -- the guessing the flag
+# exists to end.  Reported, fixed upstream, dance removed.
+X_ROOT="$("$X" --share-dir)"
 # X_BIN is env-overridable, the way tests/x/spec-runner.sh makes it -- so the
 # same runner can drive a variant or patched engine without moving anything.
-X_BIN="${X_BIN:-$(cd "$_x_dir" && "$X" --engine-path)}"
+X_BIN="${X_BIN:-$("$X" --engine-path)}"
 
 # REQUIRED FROM AN INSTALLED TREE.  The runner finds its awk harness from the
 # directory holding the ENGINE -- true in a checkout, where the binary sits

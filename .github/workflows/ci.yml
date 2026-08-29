@@ -1,13 +1,13 @@
 name: CI
 
-# THE MATRIX IS THE POINT.  The 2024 generation of these personalities had
+# THE MATRIX IS THE POINT.  The 2024 generation of these langs had
 # genuinely good spec suites that nothing ever ran once they left the x-lang
 # tree, and that is the whole of why they rotted -- not the missing digests,
-# not the path literals on their own.  A personality without its suite in its
+# not the path literals on their own.  A lang without its suite in its
 # own CI is the last generation with a fresh coat of paint.
 #
 # TWO RELEASES, DELIBERATELY.  A bundle names the x-lang it was built against
-# in personality.xon's (requires-release ...); the matrix runs that one AND
+# in lang.xon's (requires-release ...); the matrix runs that one AND
 # whatever main is now.  The pairing row is what turns "the platform moved
 # underneath us" from something discovered years later into a red build on the
 # day it happens.  The `main` leg is allowed to fail -- it is an early warning
@@ -31,10 +31,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep the pinned row equal to personality.xon's (requires-release).
-        # Release strings are compared for equality here and never parsed,
-        # matching the platform's own rule.
-        x-lang: ['0.5.2', 'main']
+        # BOTH LEGS, AND THEY ANSWER DIFFERENT QUESTIONS.  The pinned leg
+        # proves this bundle still runs on the platform it DECLARES; the main
+        # leg is an early warning that x-lang has moved underneath it, and is
+        # allowed to fail.  Keep the pinned row equal to lang.xon's
+        # (requires-release ...) VERBATIM -- they are one fact, and the check
+        # below fails the build if they drift.
+        x-lang: ['v0.6.0', 'main']
 
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +46,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jonruttan/x-lang
-          ref: ${{ matrix.x-lang == 'main' && 'main' || format('v{0}', matrix.x-lang) }}
+          ref: ${{ matrix.x-lang }}
           path: .x-lang
+
 
       # The bundle declares a release; CI proves the declaration is not
       # decoration.  A drifted pin is a loud failure on the pinned leg, never
@@ -52,9 +56,9 @@ jobs:
       - name: Check the declared release against the checkout
         if: matrix.x-lang != 'main'
         run: |
-          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' personality.xon)
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
           if [ "$declared" != "${{ matrix.x-lang }}" ]; then
-            echo "personality.xon declares $declared, matrix leg is ${{ matrix.x-lang }}" >&2
+            echo "lang.xon declares $declared, matrix leg is ${{ matrix.x-lang }}" >&2
             echo "update one or the other -- they are the same fact" >&2
             exit 1
           fi
@@ -64,19 +68,23 @@ jobs:
       - name: Build the platform
         working-directory: .x-lang
         run: |
-          make engine
+          make engine      # acquire the pinned engine
+          make             # x-bin at the repo root -- `make engine` does not build it
           make boot        # the launcher-free amalgams the harness loads
 
       - name: Run the ASH specs
         run: X="$PWD/.x-lang/x.sh" sh tests/spec-runner.sh
 
   relocatable:
-    # THE RULE THAT ACTUALLY KILLED THE LAST GENERATION, as a gate.  Exactly
-    # one file may carry a root-relative load literal: the entry.  A bundle
-    # that breaks this is nailed to the directory it was written in, and the
+    # THE RULE THAT ACTUALLY KILLED THE LAST GENERATION, as a gate -- and it
+    # is stricter now than the contract requires.  The contract exempts an app
+    # ENTRY, because an in-tree app self-boots.  A bundle does not: x.sh boots
+    # the dialect lang.xon declares and arms this root before run.x is read, so
+    # ZERO files here need a root-relative literal, run.x included.  A bundle
+    # that grows one is nailed to the directory it was written in, and the
     # symptom does not appear until someone moves it -- which is to say, never
     # in the repository where it was developed.
-    name: one entry file, and one only
+    name: no path literals at all
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,10 +94,9 @@ jobs:
           # and ignore COMMENTS -- a file may legitimately quote the literal it
           # no longer uses, which is exactly what a port's notes do.
           hits=$(grep -rn '(include "[a-zA-Z]' --include='*.x' . \
-                 | grep -Ev '(^|/)run\.x:' \
                  | grep -Ev ':[0-9]+:[[:space:]]*;' || true)
           if [ -n "$hits" ]; then
-            echo "root-relative include outside the entry:" >&2
+            echo "root-relative include (a bundle needs none, not even in run.x):" >&2
             echo "$hits" >&2
             exit 1
           fi

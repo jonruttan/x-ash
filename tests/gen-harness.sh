@@ -59,7 +59,7 @@ fi
 # 3. NEVER re-include a platform module the tower already has.  The 2024
 #    ash-base.x opened with (include "lib/x-core.x"); on top of a booted
 #    tower that is a SEGFAULT with no diagnostic, not an error.  Deleting
-#    that one line alone took the Kernel suite from dead to 68/72.  run.x owns
+#    that one line is what took this suite from dead to 68/72.  run.x owns
 #    the boot; nothing under ash/ includes anything from the platform.
 #
 # The bundle root is armed the same way run.x arms it, so `import ash/base`

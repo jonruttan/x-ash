@@ -1,0 +1,34 @@
+; lang.xon -- what this bundle IS.
+;
+; xon: read with the ordinary reader and never evaluated, like every other
+; manifest in the x-lang world (pin.xon, engine.pin.xon).  A form a reader
+; does not know is a loud error, never a skip -- a manifest that silently
+; ignores half of itself cannot be extended without wondering which readers
+; obeyed which half.
+;
+; FORMAT (one form per line):
+;   (lang "NAME")               the -l name
+;   (dialect NAME)              he | xe | rn -- a REQUIREMENT, not a taste
+;   (requires-release "TAG")    the x-lang this bundle was built against
+;   (entry "FILE")              loaded AFTER the dialect, not instead of it
+
+(lang "ash")
+
+; RADON, and the only one of the five that needs it.  ash forks, execs, dup2s
+; and opens files; Sys's process and file doors are radon opt-ins.  Declaring
+; anything lighter would mean an unbound symbol at the first pipeline instead of
+; a legible refusal at acquisition -- which is the whole argument for this row
+; being a requirement rather than a preference.
+(dialect rn)
+
+; PAIRING, NOT PINNING.  A digest freezes bytes; it says nothing about whether
+; those bytes still run against a platform that moved.  This row is the part
+; that is checkable, and it is compared for EQUALITY, never parsed.
+;
+; v0.6.0 is the first release carrying what this bundle needs: bundle
+; acquisition, `-l` loading, --share-dir answering from any cwd, and eval! in
+; the seam.  It is also what these specs are green against.
+
+(requires-release "v0.6.0")
+
+(entry "run.x")
