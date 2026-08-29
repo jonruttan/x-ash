@@ -44,7 +44,7 @@ jobs:
       # THE GATE, not a formality: this is the last point at which a bad
       # bundle can be stopped from acquiring a digest and a URL.
       - name: Run the ASH specs
-        run: X="$PWD/.x-lang/x.sh" sh tests/spec-runner.sh
+        run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
 
       - name: Roll the bundle
         id: roll

@@ -55,8 +55,12 @@ uninstall: ## Remove it again
 	@echo "x-ash: removed $(DEST)"
 
 .PHONY: test
-test: ## Run the spec suite
+test: ## Run the spec suite (every failure is loud)
 	X="$(X)" sh tests/spec-runner.sh
+
+.PHONY: check
+check: ## Run the suite against tests/contract/known-failures.txt -- what CI gates on
+	X="$(X)" sh tests/spec-gate.sh
 
 .PHONY: bundle
 bundle: ## Roll a release tarball and print its pin
