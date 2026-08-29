@@ -37,8 +37,9 @@ jobs:
       - name: Build the platform
         working-directory: .x-lang
         run: |
-          make engine
-          make boot
+          make engine      # acquire the pinned engine
+          make             # x-bin at the repo root -- `make engine` does not build it
+          make boot        # the launcher-free amalgams the harness loads
 
       # THE GATE, not a formality: this is the last point at which a bad
       # bundle can be stopped from acquiring a digest and a URL.
