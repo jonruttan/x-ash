@@ -15,7 +15,7 @@ c
 
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.6.0** and an x-engine-c carrying the
+**80 of 82 specs green** against x-lang **v0.7.0** and an x-engine-c carrying the
 [#528](https://github.com/jonruttan/x-lang/issues/528) fix.
 
 Last of the five 2024-era langs to come back, the largest, and the only

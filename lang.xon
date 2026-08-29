@@ -27,10 +27,12 @@
 ; those bytes still run against a platform that moved.  This row is the part
 ; that is checkable, and it is compared for EQUALITY, never parsed.
 ;
-; v0.6.0 is the first release carrying what this bundle needs: bundle
+; v0.6.0 was the first release carrying what this bundle needs: bundle
 ; acquisition, `-l` loading, --share-dir answering from any cwd, and eval! in
-; the seam.  It is also what these specs are green against.
+; the seam.  v0.7.0 is what these specs are green against, and this row tracks
+; THAT rather than the floor -- the question it answers is "what was this built
+; against", not "what is the oldest that would still work".
 
-(requires-release "v0.6.0")
+(requires-release "v0.7.0")
 
 (entry "run.x")
