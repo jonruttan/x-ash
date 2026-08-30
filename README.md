@@ -15,7 +15,7 @@ c
 
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.7.1**, which is the first release
+**80 of 82 specs green** against x-lang **v0.8.0**, which is the first release
 pinning the x-engine-c that makes an isolated tokenizer base work
 ([#528](https://github.com/jonruttan/x-lang/issues/528)). On v0.7.0 and earlier
 this bundle is not merely failing, it is dead at load.
