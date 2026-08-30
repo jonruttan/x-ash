@@ -15,8 +15,10 @@ c
 
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.7.0** and an x-engine-c carrying the
-[#528](https://github.com/jonruttan/x-lang/issues/528) fix.
+**80 of 82 specs green** against x-lang **v0.7.1**, which is the first release
+pinning the x-engine-c that makes an isolated tokenizer base work
+([#528](https://github.com/jonruttan/x-lang/issues/528)). On v0.7.0 and earlier
+this bundle is not merely failing, it is dead at load.
 
 Last of the five 2024-era langs to come back, the largest, and the only
 one that is not a Lisp. It is also the only one that was blocked on an engine

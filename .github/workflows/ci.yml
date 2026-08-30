@@ -37,7 +37,7 @@ jobs:
         # allowed to fail.  Keep the pinned row equal to lang.xon's
         # (requires-release ...) VERBATIM -- they are one fact, and the check
         # below fails the build if they drift.
-        x-lang: ['v0.7.0', 'main']
+        x-lang: ['v0.7.1', 'main']
 
     steps:
       - uses: actions/checkout@v4
@@ -72,11 +72,11 @@ jobs:
           make             # x-bin at the repo root -- `make engine` does not build it
           make boot        # the launcher-free amalgams the harness loads
 
-      # THE GATE IS spec-gate, NOT spec-runner.  This bundle carries documented
-      # debt, so the raw runner makes it permanently red.  The gate compares
-      # failing test NAMES against tests/contract/known-failures.txt -- read
-      # that file's header first: it records ash on x-engine-c v0.1.3, and
-      # x-lang v0.7.0 still pins v0.1.2, on which this bundle is dead at load.
+      # THE GATE IS spec-gate, NOT spec-runner.  This bundle carries two
+      # documented failures, so the raw runner makes it permanently red.  The
+      # gate compares failing test NAMES against
+      # tests/contract/known-failures.txt and is red when they differ in EITHER
+      # direction -- a new failure, or a recorded one that now passes.
       - name: Run the ASH specs
         run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
 
