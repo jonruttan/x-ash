@@ -48,7 +48,30 @@ CONTRACT="${KNOWN_FAILURES:-$BUNDLE/tests/contract/known-failures.txt}"
 }
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT INT TERM
+
+# THE HANDLER HAS TO EXIT, and not doing so is how a KILLED suite reported a
+# filesystem error instead.
+#
+# This was `trap 'rm -rf "$work"' EXIT INT TERM`.  On a signal the handler ran,
+# removed the work directory, and then FELL THROUGH to the next line -- which
+# writes into the directory it had just removed.  A suite killed by an OOM, a
+# runaway guard or a cancelled CI job surfaced as
+#
+#     spec-gate.sh: 58: cannot create /tmp/tmp.XXXX/clean: Directory nonexistent
+#
+# and exit 143, naming neither the signal nor the suite.  Worse, it defeats the
+# "a suite that did not run is not a suite that passed" check below by never
+# reaching it -- the one guard written specifically so a suite that never ran
+# cannot be mistaken for a green one.
+#
+# So EXIT cleans up, and a signal cleans up, SAYS which signal, and re-raises
+# itself with the trap cleared -- so the parent sees a death by signal rather
+# than an ordinary status, which is what a CI runner reads to tell "cancelled"
+# from "failed".
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+trap 'cleanup; echo "spec-gate: killed by SIGINT -- the suite did not finish" >&2; trap - INT; kill -INT $$' INT
+trap 'cleanup; echo "spec-gate: killed by SIGTERM -- the suite did not finish" >&2; trap - TERM; kill -TERM $$' TERM
 
 # The runner exits non-zero on failures, which is the whole reason this wrapper
 # exists -- so its status is captured rather than allowed to end the script.
