@@ -14,9 +14,11 @@ c
 ```
 
 x-ash is a **lang**: a different surface language loaded over an x-lang
-dialect, free to re-mean shared spellings. It is the only one of the five that
-is not a Lisp, and the only one that brings its own tokenizer base. The terms
-are in x-lang's
+dialect. Where x-lang and ash spell something the same way, ash is free to mean
+something different by it — `;` separates commands here rather than starting a
+comment, and `#` starts one rather than dispatching. It is the only one of the
+five that is not a Lisp, and the only one that brings its own tokenizer base.
+The terms are in x-lang's
 [lang contract](https://github.com/jonruttan/x-lang/blob/main/docs/lang-contract.md).
 
 ## Status
