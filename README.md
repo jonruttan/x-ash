@@ -13,12 +13,23 @@ b
 c
 ```
 
+x-ash is a **lang**: a different surface language loaded over an x-lang
+dialect, free to re-mean shared spellings. It is the only one of the five that
+is not a Lisp, and the only one that brings its own tokenizer base. The terms
+are in x-lang's
+[lang contract](https://github.com/jonruttan/x-lang/blob/main/docs/lang-contract.md).
+
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.8.1**, which is the first release
-pinning the x-engine-c that makes an isolated tokenizer base work
-([#528](https://github.com/jonruttan/x-lang/issues/528)). On v0.7.0 and earlier
-this bundle is not merely failing, it is dead at load.
+**80 of 82 specs green** against x-lang **v0.8.1**.
+
+That row is a *pairing* — what this bundle was last built and tested against —
+but the floor beneath it is a hard requirement, unusually for this bundle:
+x-lang v0.7.1 is the first release pinning an x-engine-c in which an isolated
+tokenizer base works at all
+([#528](https://github.com/jonruttan/x-lang/issues/528)). On anything earlier
+this bundle is not merely failing, it is dead at load. `lang.xon` carries that
+reasoning beside the row.
 
 Last of the five 2024-era langs to come back, the largest, and the only
 one that is not a Lisp. It is also the only one that was blocked on an engine
@@ -30,17 +41,130 @@ an empty one. That is in how the tokenizer drives a state that scores nothing
 on entry, and it wants someone reading the C token loop rather than more
 guessing from outside.
 
+## Install
+
+Nothing cloned, from any directory:
+
+```bash
+x --install-lang https://github.com/jonruttan/x-ash/releases/latest/download/lang.pin.xon
+x -l ash
+```
+
+x fetches the published pin, then the tarball it names, verifies the digest,
+and installs to `<share>/langs/ash` — where `x -l` looks. A failed upgrade
+leaves the working install untouched.
+
+From a clone, if you have one:
+
+```bash
+make install                      # into the x on your PATH
+PREFIX=$HOME/.local make install  # or a particular prefix
+```
+
+`make uninstall` removes it either way. An installed x searches
+`<share>/langs/*/lang.xon`, so a lang is installed when its files are there —
+no registry, no database.
+
+**One trap, and it is the one you will hit.** `x` decides where to look for
+langs from the directory you run it *in*. Inside an **x-lang checkout** it
+searches `deps/langs/` and an installed lang is invisible, however correctly it
+was installed:
+
+```
+$ cd path/to/x-lang && x -l ash
+Error: no library, app or lang named 'ash'
+  searched lib/ash.x, apps/ash/run.x
+      and deps/langs/*/lang.xon
+```
+
+Run it from anywhere else, or name the bundles explicitly — `X_LANG_DIR` wins
+in both modes:
+
+```bash
+X_LANG_DIR=$HOME/.local/share/x/langs/ x -l ash   # the installed one
+X_LANG_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
+```
+
+
+**This bundle needs radon**, and `lang.xon` says so as a requirement rather
+than a preference: ash forks, execs, dup2s and opens files, and Sys's process
+and file doors are radon opt-ins. A lighter dialect would mean an unbound
+symbol at the first pipeline instead of a legible refusal at acquisition.
+
+## Pin it instead, for a project
+
+An install is unversioned and machine-wide. When it matters *which* version a
+project builds against, pin it: `Pin bundle` fetches the release tarball and
+verifies it against a digest before unpacking. In the project's
+`lang.pin.xon`:
+
+```x
+(lang "ash")
+(release "v0.1.2")
+(bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.2/x-ash-v0.1.2.tar.gz")
+(source "https://github.com/jonruttan/x-ash.git")
+```
+
+Each release publishes its own digest, and the release notes carry this block
+ready to paste. Then:
+
+```x-repl
+> (import x/tool/pin)
+> (Pin bundle "deps/langs")
+"deps/langs/ash-v0.1.2"
+```
+
+`deps/langs/` is where `x -l` looks in a checkout. `X_LANG_DIR` overrides it.
+
+**Which to use.** Install when you just want `x -l ash` to work. Pin when a
+build depends on it — the digest is what makes the version reproducible, and
+an install has none.
+
 ## Running it
 
 ```bash
-make test        # the spec suite
-make install     # into the x on PATH
+x -l ash                # interactive
+x -l ash -f script.sh   # batch
 ```
 
-then `x -l ash`. `make install` puts the bundle where `-l` looks — an installed
-x searches `<share>/langs/*/lang.xon`, so a lang is installed when its files
-are there. No registry, no per-project pin. Use `lang.pin.xon` and `Pin bundle`
-instead when it matters which version.
+x-lang boots the dialect `lang.xon` declares, arms this bundle's module root,
+and loads `run.x` on top — which is why nothing here needs to know a path.
+
+## Development
+
+Run the specs against any x-lang checkout or install:
+
+```bash
+X=/path/to/x-lang/x.sh make test    # the suite -- every failure is loud
+X=/path/to/x-lang/x.sh make check   # the suite against the contract, which CI gates on
+make bundle                         # roll a release tarball and print its pin
+```
+
+**Pass `X` explicitly.** Without it the suite takes the `x` on your PATH, and a
+stale install reports failures the platform has already fixed — or, worse here,
+a locally built `x-bin` that predates the engine the release pins. `x.sh
+--engine-path` prefers the local build, and that is how this bundle once
+reported 80 of 82 red on a platform where it passes.
+
+**Do not `make install` into an x-lang checkout.** The Makefile asks
+`$(X) --share-dir` where to put the bundle, and a checkout answers with its own
+root — so the files land in `<checkout>/langs/NAME`, which is not one of the
+three paths `-l` searches there. It reports success and the lang stays
+invisible. Install into a real `<share>` tree, or use `X_LANG_DIR`.
+
+
+The two failures are recorded by name in
+[`tests/contract/known-failures.txt`](tests/contract/known-failures.txt), and
+`make check` gates on that list rather than on a count — red when a new failure
+appears *and* red when a recorded one starts passing. Documented debt can ship;
+a regression cannot, and a fixed test cannot stay quietly excused.
+
+The release tarball is byte-reproducible: it is built from the tag with
+`git archive` and a timestamp-free gzip, so two people rolling one tag get one
+digest. Pushing a `v*` tag runs the suite and, only if it is green, publishes
+the tarball, its `.sha256` and `lang.pin.xon` as a GitHub release. CI runs the
+declared release *and* x-lang `main`, so a platform that moves underneath this
+bundle shows up as a red build rather than a surprise later.
 
 ## Layout
 
