@@ -23,7 +23,7 @@ The terms are in x-lang's
 
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.8.1**.
+**80 of 82 specs green** against x-lang **v0.9.0**.
 
 That row is a *pairing* — what this bundle was last built and tested against —
 but the floor beneath it is a hard requirement, unusually for this bundle:
