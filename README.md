@@ -1,7 +1,7 @@
 # x-ash — a POSIX shell on x-lang
 
-A shell: its own tokenizer on its own base, word expansion, redirection,
-pipelines, and the control structures.
+A shell on [x-lang](https://github.com/jonruttan/x-lang): its own tokenizer on its own base, word
+expansion, redirection, pipelines, and the control structures.
 
 ```
 $ x -l ash
@@ -238,6 +238,22 @@ outright that class dispatch is "hazardous mid-reader-callback":
 
 The middle one is the one to watch: a `prim-ref` miss is indistinguishable from
 a legitimate nil until it surfaces somewhere far away.
+
+## Background
+
+The language here is POSIX's Shell Command Language: the Bourne shell's syntax
+— V7 Unix, 1979 — as the standard later pinned it down. It is an odd and
+underrated language: words rather than values, expansion rather than
+evaluation, and a grammar in which `;` and newline are the sequencing
+operators, which is exactly why this bundle needs its own tokenizer base.
+
+It shares its name with the small-shell lineage begun by Kenneth Almquist's
+`ash` (1989), which lives on as Debian's `dash` and BusyBox's `sh` — shells
+that implement the standard and stop, which is this bundle's ambition too.
+
+- [Shell Command Language](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html) — POSIX.1-2017, the language being implemented
+- [Ash variants](https://www.in-ulm.de/~mascheck/various/ash/) — Sven Mascheck's history of the lineage
+- [dash](http://gondor.apana.org.au/~herbert/dash/) — the lineage's current mainline
 
 ## Licence
 
