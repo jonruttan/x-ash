@@ -37,7 +37,7 @@ jobs:
         # allowed to fail.  Keep the pinned row equal to lang.xon's
         # (requires-release ...) VERBATIM -- they are one fact, and the check
         # below fails the build if they drift.
-        x-lang: ['v0.8.1', 'main']
+        x-lang: ['v0.9.0', 'main']
 
     steps:
       - uses: actions/checkout@v4
