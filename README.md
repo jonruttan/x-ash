@@ -22,8 +22,12 @@ backslash escapes inside and outside them. Quoting applies to a *region* of a
 word rather than to the word, so `X="a b"`, `pre"mid"post`, `"$HOME"/bin` and
 `'a'"$b"` are each one word.
 
-Expansion: `$NAME`, `${NAME}`, `$?`, `$$` — anywhere in a word, not only at the
-start of one. An unset name expands to nothing.
+Expansion: `$NAME`, `${NAME}`, `$?`, `$$`, `$#`, `$@`, `$*` and `$1`…`$9`
+(`${10}` and up for the rest) — anywhere in a word, not only at the start of
+one. An unset name expands to nothing.
+
+Command substitution: `$(...)` and the older `` `...` ``, nested, and inside
+double quotes. Trailing newlines come off, as POSIX asks.
 
 Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
 `until`, `for`, `case`, `!` negation, and `( ... )` subshells.
@@ -31,25 +35,33 @@ Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
 `case` patterns are real globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\`
 to escape any of them.
 
+Functions: `name() { ... }`, with `$1`…, `$#` and `$@` scoped to the call and
+restored afterwards, `return [n]` for an early exit, and `shift [n]`. A
+function shadows an external of the same name and is shadowed by a builtin.
+
 Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
 does not leave the shell writing to `log`.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
-`[`, `.` / `source`, `exit`, `true`, `false`, `:`.
+`[`, `.` / `source`, `return`, `shift`, `exit`, `true`, `false`, `:`.
 
 `test` knows `-n`, `-z`, `!`, `=`, `!=`, the file predicates `-e` `-f` `-d`
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-**Not there yet**, and worth knowing before you reach for them: functions
-(`name() { ... }`), command substitution (`$(...)` and backticks), arithmetic
+**Not there yet**, and worth knowing before you reach for them: arithmetic
 expansion `$((...))`, *pathname* globbing (expanding `*.txt` against a
-directory -- `case` patterns are matched, but a bare `*` on a command line is
-passed through as itself), here-documents,
-positional parameters (`$1`, `$@`, `shift`), `set` and its options, `trap`,
-and job control. Words are not field-split after expansion, so `X="a b"; cmd
-$X` passes one argument rather than two.
+directory — `case` patterns are matched, but a bare `*` on a command line is
+passed through as itself), here-documents, `{ ...; }` grouping, `set` and its
+options, `trap`, `local`, `command`, and job control.
+
+**The one to know about is field splitting.** A word is not split on
+whitespace after it expands, so `X="a b"; cmd $X` passes *one* argument rather
+than two, and `for f in $(cat list)` iterates *once* over the whole file
+rather than once per line. Quote-then-split is the shell behaviour most
+scripts lean on without noticing; until it lands, write loops over a fixed
+word list, or drive the per-line work through a pipeline.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
 has no flush primitive, so a child's buffered output can be lost if the parent
@@ -71,7 +83,7 @@ The terms are in x-lang's
 
 ## Status
 
-**159 of 159 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**207 of 207 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —

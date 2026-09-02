@@ -47,7 +47,8 @@
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
-  sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd)
+  sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd
+  sh-read-all-fd)
 
 ; --- The tokenizer base ------------------------------------------------------
 ; (Base make-tok) is the isolated, type-free tokenizer base -- the exact
@@ -267,3 +268,22 @@
                 (bytes->str (List reverse acc))
                 (self (pair (integer->char c) acc))))))))
     (go ())))
+
+; --- Everything a descriptor has to give, to EOF -------------------------
+; What command substitution reads back from its child.  Chunks are collected
+; reversed and joined once: appending each 4K read onto a growing accumulator
+; would copy the whole of it every time, which is quadratic in the output of
+; a `$(cat big-file)`.
+(def %sh-join-chunks
+  (fn (self chunks acc)
+    (if (null? chunks)
+      acc
+      (self (rest chunks) (List append (first chunks) acc)))))
+
+(def sh-read-all-fd
+  (fn (_ fd)
+    (def go
+      (fn (self chunks)
+        (let ((b (Sys fd-read fd 4096)))
+          (if (null? b) chunks (self (pair b chunks))))))
+    (bytes->str (%sh-join-chunks (go ()) ()))))

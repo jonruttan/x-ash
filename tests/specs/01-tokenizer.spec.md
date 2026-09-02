@@ -398,3 +398,37 @@
 ```
 ---
     ((tok-word "2x") (tok-word "50"))
+
+## a hash only starts a comment where a word could start
+
+### a mid-word hash is part of the word
+
+```sh
+(write (sh-tokenize "a#b"))
+```
+---
+    ((tok-word "a#b"))
+
+### $# survives, rather than commenting out the line
+
+```sh
+(write (sh-tokenize "echo $# rest"))
+```
+---
+    ((tok-word "echo") (tok-word "$#") (tok-word "rest"))
+
+### a hash after a space still comments
+
+```sh
+(write (sh-tokenize "echo a # note"))
+```
+---
+    ((tok-word "echo") (tok-word "a"))
+
+### a backtick run is one word, spaces and all
+
+```sh
+(write (sh-tokenize "echo `echo old`"))
+```
+---
+    ((tok-word "echo") (tok-word "`echo old`"))

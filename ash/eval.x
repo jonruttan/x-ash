@@ -110,6 +110,38 @@
       (string=? word "!")
       (string=? word "{")
       (string=? word "}"))))
+; The reserved words that CLOSE a construct.  %reserved-word? is the full
+; fifteen and is right for asking "could this word be syntax"; this is the
+; subset that may terminate a command already in progress.  `if`, `while`,
+; `for`, `case`, `in`, `!` and `{` are all OPENERS -- no compound parser looks
+; for one as a terminator, so treating them as arguments costs nothing and is
+; what a shell does.
+; HOW DEEP INSIDE A COMPOUND THE PARSER IS.  `done` only closes something when
+; there is something open: at the top level it is an ordinary word, and
+; treating it as a terminator did real damage --
+;
+;   echo done      printed a blank line, AND
+;   echo end       (and everything after it) never ran
+;
+; -- because the abandoned `done` then satisfied %at-stop-word?, which ended
+; the enclosing %eval-list and silently discarded the rest of the script.
+; Bumped for the whole of any compound (see %eval-compound), so the closers
+; keep their power exactly where a construct is waiting for them.
+(def %sh-compound-depth 0)
+
+(def %closing-word?
+  (fn (_ word)
+    (if (= %sh-compound-depth 0)
+      ()
+    (or (string=? word "then")
+        (or (string=? word "elif")
+            (or (string=? word "else")
+                (or (string=? word "fi")
+                    (or (string=? word "do")
+                        (or (string=? word "done")
+                            (or (string=? word "esac")
+                                (string=? word "}")))))))))))
+
 ; --- Stop-word helper ---
 
 (def %at-stop-word?
@@ -119,6 +151,11 @@
       (let ((tok (%cursor-peek cur)))
         (if (eq? (first tok) (lit tok-word))
           (let ((w (first (rest tok))))
+            ; Gated on the depth, like %closing-word? -- the OP branch below
+            ; is not: `)` and `;;` are punctuation, never words a script means
+            ; literally.
+            (if (= %sh-compound-depth 0)
+              ()
             (or
               (string=? w "then")
               (string=? w "elif")
@@ -127,7 +164,7 @@
               (string=? w "do")
               (string=? w "done")
               (string=? w "esac")
-              (string=? w "}")))
+              (string=? w "}"))))
           (if (eq? (first tok) (lit tok-op))
             (or
               (string=? (first (rest tok)) ")")
@@ -183,13 +220,48 @@
   (fn (_ c)
     (or (%sh-name-start? c) (and (>= c 48) (<= c 57)))))
 
+; --- Positional parameters and the function table ---------------------------
+;
+; %sh-args holds $1 upward, as a plain list of strings.  It is SAVED AND
+; RESTORED around a function call rather than being a stack: a shell function's
+; parameters are dynamically scoped to the call, which is exactly what
+; save/restore expresses, and nothing here is re-entrant in a way a list of
+; frames would help with.
+(def %sh-args ())
+(def %sh-functions ())
+(def %sh-fn-depth 0)
+(def %sh-return-status 0)
+
+(def %sh-join-args
+  (fn (self args)
+    (if (null? args)
+      ""
+      (if (null? (rest args))
+        (first args)
+        (string-append (first args)
+          (string-append " " (self (rest args))))))))
+
+; $0 is the shell itself; $1 upward index into %sh-args.  Out of range is the
+; empty string, which is POSIX and is what `test -z "$1"` relies on.
+(def %sh-arg-at
+  (fn (_ n)
+    (if (= n 0)
+      "ash"
+      (if (> n (length %sh-args))
+        ""
+        (nth (- n 1) %sh-args)))))
+
 (def %sh-var-value
   (fn (_ name)
-    (if (string=? name "?")
-      (convert %sh-status %string)
-      (if (string=? name "$")
-        (convert %sh-pid %string)
-        (let ((val (sh-getenv name))) (if (null? val) "" val))))))
+    (match
+      ((string=? name "?") (convert %sh-status %string))
+      ((string=? name "$") (convert %sh-pid %string))
+      ((string=? name "#") (convert (length %sh-args) %string))
+      ; $@ and $* differ only under field splitting, which ash does not do --
+      ; so they are the same string here, and the README says so.
+      ((or (string=? name "@") (string=? name "*")) (%sh-join-args %sh-args))
+      ((%all-digits? name) (%sh-arg-at (convert name %int)))
+      (#t (let ((val (sh-getenv name))) (if (null? val) "" val))))))
 
 ; The end of the name run starting at I.
 (def %sh-name-end
@@ -240,6 +312,95 @@
 ;
 ; The quote characters that switch mode are NOT emitted, which is what removes
 ; them from the final argument.
+; --- Command substitution ----------------------------------------------------
+;
+; `$(...)` and the older backtick form.  Both run the text as a shell script in
+; a CHILD whose stdout is a pipe, and both answer what it printed with trailing
+; newlines removed -- which is the whole of what POSIX asks for, and the reason
+; `X=$(pwd)` is the single most-reached-for thing a shell does that ash could
+; not express at all.
+;
+; THE STATUS IS NOT PROPAGATED, and that is a deliberate limit rather than an
+; oversight: expansion happens while the command's words are being COLLECTED,
+; and %sh-run-cmd overwrites %sh-status with the command's own status
+; afterwards.  So `echo $(false)` correctly reports echo's 0, and
+; `X=$(false); echo $?` reports 0 where a POSIX shell says 1.  Recording it
+; here would be recording a value that is about to be overwritten.
+
+; The index of the `)` closing a substitution opened before I, or -1.  Quoted
+; regions hide their parens, matching the tokenizer's own scan.
+(def %sh-skip-quoted
+  (fn (self s i n q)
+    (if (>= i n)
+      i
+      (let ((c (convert (string-ref s i) %int)))
+        (if (and (= q 34) (= c 92))
+          (self s (+ i 2) n q)
+          (if (= c q) (+ i 1) (self s (+ i 1) n q)))))))
+
+(def %sh-cs-end
+  (fn (self s i n depth)
+    (if (>= i n)
+      (- 0 1)
+      (let ((c (convert (string-ref s i) %int)))
+        (match
+          ((= c 40) (self s (+ i 1) n (+ depth 1)))                  ; (
+          ((= c 41) (if (= depth 0) i (self s (+ i 1) n (- depth 1)))); )
+          ((= c 39) (self s (%sh-skip-quoted s (+ i 1) n 39) n depth))
+          ((= c 34) (self s (%sh-skip-quoted s (+ i 1) n 34) n depth))
+          (#t (self s (+ i 1) n depth)))))))
+
+; The index of the closing backtick, or -1.  A backslash escapes one character.
+(def %sh-bt-end
+  (fn (self s i n)
+    (if (>= i n)
+      (- 0 1)
+      (let ((c (convert (string-ref s i) %int)))
+        (if (= c 92)
+          (self s (+ i 2) n)
+          (if (= c 96) i (self s (+ i 1) n)))))))
+
+; Trailing newlines come off, and only trailing ones -- `$(printf 'a\n\nb\n')`
+; keeps the blank line in the middle.
+(def %sh-rstrip-newlines
+  (fn (_ out)
+    (def back
+      (fn (self e)
+        (if (= e 0)
+          0
+          (if (= (convert (string-ref out (- e 1)) %int) 10)
+            (self (- e 1))
+            e))))
+    (let ((e (back (string-length out))))
+      (if (= e (string-length out)) out (substring out 0 e)))))
+
+(def %sh-cmd-subst
+  (fn (_ src)
+    (let ((p (%sh-pipe-create)))
+      (let ((read-fd (first p)) (write-fd (rest p)))
+        (let ((pid (sh-fork)))
+          (if (= pid 0)
+            (do
+              (sh-close read-fd)
+              (sh-dup2 write-fd 1)
+              (sh-close write-fd)
+              ; The substituted text is its own script, so it starts at the
+              ; top level however deep the expansion was reached from.
+              (set! %sh-compound-depth 0)
+              ; A failing substitution answers what it managed to print, the
+              ; way a shell does -- the error has already gone to stderr.
+              (guard (e ()) (sh-eval src))
+              (sh-exit %sh-status))
+            ; READ BEFORE WAIT.  A child whose output exceeds the pipe buffer
+            ; blocks in write() until someone drains it, so waiting first would
+            ; deadlock on any substitution bigger than a pipe.
+            (do
+              (sh-close write-fd)
+              (let ((out (sh-read-all-fd read-fd)))
+                (sh-close read-fd)
+                (sh-wait pid)
+                (%sh-rstrip-newlines out)))))))))
+
 (def %sh-expand-str
   (fn (_ s mode0)
     (let ((n (string-length s)))
@@ -268,6 +429,17 @@
                       ; Not escapable in this context: both characters stand.
                       (self (+ i 2) mode
                         (string-append acc (substring s i (+ i 2)))))))
+                ; --- the older backtick substitution.  A backtick is not a
+                ;     word-break character, so `pwd` already arrives inside the
+                ;     word and only needs interpreting here.
+                ((= c 96)
+                  (let ((e (%sh-bt-end s (+ i 1) n)))
+                    (if (< e 0)
+                      (self (+ i 1) mode
+                        (string-append acc (substring s i (+ i 1))))
+                      (self (+ e 1) mode
+                        (string-append acc
+                          (%sh-cmd-subst (substring s (+ i 1) e)))))))
                 ; --- expansion
                 ((= c %sh-dollar) (%sh-expand-dollar self s i n mode acc))
                 (#t
@@ -284,6 +456,15 @@
       (string-append acc "$")
       (let ((d (convert (string-ref s (+ i 1)) %int)))
         (match
+          ; $( ... ) -- a command substitution.
+          ((= d 40)
+            (let ((e (%sh-cs-end s (+ i 2) n 0)))
+              (if (< e 0)
+                ; No closing paren: literal, the way an unclosed brace is.
+                (cont (+ i 1) mode (string-append acc "$"))
+                (cont (+ e 1) mode
+                  (string-append acc
+                    (%sh-cmd-subst (substring s (+ i 2) e)))))))
           ((= d %sh-lbrace)
             (let ((e (%sh-brace-end s (+ i 2) n)))
               (if (< e 0)
@@ -292,7 +473,18 @@
                 (cont (+ i 1) mode (string-append acc "$"))
                 (cont (+ e 1) mode
                   (string-append acc (%sh-var-value (substring s (+ i 2) e)))))))
-          ((or (= d 63) (= d %sh-dollar))          ; $? and $$
+          ; The one-character specials: $? $$ $# $@ $* and $1..$9.
+          ;
+          ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
+          ; $1 followed by a literal 0, and ${10} is how the tenth is spelled.
+          ; The brace arm above reaches %sh-var-value with the whole number, so
+          ; both spellings land in the same place.
+          ((or (= d 63)                            ; ?
+            (or (= d %sh-dollar)                   ; $
+             (or (= d 35)                          ; #
+              (or (= d 64)                         ; @
+               (or (= d 42)                        ; *
+                (and (>= d 48) (<= d 57)))))))     ; 0-9
             (cont (+ i 2) mode
               (string-append acc
                 (%sh-var-value (substring s (+ i 1) (+ i 2))))))
@@ -464,8 +656,10 @@
       (or (string=? name "pwd")
       (or (string=? name "unset")
       (or (string=? name "read")
+      (or (string=? name "return")
+      (or (string=? name "shift")
       (or (string=? name ".")
-          (string=? name "source"))))))))))))))))
+          (string=? name "source"))))))))))))))))))
 
 ; `-n` suppresses the trailing newline.  Only the FIRST argument is read as
 ; the flag, and only when it is exactly "-n": `echo -n -n` prints "-n", which
@@ -655,6 +849,27 @@
           0
           (%sh-read-assign wds line 0 (string-length line)))))))
 
+(def %sh-return
+  (fn (_ wds)
+    (let ((n (if (null? wds) %sh-status (convert (first wds) %int))))
+      (if (= %sh-fn-depth 0)
+        ; Outside a function POSIX leaves this unspecified; report and carry
+        ; on rather than unwinding to somewhere there is no frame for.
+        (do (%stderr "ash: return: can only `return' from a function\n") 1)
+        (do (set! %sh-return-status n) (error (lit %sh-return)))))))
+
+; `shift [n]` drops the first n positional parameters (default 1).  Shifting
+; more than there are is an error and leaves them alone, which is what
+; `while shift; do` relies on to terminate.
+(def %sh-shift
+  (fn (_ wds)
+    (let ((n (if (null? wds) 1 (convert (first wds) %int))))
+      (if (< n 0)
+        1
+        (if (> n (length %sh-args))
+          1
+          (do (set! %sh-args (drop n %sh-args)) 0))))))
+
 ; `.` / `source` FILE -- read the file and run it in THIS shell, so its
 ; assignments and cd survive.  The status is the last command's.
 (def %sh-source
@@ -694,6 +909,8 @@
       ((string=? name "pwd")    (%sh-pwd wds))
       ((string=? name "unset")  (%sh-unset wds))
       ((string=? name "read")   (%sh-read wds))
+      ((string=? name "return") (%sh-return wds))
+      ((string=? name "shift")  (%sh-shift wds))
       ((or (string=? name ".") (string=? name "source")) (%sh-source wds))
       (#t 1))))
 
@@ -763,13 +980,41 @@
         (if (null? remaining)
           (do (set! %sh-status 0) 0)
           (let ((name (first remaining)) (cmd-wds (rest remaining)))
-            (if (%sh-builtin? name)
-              (let ((status (%sh-run-builtin-redir name cmd-wds redirs)))
-                (set! %sh-status status)
-                status)
-              (let ((status (%sh-run-external name cmd-wds redirs)))
-                (set! %sh-status status)
-                status))))))))
+            ; A FUNCTION WINS OVER AN EXTERNAL AND LOSES TO A BUILTIN, which is
+            ; the POSIX order and is what lets a script define `ls()` that ends
+            ; in `command ls` without recursing forever -- if ash had `command`
+            ; yet.  It does not, so a function shadowing an external is the
+            ; shape to be careful with.
+            (let ((body (%sh-fn-lookup name %sh-functions)))
+              (if (%sh-builtin? name)
+                (let ((status (%sh-run-builtin-redir name cmd-wds redirs)))
+                  (set! %sh-status status)
+                  status)
+                (if (not (null? body))
+                  ; Redirections on a function call apply for the whole body,
+                  ; and the shell's own descriptors must survive it -- the same
+                  ; save/apply/restore a builtin gets.
+                  (let ((status (%sh-run-fn-redir body cmd-wds redirs)))
+                    (set! %sh-status status)
+                    status)
+                  (let ((status (%sh-run-external name cmd-wds redirs)))
+                    (set! %sh-status status)
+                    status))))))))))
+
+; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
+; guard, same reason: a body that raises with fd 1 pointing at a file would
+; leave the SHELL writing there.
+(def %sh-run-fn-redir
+  (fn (_ body wds redirs)
+    (if (null? redirs)
+      (%sh-call-fn body wds)
+      (do
+        (%sh-save-fds redirs)
+        (guard (e (do (%sh-restore-fds redirs) (error e)))
+          (%sh-setup-redirs redirs)
+          (let ((status (%sh-call-fn body wds)))
+            (%sh-restore-fds redirs)
+            status))))))
 ; Save C pipe primitive before we shadow it
 
 (def %sh-pipe-create sh-pipe)
@@ -843,10 +1088,28 @@
                         (pair (list (lit sh-redir) rop fd target) redirs))))))
               (if (%tok-is-word? tok)
                 (let ((val (%tok-word-val tok)))
+                  ; A RESERVED WORD IN ARGUMENT POSITION IS AN ARGUMENT.  This
+                  ; used to end the command at ANY of the fifteen, so
+                  ;
+                  ;   echo done      printed a blank line
+                  ;   echo if        printed a blank line
+                  ;
+                  ; -- the word was dropped and `echo` ran with none.  POSIX
+                  ; recognises a reserved word only as the FIRST word of a
+                  ; command, and that position is already handled before this
+                  ; loop by %is-compound-start?.
+                  ;
+                  ; Only the STOP words keep their power here, and only those
+                  ; that close a construct: a body written without its `;`
+                  ; (`do echo x done`) still ends at `done` rather than
+                  ; swallowing it.  bash errors on that input; ending the
+                  ; command is the friendlier of two answers to a script that
+                  ; is wrong either way, and it is what the compound parsers
+                  ; below already assume.
                   (if (and
                         (not (null? wds))
                         (eq? (first tok) (lit tok-word))
-                        (%reserved-word? val))
+                        (%closing-word? val))
                     (%sh-run-cmd (reverse wds) (reverse redirs))
                     (do
                       (%cursor-advance! cur)
@@ -909,9 +1172,20 @@
                     (string=? w "done")
                     (string=? w "esac"))
                 (if (= depth 0)
-                  ; fi at our level: consume and stop
+                  ; STOP WITHOUT CONSUMING.  This used to swallow the `fi`, and
+                  ; %eval-elif-chain -- which runs next and whose whole job is
+                  ; to look at the word here -- then found the token AFTER it
+                  ; and reported "expected elif, else, or fi".  So
+                  ;
+                  ;   if false; then echo yes; fi
+                  ;
+                  ; has never worked: an else-less if whose condition is false
+                  ; is a parse error, on every version of this bundle.  With an
+                  ; `else` it was fine, because the else arm below already
+                  ; stopped without consuming -- which is the rule, and this is
+                  ; the one exit that broke it.
 
-                  (do (%cursor-advance! cur) ())
+                  ()
                   (do
                     (%cursor-advance! cur)
                     (%skip-body-to-elif-else-fi cur (- depth 1))))
@@ -1454,7 +1728,21 @@
           (%skip-to-close-paren cur depth))))))
 ; --- Compound command dispatch ---
 
+; THE DEPTH IS BUMPED HERE, around the whole compound, rather than in each of
+; the five parsers: they have many return points apiece and a skip path each,
+; and a counter that has to be decremented on all of them would be wrong within
+; a week.  One place, with the guard/re-raise shape used for the descriptor
+; saves, cannot drift.
 (def %eval-compound
+  (fn (_ cur)
+    (set! %sh-compound-depth (+ %sh-compound-depth 1))
+    (guard (e
+        (do (set! %sh-compound-depth (- %sh-compound-depth 1)) (error e)))
+      (let ((r (%eval-compound-body cur)))
+        (set! %sh-compound-depth (- %sh-compound-depth 1))
+        r))))
+
+(def %eval-compound-body
   (fn (_ cur)
     (let ((tok (%cursor-peek cur)))
       (if (eq? (first tok) (lit tok-op))
@@ -1537,6 +1825,127 @@
 ; --- Recursive descent evaluator ---
 ; command: compound or simple
 
+; --- Function definitions ----------------------------------------------------
+;
+;   name() { body; }
+;
+; A definition is the one command shape that cannot be recognised from its
+; FIRST token: `name` is an ordinary word, and only the `()` after it says what
+; this is.  So %eval-command looks three tokens ahead, before the
+; compound-vs-simple split -- a reserved word is excluded, because `if()` is
+; not a function definition, it is a syntax error somewhere else.
+;
+; The body is stored as TOKENS, not text.  They have already been through the
+; tokenizer once and re-tokenizing on every call would be both slower and a
+; second chance to disagree with the first parse.
+(def %is-fn-def?
+  (fn (_ cur)
+    (let ((toks (first cur)))
+      (if (null? toks)
+        ()
+        (if (null? (rest toks))
+          ()
+          (if (null? (rest (rest toks)))
+            ()
+            (let ((a (first toks))
+                  (b (first (rest toks)))
+                  (c (first (rest (rest toks)))))
+              (if (not (%tok-is-keyword? a))
+                ()
+                (if (%reserved-word? (%tok-word-val a))
+                  ()
+                  (if (%tok-is-op? b "(")
+                    (%tok-is-op? c ")")
+                    ()))))))))))
+
+(def %collect-fn-body
+  (fn (self cur depth toks)
+    (if (%cursor-empty? cur)
+      (error "parse error: unexpected EOF in function body")
+      (let ((tok (%cursor-peek cur)))
+        (%cursor-advance! cur)
+        (if (%tok-is-keyword? tok)
+          (let ((w (%tok-word-val tok)))
+            (if (string=? w "{")
+              (self cur (+ depth 1) (pair tok toks))
+              (if (string=? w "}")
+                (if (= depth 0)
+                  (reverse toks)
+                  (self cur (- depth 1) (pair tok toks)))
+                (self cur depth (pair tok toks)))))
+          (self cur depth (pair tok toks)))))))
+
+(def %eval-fn-def
+  (fn (_ cur)
+    (let ((name (%tok-word-val (%cursor-peek cur))))
+      (%cursor-advance! cur)
+      ; consume name
+
+      (%cursor-advance! cur)
+      ; consume (
+
+      (%cursor-advance! cur)
+      ; consume )
+
+      (%skip-newlines cur)
+      (if (%cursor-empty? cur)
+        (error (string-append "parse error: no body for function " name))
+        (let ((tok (%cursor-peek cur)))
+          (if (not (if (%tok-is-keyword? tok)
+                     (string=? (%tok-word-val tok) "{")
+                     ()))
+            (error (string-append "parse error: expected { after " name "()"))
+            (do
+              (%cursor-advance! cur)
+              ; consume {
+
+              (%skip-newlines cur)
+              (let ((body (%collect-fn-body cur 0 ())))
+                ; A redefinition SHADOWS rather than replaces -- the lookup
+                ; walks from the front, so the newest wins and the list stays
+                ; append-free.
+                (set! %sh-functions (pair (pair name body) %sh-functions))
+                (set! %sh-status 0)
+                0))))))))
+
+(def %sh-fn-lookup
+  (fn (self name fns)
+    (if (null? fns)
+      ()
+      (if (string=? (first (first fns)) name)
+        (rest (first fns))
+        (self name (rest fns))))))
+
+; `return` unwinds to the call site, which needs a non-local exit -- so it
+; raises a sentinel symbol and %sh-call-fn catches exactly that one, the shape
+; lib/x/type/err.x documents ("re-raise what we don't handle").  atom? guards
+; the symbol->str: reading a structured Err's memory as a symbol name is how
+; the REPL used to print garbage bytes.
+(def %sh-return?
+  (fn (_ e) (if (atom? e) (str=? (symbol->str e) "%sh-return") ())))
+
+(def %sh-call-fn
+  (fn (_ body args)
+    (let ((saved %sh-args) (saved-depth %sh-compound-depth))
+      (set! %sh-args args)
+      (set! %sh-fn-depth (+ %sh-fn-depth 1))
+      ; A BODY IS A FRESH TOP LEVEL.  %collect-fn-body already took the closing
+      ; `}` off, so nothing in these tokens closes anything outside them -- and
+      ; a function called from inside an `if` would otherwise inherit that
+      ; depth and read a bare `echo done` in its body as a terminator.
+      (set! %sh-compound-depth 0)
+      (guard (e
+          (do
+            (set! %sh-args saved)
+            (set! %sh-compound-depth saved-depth)
+            (set! %sh-fn-depth (- %sh-fn-depth 1))
+            (if (%sh-return? e) %sh-return-status (error e))))
+        (unless (null? body) (%eval-list (%mk-cursor body)))
+        (set! %sh-args saved)
+        (set! %sh-compound-depth saved-depth)
+        (set! %sh-fn-depth (- %sh-fn-depth 1))
+        %sh-status))))
+
 (set! %eval-command
   (fn (_ cur)
     (if (%is-compound-start? cur)
@@ -1556,6 +1965,13 @@
               (%tok-is-newline? tok)
               (%tok-is-op? tok "|")
               (%tok-is-op? tok ";")
+              ; `;;` ENDS A COMMAND, and it was missing here.  It is a distinct
+              ; token from `;`, so the test above does not catch it, and a
+              ; stage therefore swallowed the clause terminator and everything
+              ; after it -- which is why a `case` whose FIRST clause matched
+              ; ran the remaining clauses' patterns as commands the moment a
+              ; newline followed the `;;`.
+              (%tok-is-op? tok ";;")
               (%tok-is-op? tok "&")
               (%tok-is-op? tok "&&")
               (%tok-is-op? tok "||"))
@@ -1596,13 +2012,22 @@
       ; that %collect-stage would incorrectly split on. Handle directly.
 
       (let ((result
+              ; A DEFINITION IS RECOGNISED HERE, beside the compounds, and for
+              ; the same reason they are: %collect-stages below cuts the token
+              ; run at the first `;` or newline, so a cursor that has been
+              ; through it can never see a function BODY.  Hooked into
+              ; %eval-command instead, `f() { echo hi; }` reached
+              ; %collect-fn-body with only `f ( ) {` in hand and died with
+              ; "unexpected EOF in function body".
+              (if (%is-fn-def? cur)
+                (%eval-fn-def cur)
               (if (%is-compound-start? cur)
                 (%eval-compound cur)
                 (let ((stages (%collect-stages cur ())))
                   (if (null? (rest stages))
                     (let ((cur (%mk-cursor (first stages))))
                       (%eval-command cur))
-                    (%sh-run-pipeline stages))))))
+                    (%sh-run-pipeline stages)))))))
         (if negate
           (let ((neg-result (if (= result 0) 1 0)))
             (set! %sh-status neg-result)
