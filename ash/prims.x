@@ -54,15 +54,21 @@
 ; successor to 2024's make-token-base, and the reason ash's `;` can be a
 ; separator rather than a comment.
 ;
-; IT SEGFAULTS ON THE FIRST CHARACTER OF ANY INPUT (x-lang#528).  This bundle
-; does not work today, and that is recorded rather than dodged: the alternative
-; is (Base make), which arrives with the built-in sexp types already registered
-; so shell tokens compete with them by score -- `a b` tokenizes as a bare
+; IT USED TO SEGFAULT ON THE FIRST CHARACTER OF ANY INPUT (x-lang#528), and
+; this comment described a bundle that was dead at load for that reason.  It is
+; not: x-lang v0.7.1 was the first release pinning an x-engine-c where an
+; isolated tokenizer base works, and the pairing row in lang.xon has been past
+; that for several releases.  The note is kept in the past tense because the
+; alternative it argued against is still the wrong answer, and the argument is
+; the useful part:
+;
+; (Base make) would arrive with the built-in sexp types already registered, so
+; shell tokens would compete with them by score -- `a b` tokenizes as a bare
 ; symbol followed by a word, `a|b` as one word, and ash's own INTEGER type
 ; collides with the platform's.  A shell that reports the wrong tokens is not a
 ; shell, and a green suite bought that way would be a lie about the port.
 ;
-; So the faithful call stays, and the bundle is blocked.
+; So the faithful call stays, and it works.
 (def make-token-base (fn (_) (Base make-tok)))
 
 ; (Base make-type TARGET NAME HANDLERS) -- cross-base registration, which is
