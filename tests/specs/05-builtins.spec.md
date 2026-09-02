@@ -434,3 +434,57 @@ parser SKIPS put the nesting count out by one. The first case below was
 ```
 ---
     B:after
+
+## sh-eval the [ spelling of test
+
+`[` has called an undefined `last` since 2024 — every `[ ... ]` answered
+"Unbound SYMBOL 'last'". No spec reached it: the suite tested `test` and never
+the bracket spelling of the same builtin.
+
+### [ compares strings
+
+```sh
+(sh-eval "[ x = x ]")
+```
+---
+    0
+
+### and reports inequality
+
+```sh
+(sh-eval "[ x = y ]")
+```
+---
+    1
+
+### [ takes the file predicates
+
+```sh
+(sh-eval "[ -d / ]")
+```
+---
+    0
+
+### [ takes the numeric comparisons
+
+```sh
+(sh-eval "[ 3 -lt 5 ]")
+```
+---
+    0
+
+### [ works without its closing bracket
+
+```sh
+(sh-eval "[ x = x")
+```
+---
+    0
+
+### [ in a conditional
+
+```sh
+(do (sh-eval "if [ a = a ]; then echo yes; fi") ())
+```
+---
+    yes

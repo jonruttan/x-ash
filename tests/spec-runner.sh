@@ -68,4 +68,23 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 # pinned release) ignores the export.
 export SPEC_SEAM_COLLECT=0
 
+# NO SPEC_BATCH OVERRIDE, and the reason is worth keeping.
+#
+# The platform runner buckets up to SPEC_BATCH same-@lib files into ONE
+# interpreter process, and with the seam collect off (above) that process
+# accumulates every file's garbage until it exits -- so the alloc-limit guard
+# bounds a batch SUM here, not a peak.  Adding pathname expansion pushed the
+# suite over it: "allocation limit exceeded", 11 of 263 specs dead.
+#
+# Lowering the batch to 4 made it green, and that was the wrong fix -- it
+# lowers the peak by running more processes instead of allocating less.  The
+# cause was ash/eval.x building every expanded word one character at a time
+# with substring and string-append, which is quadratic in the word length and
+# allocates twice per character.  The accumulator now collects pieces and joins
+# once, and the walk appends whole runs; the suite passes at the platform
+# default of 8 with room to spare.
+#
+# So: if this suite ever dies with "allocation limit exceeded" again, SPEC_BATCH
+# is the lever that will mask it, and the expander is where to look first.
+
 . "$X_ROOT/tests/spec-runner.sh"

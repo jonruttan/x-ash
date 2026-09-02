@@ -46,6 +46,13 @@ Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
 `case` patterns are real globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\`
 to escape any of them.
 
+Pathname expansion: an unquoted `*`, `?` or `[...]` in a word is matched
+against the filesystem, and the word becomes the sorted list of what it
+matched — `*.txt`, `sub/*/x`, `/dev/nul?`, and `*/` for directories only. A
+pattern that matches nothing stands as written, which is POSIX's default. A
+leading dot is matched only by a pattern that starts with one, and quoting
+suppresses the whole thing: `"*"`, `'*'` and `\*` are all a literal star.
+
 Functions: `name() { ... }`, with `$1`…, `$#` and `$@` scoped to the call and
 restored afterwards, `return [n]` for an early exit, and `shift [n]`. A
 function shadows an external of the same name and is shadowed by a builtin.
@@ -62,12 +69,9 @@ Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
 unknown operator is a usage error (status 2), not a silent false.
 
 **Not there yet**, and worth knowing before you reach for them: arithmetic
-expansion `$((...))`, *pathname* globbing (expanding `*.txt` against a
-directory — `case` patterns and the `${X#p}` family are matched, but a bare
-`*` on a command line is passed through as itself), here-documents,
-`{ ...; }` grouping, `set` and its options (so `IFS` is the default
-space/tab/newline and cannot be changed), `trap`, `local`, `command`, and job
-control.
+expansion `$((...))`, here-documents, `{ ...; }` grouping, `set` and its
+options (so `IFS` is the default space/tab/newline and cannot be changed),
+`trap`, `local`, `command`, and job control.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
 has no flush primitive, so a child's buffered output can be lost if the parent
@@ -90,7 +94,7 @@ The terms are in x-lang's
 
 ## Status
 
-**263 of 263 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**293 of 293 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
