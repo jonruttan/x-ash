@@ -29,6 +29,12 @@ one. An unset name expands to nothing.
 Command substitution: `$(...)` and the older `` `...` ``, nested, and inside
 double quotes. Trailing newlines come off, as POSIX asks.
 
+Parameter expansion: `${X:-default}`, `${X:=assign}`, `${X:?message}`,
+`${X:+alternative}` and their colonless forms (which treat a null value as
+set), `${#X}` for length, and `${X#p}` / `${X##p}` / `${X%p}` / `${X%%p}` to
+remove a matching prefix or suffix — so `${P##*/}` and `${P%/*}` are basename
+and dirname.
+
 Field splitting: an unquoted expansion splits on whitespace and a quoted one
 does not, so `X="a b"; cmd $X` passes two arguments and `cmd "$X"` one. An
 unquoted expansion of nothing produces *no* argument; `""` produces an empty
@@ -57,10 +63,10 @@ unknown operator is a usage error (status 2), not a silent false.
 
 **Not there yet**, and worth knowing before you reach for them: arithmetic
 expansion `$((...))`, *pathname* globbing (expanding `*.txt` against a
-directory — `case` patterns are matched, but a bare `*` on a command line is
-passed through as itself), here-documents, `{ ...; }` grouping, `set` and its
-options (so `IFS` is the default space/tab/newline and cannot be changed),
-`trap`, `local`, `command`, `${var:-default}` and its family, and job
+directory — `case` patterns and the `${X#p}` family are matched, but a bare
+`*` on a command line is passed through as itself), here-documents,
+`{ ...; }` grouping, `set` and its options (so `IFS` is the default
+space/tab/newline and cannot be changed), `trap`, `local`, `command`, and job
 control.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
@@ -84,7 +90,7 @@ The terms are in x-lang's
 
 ## Status
 
-**228 of 228 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**263 of 263 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
