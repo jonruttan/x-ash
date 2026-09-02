@@ -1,5 +1,7 @@
 # x-ash — a POSIX shell on x-lang
 
+<p align="center"><img src="docs/bitwise-banner.svg" alt="x-ash, with Bitwise the owl" width="100%"></p>
+
 A shell on [x-lang](https://github.com/jonruttan/x-lang): its own tokenizer on its own base, word
 expansion, redirection, pipelines, and the control structures.
 
@@ -258,3 +260,5 @@ that implement the standard and stop, which is this bundle's ambition too.
 ## Licence
 
 MIT No Attribution (MIT-0). See [LICENSE](LICENSE).
+
+<p align="center"><img src="docs/bitwise-mark.svg" alt="Bitwise" width="96"></p>
