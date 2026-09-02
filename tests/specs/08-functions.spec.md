@@ -147,3 +147,37 @@
 ```
 ---
     []
+
+## sh-eval function bodies containing braces and compounds
+
+### a compound inside a body does not confuse the brace count
+
+```sh
+(do (sh-eval "f() { if true; then echo A; fi; }; f") ())
+```
+---
+    A
+
+### a case inside a body
+
+```sh
+(do (sh-eval "f() { case x in x) echo C ;; esac; }; f") ())
+```
+---
+    C
+
+### ${NAME} is not a body brace
+
+```sh
+(do (sh-eval "f() { X=v; echo ${X}; }; f") ())
+```
+---
+    v
+
+### a nested definition closes at its own brace
+
+```sh
+(do (sh-eval "f() { g() { echo inner; }; g; }; f") ())
+```
+---
+    inner

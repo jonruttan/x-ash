@@ -378,3 +378,59 @@ see, and every one of these was "parse error: expected elif, else, or fi".
 ```
 ---
     C
+
+## sh-eval skipping a branch that contains a compound
+
+The five skip walks each carried their own copy of the opener and closer word
+lists, and they had drifted: %skip-to-fi's openers were missing `until` and
+`case` and its closers were missing `esac`. So a compound inside a branch the
+parser SKIPS put the nesting count out by one. The first case below was
+"parse error: unexpected EOF in if" until the lists became one.
+
+### an until loop in a skipped else branch
+
+```sh
+(do (sh-eval "if true; then echo -n A; else until false; do echo B; done; fi; echo :after") ())
+```
+---
+    A:after
+
+### a case in a skipped else branch
+
+```sh
+(do (sh-eval "if true; then echo -n A; else case x in x) echo B ;; esac; fi; echo :after") ())
+```
+---
+    A:after
+
+### a while loop in a skipped else branch
+
+```sh
+(do (sh-eval "if true; then echo -n A; else while false; do echo B; done; fi; echo :after") ())
+```
+---
+    A:after
+
+### an until loop in a skipped then branch
+
+```sh
+(do (sh-eval "if false; then until false; do echo B; done; fi; echo after") ())
+```
+---
+    after
+
+### a nested if in a skipped else branch
+
+```sh
+(do (sh-eval "if true; then echo -n A; else if true; then echo B; fi; fi; echo :after") ())
+```
+---
+    A:after
+
+### a compound in a skipped case clause
+
+```sh
+(do (sh-eval "case b in a) until false; do echo X; done ;; b) echo -n B ;; esac; echo :after") ())
+```
+---
+    B:after

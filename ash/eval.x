@@ -125,6 +125,17 @@
 (def %sh-closing-words
   (list "then" "elif" "else" "fi" "do" "done" "esac" "}"))
 
+; The operators that end a command list the same way a closing word does.
+(def %sh-stop-ops (list ")" ";;"))
+
+; What NESTS, for the skip walks.  Every compound opens with one of these and
+; closes with one of those, and the five skippers each carried their own copy
+; of both lists -- three copies that had drifted: %skip-to-fi's openers were
+; missing `until` and `case` and its closers were missing `esac`, so an
+; `until` loop inside a skipped if-branch put the parser out by one.
+(def %sh-block-openers (list "if" "while" "until" "for" "case"))
+(def %sh-block-closers (list "fi" "done" "esac"))
+
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
 ; The reserved words that CLOSE a construct.  %reserved-word? is the full
@@ -159,27 +170,14 @@
     (if (%cursor-empty? cur)
       #t
       (let ((tok (%cursor-peek cur)))
-        (if (eq? (first tok) (lit tok-word))
-          (let ((w (first (rest tok))))
-            ; Gated on the depth, like %closing-word? -- the OP branch below
-            ; is not: `)` and `;;` are punctuation, never words a script means
-            ; literally.
-            (if (= %sh-compound-depth 0)
-              ()
-            (or
-              (string=? w "then")
-              (string=? w "elif")
-              (string=? w "else")
-              (string=? w "fi")
-              (string=? w "do")
-              (string=? w "done")
-              (string=? w "esac")
-              (string=? w "}"))))
-          (if (eq? (first tok) (lit tok-op))
-            (or
-              (string=? (first (rest tok)) ")")
-              (string=? (first (rest tok)) ";;"))
-            ()))))))
+        (cond
+          ; The word branch is gated on the compound depth (see
+          ; %closing-word?); the OP branch is not -- `)` and `;;` are
+          ; punctuation, never words a script means literally.
+          ((eq? (first tok) (lit tok-word)) (%closing-word? (first (rest tok))))
+          ((eq? (first tok) (lit tok-op))
+            (%sh-word-in? (first (rest tok)) %sh-stop-ops))
+          (else ()))))))
 
 (def %expect-word
   (fn (_ cur word)
@@ -1361,77 +1359,81 @@
           (%eval-elif-chain cur))))))
 ; Skip balanced tokens to elif/else/fi at depth 0
 
-(set! %skip-body-to-elif-else-fi
-  (fn (_ cur depth)
+; --- Skipping a balanced token run -------------------------------------------
+;
+; The five skippers below were five copies of one walk: advance through tokens
+; keeping a nesting count, stop at the first DEPTH-0 token the caller cares
+; about.  What differed was three lines each -- which token stops it, whether
+; that token is consumed, and whether running out of input is an error.  So
+; that is what they pass, and the walk is written once.
+;
+; The cursor is left ON the stopping token; consuming it is the caller's
+; business, because %skip-body-to-elif-else-fi must NOT (%eval-elif-chain runs
+; next and its whole job is to look at that word).
+;
+; Answers the token it stopped at, or nil if the input ran out.
+(def %sh-word-is?
+  (fn (_ tok w)
+    (and (%tok-is-keyword? tok) (string=? (%tok-word-val tok) w))))
+
+(def %sh-word-among?
+  (fn (_ tok words)
+    (and (%tok-is-keyword? tok) (%sh-word-in? (%tok-word-val tok) words))))
+
+; The nesting a token contributes.  Floored by the caller, so a stray closer in
+; malformed input cannot drive the count negative and swallow the rest.
+(def %sh-nest-delta
+  (fn (_ tok)
+    (cond
+      ((%sh-word-among? tok %sh-block-openers) 1)
+      ((%sh-word-among? tok %sh-block-closers) (- 0 1))
+      (else 0))))
+
+(def %sh-skip-block
+  (fn (self cur depth stop?)
     (if (%cursor-empty? cur)
-      (error "parse error: unexpected EOF in if")
+      ()
       (let ((tok (%cursor-peek cur)))
-        (if (%tok-is-keyword? tok)
-          (let ((w (%tok-word-val tok)))
-            (if (or
-                  (string=? w "if")
-                  (string=? w "while")
-                  (string=? w "until")
-                  (string=? w "for")
-                  (string=? w "case"))
-              (do
-                (%cursor-advance! cur)
-                (%skip-body-to-elif-else-fi cur (+ depth 1)))
-              (if (or
-                    (string=? w "fi")
-                    (string=? w "done")
-                    (string=? w "esac"))
-                (if (= depth 0)
-                  ; STOP WITHOUT CONSUMING.  This used to swallow the `fi`, and
-                  ; %eval-elif-chain -- which runs next and whose whole job is
-                  ; to look at the word here -- then found the token AFTER it
-                  ; and reported "expected elif, else, or fi".  So
-                  ;
-                  ;   if false; then echo yes; fi
-                  ;
-                  ; has never worked: an else-less if whose condition is false
-                  ; is a parse error, on every version of this bundle.  With an
-                  ; `else` it was fine, because the else arm below already
-                  ; stopped without consuming -- which is the rule, and this is
-                  ; the one exit that broke it.
-
-                  ()
-                  (do
-                    (%cursor-advance! cur)
-                    (%skip-body-to-elif-else-fi cur (- depth 1))))
-                (if (and
-                      (= depth 0)
-                      (or (string=? w "elif") (string=? w "else")))
-                  ; Stop here (don't consume) for elif/else handling
-
-                  ()
-                  (do
-                    (%cursor-advance! cur)
-                    (%skip-body-to-elif-else-fi cur depth))))))
+        (if (and (= depth 0) (stop? tok))
+          tok
           (do
             (%cursor-advance! cur)
-            (%skip-body-to-elif-else-fi cur depth)))))))
+            (let ((d (+ depth (%sh-nest-delta tok))))
+              (self cur (if (< d 0) 0 d) stop?))))))))
+
+; Skip to a depth-0 stop token and CONSUME it.  WHAT names the construct for
+; the error when the input runs out first.
+(def %sh-skip-past
+  (fn (_ cur stop? what)
+    (if (null? (%sh-skip-block cur 0 stop?))
+      (error (string-append "parse error: unexpected EOF in " what))
+      (%cursor-advance! cur))))
+
+; The same, but running out of input is simply the end -- what the case
+; skippers have always done.
+(def %sh-skip-past-or-end
+  (fn (_ cur stop?)
+    (unless (null? (%sh-skip-block cur 0 stop?)) (%cursor-advance! cur))))
+
+; Skip a false branch's body, stopping ON the elif/else/fi that follows it.
+;
+; NOT CONSUMED, and that is the whole of the bug this once had: swallowing the
+; `fi` left %eval-elif-chain looking at the token after it, so
+; `if false; then echo yes; fi` -- an else-less if whose condition is false --
+; was a parse error on every version of this bundle.
+(def %sh-elif-else-fi (list "elif" "else" "fi"))
+
+(set! %skip-body-to-elif-else-fi
+  (fn (_ cur depth)
+    (if (null? (%sh-skip-block cur 0
+                 (fn (_ tok) (%sh-word-among? tok %sh-elif-else-fi))))
+      (error "parse error: unexpected EOF in if")
+      ())))
 ; Skip to matching fi (after we evaluated the true branch)
 
 (set! %skip-to-fi
   (fn (_ cur depth)
-    (if (%cursor-empty? cur)
-      (error "parse error: unexpected EOF in if")
-      (let ((tok (%cursor-peek cur)))
-        (if (%tok-is-keyword? tok)
-          (let ((w (%tok-word-val tok)))
-            (%cursor-advance! cur)
-            (if (or
-                  (string=? w "if")
-                  (string=? w "while")
-                  (string=? w "for"))
-              (%skip-to-fi cur (+ depth 1))
-              (if (string=? w "fi")
-                (if (= depth 0) () (%skip-to-fi cur (- depth 1)))
-                (if (string=? w "done")
-                  (%skip-to-fi cur (- depth 1))
-                  (%skip-to-fi cur depth)))))
-          (do (%cursor-advance! cur) (%skip-to-fi cur depth)))))))
+    (%sh-skip-past cur (fn (_ tok) (%sh-word-is? tok "fi")) "if")))
 ; Handle elif/else chain after condition was false
 
 (set! %eval-elif-chain
@@ -1539,26 +1541,7 @@
 
 (set! %skip-to-done
   (fn (_ cur depth)
-    (if (%cursor-empty? cur)
-      (error "parse error: unexpected EOF in while")
-      (let ((tok (%cursor-peek cur)))
-        (if (%tok-is-keyword? tok)
-          (let ((w (%tok-word-val tok)))
-            (%cursor-advance! cur)
-            (if (or
-                  (string=? w "while")
-                  (string=? w "until")
-                  (string=? w "for")
-                  (string=? w "if")
-                  (string=? w "case"))
-              (%skip-to-done cur (+ depth 1))
-              (if (or
-                    (string=? w "done")
-                    (string=? w "fi")
-                    (string=? w "esac"))
-                (if (= depth 0) () (%skip-to-done cur (- depth 1)))
-                (%skip-to-done cur depth))))
-          (do (%cursor-advance! cur) (%skip-to-done cur depth)))))))
+    (%sh-skip-past cur (fn (_ tok) (%sh-word-is? tok "done")) "while")))
 ; Collect for-in word list from cursor
 
 (def %collect-for-words ())
@@ -1769,62 +1752,18 @@
 
 (def %skip-case-body ())
 
+; One clause's body: to its `;;`, or to the `esac` that ends the whole case
+; when the last clause omits it.
 (set! %skip-case-body
   (fn (_ cur depth)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (eq? (first tok) (lit tok-word))
-          (let ((w (%tok-word-val tok)))
-            (%cursor-advance! cur)
-            (if (and (= depth 0) (string=? w "esac"))
-              ()
-              (if (or
-                    (string=? w "if")
-                    (string=? w "while")
-                    (string=? w "until")
-                    (string=? w "for")
-                    (string=? w "case"))
-                (%skip-case-body cur (+ depth 1))
-                (if (or
-                      (string=? w "fi")
-                      (string=? w "done")
-                      (string=? w "esac"))
-                  (%skip-case-body cur (- depth 1))
-                  (%skip-case-body cur depth)))))
-          (if (eq? (first tok) (lit tok-op))
-            (do
-              (%cursor-advance! cur)
-              (if (and (= depth 0) (string=? (first (rest tok)) ";;"))
-                ()
-                (%skip-case-body cur depth)))
-            (do (%cursor-advance! cur) (%skip-case-body cur depth))))))))
-
+    (%sh-skip-past-or-end cur
+      (fn (_ tok)
+        (or (%sh-word-is? tok "esac") (%tok-is-op? tok ";;"))))))
 (def %skip-to-esac ())
 
 (set! %skip-to-esac
   (fn (_ cur depth)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (eq? (first tok) (lit tok-word))
-          (let ((w (%tok-word-val tok)))
-            (%cursor-advance! cur)
-            (if (or
-                  (string=? w "if")
-                  (string=? w "while")
-                  (string=? w "until")
-                  (string=? w "for")
-                  (string=? w "case"))
-              (%skip-to-esac cur (+ depth 1))
-              (if (or
-                    (string=? w "fi")
-                    (string=? w "done")
-                    (string=? w "esac"))
-                (if (= depth 0) () (%skip-to-esac cur (- depth 1)))
-                (%skip-to-esac cur depth))))
-          (do (%cursor-advance! cur) (%skip-to-esac cur depth)))))))
-
+    (%sh-skip-past-or-end cur (fn (_ tok) (%sh-word-is? tok "esac")))))
 (set! %eval-case-clauses
   (fn (_ cur word)
     (%skip-newlines cur)
