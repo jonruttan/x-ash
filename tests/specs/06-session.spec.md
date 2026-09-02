@@ -131,3 +131,56 @@
 ```
 ---
     #t
+
+## ash-complete? function definitions
+
+A function body is braces, and the continuation scan has to see them or the
+prompt evaluates `greet() {` on its own and reports a parse error.
+
+### an opened function body is not complete
+
+```sh
+(write (%ash-complete? "greet() {"))
+```
+---
+    ()
+
+### a body still open after a command is not complete
+
+```sh
+(do (def nl (make-string 1 (convert 10 %char))) (write (%ash-complete? (string-append "greet() {" (string-append nl "  echo hi")))))
+```
+---
+    ()
+
+### the closing brace completes it
+
+```sh
+(do (def nl (make-string 1 (convert 10 %char))) (write (%ash-complete? (string-append "greet() {" (string-append nl (string-append "  echo hi" (string-append nl "}")))))))
+```
+---
+    #t
+
+### a one-line definition is complete
+
+```sh
+(write (%ash-complete? "greet() { echo hi; }"))
+```
+---
+    #t
+
+### a ${NAME} brace is not a body brace
+
+```sh
+(write (%ash-complete? "echo ${HOME}"))
+```
+---
+    #t
+
+### an unclosed ${ does not hang the prompt
+
+```sh
+(write (%ash-complete? "echo ${HOME"))
+```
+---
+    #t

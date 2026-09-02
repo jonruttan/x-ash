@@ -69,8 +69,19 @@
       (= c (char->integer #\newline))
       (%sh-op-start? c)
       (= c (char->integer #\'))
-      (= c (char->integer #\"))
-      (= c (char->integer #\#)))))
+      (= c (char->integer #\")))))
+
+; `#` IS NOT HERE, and that is the fix rather than an omission.  It used to
+; break a word anywhere, so `#` mid-word started a comment:
+;
+;   echo a#b      printed `a`
+;   echo $#       printed nothing, and ate the rest of the LINE
+;
+; A shell starts a comment at `#` only where a word could start, which the
+; SH-COMMENT type below already expresses -- its analyse hook only ever runs at
+; a token boundary, so leaving `#` out of the break set is exactly the POSIX
+; rule.  `echo # note` still comments: the space ends the word, and the `#`
+; opens a fresh token.
 ; --- Token constructors ---
 
 (def mk-tok-newline (fn (_) (list (lit tok-newline))))
@@ -324,6 +335,11 @@
 (set! %sh-dq-body
   (fn (_ buffer score chr)
     (match
+      ; $( inside a double-quoted word: a substitution, whose own quotes and
+      ; parens must not be read as this string's.
+
+      ((= chr (char->integer #\$)) %sh-sq-dq-dollar)
+      ((= chr #\`) (do (set! %sh-cs-return 2) %sh-bt-scan))
       ; Closing quote -- but the WORD may continue; see %sh-sq-read above.
 
       ; Closing quote: hand over to the word continuation for the NEXT
@@ -377,6 +393,114 @@
 ; Uses negative score so other types take priority.
 ; Uses buffer-token to extract the word text.
 
+; --- Command substitution: $( ... ) ------------------------------------------
+;
+; `$(` OPENS A REGION THAT `)` DOES NOT CLOSE A WORD IN.  `)` is an operator
+; character, so without this `echo $(pwd)` tokenized as five tokens -- `echo`,
+; the word `$`, the op `(`, `pwd`, the op `)` -- and the substitution was not
+; expressible at all.  The whole run is one word now, raw text included, and
+; %sh-expand-str runs it.
+;
+; THE DEPTH AND THE RETURN CONTEXT RIDE IN MODULE GLOBALS, not in closures.
+; The analyse protocol's continuations take no parameters, so a nesting counter
+; has nowhere else to live -- and allocating a closure per character inside a
+; reader callback is the hazard this file's own notes warn about twice.  A
+; `set!` of a small integer allocates nothing, and the same globals cannot
+; collide across tokens: the scan is strictly sequential and %sh-cs-depth is
+; re-initialised at every `$(`.
+;
+; The return context is where the word was when the substitution opened, so
+; that `"a $(echo b) c"` stays inside its double quotes afterwards rather than
+; ending at the space.
+(def %sh-cs-depth 0)
+(def %sh-cs-return 0)          ; 0 = bare word, 1 = "..." within a word, 2 = SH-DQ
+(def %sh-cs-body ())
+(def %sh-cs-sq ())
+(def %sh-cs-dq ())
+(def %sh-cs-dq-esc ())
+
+; Quotes INSIDE the substitution hide parens from the depth count, so
+; `$(echo ")")` closes where it should.
+(set! %sh-cs-sq
+  (fn (_ buffer score chr)
+    (if (= chr (char->integer #\')) %sh-cs-body %sh-cs-sq)))
+
+(set! %sh-cs-dq-esc (fn (_ buffer score chr) %sh-cs-dq))
+
+(set! %sh-cs-dq
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\")) %sh-cs-body)
+      ((= chr (char->integer #\\)) %sh-cs-dq-esc)
+      (#t %sh-cs-dq))))
+
+(set! %sh-cs-body
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\())
+        (do (set! %sh-cs-depth (+ %sh-cs-depth 1)) %sh-cs-body))
+      ((= chr (char->integer #\)))
+        (if (= %sh-cs-depth 0)
+          ; Closed.  Back to whatever the word was doing.
+          (match
+            ((= %sh-cs-return 1) %sh-word-in-dq)
+            ((= %sh-cs-return 2) %sh-dq-body)
+            (#t %sh-qword-body))
+          (do (set! %sh-cs-depth (- %sh-cs-depth 1)) %sh-cs-body)))
+      ((= chr (char->integer #\')) %sh-cs-sq)
+      ((= chr (char->integer #\")) %sh-cs-dq)
+      (#t %sh-cs-body))))
+
+; The older backtick substitution needs the same treatment as `$(`: a region
+; whose spaces do not end the word.  Without it `echo `echo old`` split at the
+; space into the two words "`echo" and "old`", and the expander -- which only
+; ever sees one word at a time -- could not put them back together.
+;
+; No nesting to track (backticks do not nest without escaping), so one state
+; plus an escape state.  The return context rides in %sh-cs-return, shared with
+; the `$(` scanner above; the two can never be in flight at once.
+(def %sh-bt-scan ())
+(def %sh-bt-esc ())
+
+(set! %sh-bt-esc (fn (_ buffer score chr) %sh-bt-scan))
+
+(set! %sh-bt-scan
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\\)) %sh-bt-esc)
+      ((= chr #\`)
+        (match
+          ((= %sh-cs-return 1) %sh-word-in-dq)
+          ((= %sh-cs-return 2) %sh-dq-body)
+          (#t %sh-qword-body)))
+      (#t %sh-bt-scan))))
+
+; After a `$`, one character decides.  Anything that is not `(` is RE-DISPATCHED
+; through the state we came from -- a direct call, which is correct here (we
+; want that character handled normally) and is not the mistake made at a closing
+; quote, where the character had already been consumed by meaning.
+(def %sh-word-dollar ())
+(def %sh-dq-dollar ())
+(def %sh-sq-dq-dollar ())
+
+(set! %sh-word-dollar
+  (fn (_ buffer score chr)
+    (if (= chr (char->integer #\())
+      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 0) %sh-cs-body)
+      (%sh-qword-body buffer score chr))))
+
+(set! %sh-dq-dollar
+  (fn (_ buffer score chr)
+    (if (= chr (char->integer #\())
+      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 1) %sh-cs-body)
+      (%sh-word-in-dq buffer score chr))))
+
+(set! %sh-sq-dq-dollar
+  (fn (_ buffer score chr)
+    (if (= chr (char->integer #\())
+      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 2) %sh-cs-body)
+      (%sh-dq-body buffer score chr))))
+
 (def %sh-word-body ())
 (def %sh-qword-body ())
 (def %sh-word-in-sq ())
@@ -424,6 +548,8 @@
 (set! %sh-word-in-dq
   (fn (_ buffer score chr)
     (match
+      ((= chr (char->integer #\$)) %sh-dq-dollar)
+      ((= chr #\`) (do (set! %sh-cs-return 1) %sh-bt-scan))
       ((= chr (char->integer #\")) (do
         ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
         ; so that input ENDING at the closing quote produces a token at all --
@@ -439,6 +565,8 @@
 (set! %sh-qword-body
   (fn (_ buffer score chr)
     (match
+      ((= chr (char->integer #\$)) %sh-word-dollar)
+      ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
       ((%sh-word-break? chr)
@@ -448,6 +576,8 @@
 (set! %sh-word-body
   (fn (_ buffer score chr)
     (match
+      ((= chr (char->integer #\$)) %sh-word-dollar)
+      ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
       ((%sh-word-break? chr)
@@ -491,7 +621,19 @@
       (lit analyse)
       (fn (_ buffer score chr)
         (if (not (%sh-word-break? chr))
-          (do (score-set score (- 0 1) buffer) %sh-word-body)
+          (do
+            (score-set score (- 0 1) buffer)
+            ; A WORD MAY OPEN WITH THE SUBSTITUTION.  `echo $(pwd)` puts the
+            ; `$` first, and routing it through the plain body meant the next
+            ; character -- `(`, an operator -- broke the word immediately,
+            ; leaving the bare word `$`.  Mid-word `$` reaches %sh-word-dollar
+            ; from the body's own arm; this is the same door for the first
+            ; character.
+            (if (= chr (char->integer #\$))
+              %sh-word-dollar
+              (if (= chr #\`)
+                (do (set! %sh-cs-return 0) %sh-bt-scan)
+                %sh-word-body)))
           ())))
     (pair (lit read) %sh-word-reader)))
 ; --- INTEGER: pre-register with shell-compatible reader (positive) ---
