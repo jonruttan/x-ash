@@ -339,7 +339,7 @@
       ; parens must not be read as this string's.
 
       ((= chr (char->integer #\$)) %sh-sq-dq-dollar)
-      ((= chr 96) (do (set! %sh-cs-return 2) %sh-bt-scan))
+      ((= chr #\`) (do (set! %sh-cs-return 2) %sh-bt-scan))
       ; Closing quote -- but the WORD may continue; see %sh-sq-read above.
 
       ; Closing quote: hand over to the word continuation for the NEXT
@@ -468,8 +468,7 @@
   (fn (_ buffer score chr)
     (match
       ((= chr (char->integer #\\)) %sh-bt-esc)
-      ; 96 is the backtick; there is no clean char literal for it here.
-      ((= chr 96)
+      ((= chr #\`)
         (match
           ((= %sh-cs-return 1) %sh-word-in-dq)
           ((= %sh-cs-return 2) %sh-dq-body)
@@ -550,7 +549,7 @@
   (fn (_ buffer score chr)
     (match
       ((= chr (char->integer #\$)) %sh-dq-dollar)
-      ((= chr 96) (do (set! %sh-cs-return 1) %sh-bt-scan))
+      ((= chr #\`) (do (set! %sh-cs-return 1) %sh-bt-scan))
       ((= chr (char->integer #\")) (do
         ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
         ; so that input ENDING at the closing quote produces a token at all --
@@ -567,7 +566,7 @@
   (fn (_ buffer score chr)
     (match
       ((= chr (char->integer #\$)) %sh-word-dollar)
-      ((= chr 96) (do (set! %sh-cs-return 0) %sh-bt-scan))
+      ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
       ((%sh-word-break? chr)
@@ -578,7 +577,7 @@
   (fn (_ buffer score chr)
     (match
       ((= chr (char->integer #\$)) %sh-word-dollar)
-      ((= chr 96) (do (set! %sh-cs-return 0) %sh-bt-scan))
+      ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
       ((%sh-word-break? chr)
@@ -632,7 +631,7 @@
             ; character.
             (if (= chr (char->integer #\$))
               %sh-word-dollar
-              (if (= chr 96)
+              (if (= chr #\`)
                 (do (set! %sh-cs-return 0) %sh-bt-scan)
                 %sh-word-body)))
           ())))

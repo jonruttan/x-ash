@@ -86,23 +86,9 @@
 ;   - a trailing |, && or || (the pipeline wants a right-hand side)
 ;   - an unbalanced if..fi, case..esac, loop..done, ( .. ) or { .. }
 
-(def %ash-tab 9)
-(def %ash-nl 10)
-(def %ash-space 32)
-(def %ash-dq 34)
-(def %ash-hash 35)
-(def %ash-sq 39)
-(def %ash-lparen 40)
-(def %ash-rparen 41)
-(def %ash-semi 59)
-(def %ash-amp 38)
-(def %ash-pipe 124)
-(def %ash-bs 92)
-(def %ash-lbrace 123)
-(def %ash-rbrace 125)
 
 (def %ash-ws?
-  (fn (_ c) (or (= c %ash-space) (= c %ash-tab) (= c %ash-nl))))
+  (fn (_ c) (or (= c #\space) (= c #\tab) (= c #\newline))))
 
 ; --- Pass 1: strip quoting ---------------------------------------------------
 ;
@@ -129,26 +115,26 @@
                 ; Inside '...' -- only the matching quote closes it, and a
                 ; backslash is literal (POSIX): 'it\' IS closed.
                 ((= mode 1)
-                  (self (+ i 1) (if (= c %ash-sq) 0 1)
+                  (self (+ i 1) (if (= c #\') 0 1)
                         (Str8 append out " ")))
                 ; Inside "..." -- a backslash escapes the next character.
                 ((= mode 2)
-                  (if (and (= c %ash-bs) (< (+ i 1) n))
+                  (if (and (= c #\\) (< (+ i 1) n))
                     (self (+ i 2) 2 (Str8 append out "  "))
-                    (self (+ i 1) (if (= c %ash-dq) 0 2)
+                    (self (+ i 1) (if (= c #\") 0 2)
                           (Str8 append out " "))))
                 ; Outside quotes.  A backslash at the very END is the
                 ; continuation; anywhere else it just escapes one character.
-                ((= c %ash-bs)
+                ((= c #\\)
                   (if (= (+ i 1) n)
                     (%ash-bare out #t)
                     (self (+ i 2) 0 (Str8 append out "  "))))
-                ((= c %ash-sq) (self (+ i 1) 1 (Str8 append out " ")))
-                ((= c %ash-dq) (self (+ i 1) 2 (Str8 append out " ")))
+                ((= c #\') (self (+ i 1) 1 (Str8 append out " ")))
+                ((= c #\") (self (+ i 1) 2 (Str8 append out " ")))
                 ; A comment runs to the end of the line -- but `#` only starts
                 ; one where a word could start, the same rule the tokenizer
                 ; follows, so `echo $#` is not a comment.
-                ((and (= c %ash-hash) (%ash-word-boundary? s i))
+                ((and (= c #\#) (%ash-word-boundary? s i))
                   (self (%ash-eol s (+ i 1) n) 0 out))
                 (else
                   (self (+ i 1) 0 (Str8 append out (Str8 sub i 1 s)))))))))
@@ -158,7 +144,7 @@
   (fn (self s i n)
     (if (>= i n)
       i
-      (if (= (Str8 ref i s) %ash-nl) i (self s (+ i 1) n)))))
+      (if (= (Str8 ref i s) #\newline) i (self s (+ i 1) n)))))
 
 ; Does a word (or a comment, or a standalone brace) begin at I?  True at the
 ; start of the entry and after whitespace or a `;`.
@@ -167,7 +153,7 @@
     (if (= i 0)
       #t
       (let ((p (Str8 ref (- i 1) s)))
-        (or (%ash-ws? p) (= p %ash-semi))))))
+        (or (%ash-ws? p) (= p #\;))))))
 
 ; --- Pass 2: count what is still open ---------------------------------------
 ;
@@ -176,6 +162,17 @@
 ; Kept separate rather than summed to a single counter, because a `done` inside
 ; an if body would otherwise cancel the `if` and the prompt would evaluate an
 ; unfinished entry -- `if true; then echo done; fi` typed over four lines.
+; ash/eval.x has the same lookup; repl.x cannot reach it (the provide list is
+; the language's surface, not its internals), so it has its own five lines
+; rather than widening that seam for one caller.
+(def %ash-table-get
+  (fn (self key table)
+    (if (null? table)
+      ()
+      (if (str=? key (first (first table)))
+        (rest (first table))
+        (self key (rest table))))))
+
 (def %ash-depth-zero (list 0 0 0 0 0))
 (def %ash-delta-none (list 0 0 0 0 0))
 
@@ -199,44 +196,67 @@
 ; nothing is yet unbalanced -- the prompt then answered "parse error: expected
 ; do" before the user had finished typing.  `for`, `while` and `until` each
 ; require exactly one `done`, so they are what counts.
+; Which word opens or closes which construct, as a table.
+;
+; THE LOOP KEYWORD OPENS THE LOOP, NOT `do`.  Counting `do` against `done`
+; reads `for f in a b` as FINISHED, because the `do` is on the next line and
+; nothing is yet unbalanced -- the prompt then answered "parse error: expected
+; do" before the user had finished typing.  `for`, `while` and `until` each
+; require exactly one `done`, so they are what counts.
+(def %ash-kw-deltas
+  (list (pair "if"    (list 0 0  1  0  0))
+        (pair "fi"    (list 0 0 -1  0  0))
+        (pair "for"   (list 0 0  0  1  0))
+        (pair "while" (list 0 0  0  1  0))
+        (pair "until" (list 0 0  0  1  0))
+        (pair "done"  (list 0 0  0 -1  0))
+        (pair "case"  (list 0 0  0  0  1))
+        (pair "esac"  (list 0 0  0  0 -1))))
+
 (def %ash-kw-delta
   (fn (_ w)
-    (match
-      ((str=? w "if")    (list 0 0  1  0  0))
-      ((str=? w "fi")    (list 0 0 -1  0  0))
-      ((str=? w "for")   (list 0 0  0  1  0))
-      ((str=? w "while") (list 0 0  0  1  0))
-      ((str=? w "until") (list 0 0  0  1  0))
-      ((str=? w "done")  (list 0 0  0 -1  0))
-      ((str=? w "case")  (list 0 0  0  0  1))
-      ((str=? w "esac")  (list 0 0  0  0 -1))
-      (#t %ash-delta-none))))
+    (let ((d (%ash-table-get w %ash-kw-deltas)))
+      (if (null? d) %ash-delta-none d))))
 
 (def %ash-word-char?
   (fn (_ c)
-    (or (and (>= c 97) (<= c 122))            ; a-z
-        (and (>= c 65) (<= c 90))             ; A-Z
-        (and (>= c 48) (<= c 57))             ; 0-9
-        (= c 95))))                           ; _
+    (or (and (>= c #\a) (<= c #\z))
+        (and (>= c #\A) (<= c #\Z))
+        (and (>= c #\0) (<= c #\9))
+        (= c #\_))))
 
 ; A brace counts only when it stands on its own -- the `{` and `}` of a
 ; function body.  `${NAME}` never does, and counting every brace would break on
 ; an unclosed `${` inside a string, which must not hang the prompt.
-(def %ash-brace-delta
-  (fn (_ s i c)
-    (if (not (%ash-word-boundary? s i))
-      %ash-delta-none
-      (match
-        ((= c %ash-lbrace) (list 0  1 0 0 0))
-        ((= c %ash-rbrace) (list 0 -1 0 0 0))
-        (#t %ash-delta-none)))))
+; A brace counts only when it stands on its own -- the `{` and `}` of a
+; function body.  `${NAME}` never does, and counting every brace would break on
+; an unclosed `${` inside a string, which must not hang the prompt.
+(def %ash-bracket-deltas
+  (list (pair #\( (list  1 0 0 0 0))
+        (pair #\) (list -1 0 0 0 0))))
+
+(def %ash-brace-deltas
+  (list (pair #\{ (list 0  1 0 0 0))
+        (pair #\} (list 0 -1 0 0 0))))
+
+; Keyed by CHARACTER, so %ash-table-get's string equality does not apply.
+(def %ash-char-table-get
+  (fn (self c table)
+    (if (null? table)
+      ()
+      (if (= c (first (first table)))
+        (rest (first table))
+        (self c (rest table))))))
 
 (def %ash-char-delta
   (fn (_ s i c)
-    (match
-      ((= c %ash-lparen) (list  1 0 0 0 0))
-      ((= c %ash-rparen) (list -1 0 0 0 0))
-      (#t (%ash-brace-delta s i c)))))
+    (let ((bracket (%ash-char-table-get c %ash-bracket-deltas)))
+      (cond
+        ((not (null? bracket)) bracket)
+        ((not (%ash-word-boundary? s i)) %ash-delta-none)
+        (else
+          (let ((brace (%ash-char-table-get c %ash-brace-deltas)))
+            (if (null? brace) %ash-delta-none brace)))))))
 
 ; Walk the stripped text, folding each completed word and each bracket into the
 ; depth vector.
@@ -278,10 +298,10 @@
         (let ((c (Str8 ref (- e 1) s)))
           (cond
             ; `|` covers | and ||.
-            ((= c %ash-pipe) #t)
+            ((= c #\|) #t)
             ; A lone `&` is a background job and is COMPLETE; only `&&` waits.
-            ((= c %ash-amp)
-              (if (< e 2) () (= (Str8 ref (- e 2) s) %ash-amp)))
+            ((= c #\&)
+              (if (< e 2) () (= (Str8 ref (- e 2) s) #\&)))
             (else ())))))))
 
 ; %ash-complete? INPUT -> #t when the entry can be evaluated, () when the
