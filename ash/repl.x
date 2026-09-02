@@ -68,6 +68,23 @@
 (def %ash-sq 39)   ; '
 (def %ash-dq 34)   ; "
 (def %ash-bs 92)   ; \
+(def %ash-lbrace 123)
+(def %ash-rbrace 125)
+
+; Is the character at I a brace standing on its own -- the `{` and `}` that
+; open and close a function body -- rather than one of `${NAME}`?  The test is
+; what PRECEDES it: a standalone brace follows whitespace, a `;`, or the start
+; of the entry, and `${` never does.
+;
+; Counting every brace would work for `${NAME}` (balanced, so it nets out) and
+; break on `"${X"` inside a string; counting only standalone ones is both
+; narrower and what a shell actually means by the word `{`.
+(def %ash-standalone-brace?
+  (fn (_ s i)
+    (if (= i 0)
+      #t
+      (let ((p (Str8 ref (- i 1) s)))
+        (or (= p 32) (or (= p 9) (or (= p 10) (= p 59))))))))
 
 ; The scanner's state rides in a list so one walk answers everything:
 ;   (quote-char paren-depth if-depth do-depth case-depth word-acc last-op)
@@ -112,7 +129,7 @@
   (fn (_ s)
     (let ((n (Str8 length s)))
       (def go
-        (fn (self i q paren ifd dod cased word)
+        (fn (self i q paren brace ifd dod cased word)
           ; End of input: fold any trailing word, then decide.
           (if (>= i n)
             (let ((d (%ash-kw-delta word)))
@@ -123,11 +140,13 @@
                   ()                                  ; inside a quoted string
                   (if (> paren 0)
                     ()
+                  (if (> brace 0)
+                    ()
                     (if (> ifd2 0)
                       ()
                       (if (> dod2 0)
                         ()
-                        (if (> cased2 0) () #t)))))))
+                        (if (> cased2 0) () #t))))))))
             (let ((c (Str8 ref i s)))
               (if (not (= q 0))
                 ; Inside a string: only the matching quote closes it.  A
@@ -135,21 +154,21 @@
                 ; literal in a '...', which is POSIX and matters here --
                 ; 'it\' is a CLOSED string, "it\" is not.
                 (if (and (= q %ash-dq) (= c %ash-bs))
-                  (self (+ i 2) q paren ifd dod cased word)
+                  (self (+ i 2) q paren brace ifd dod cased word)
                   (if (= c q)
-                    (self (+ i 1) 0 paren ifd dod cased word)
-                    (self (+ i 1) q paren ifd dod cased word)))
+                    (self (+ i 1) 0 paren brace ifd dod cased word)
+                    (self (+ i 1) q paren brace ifd dod cased word)))
                 ; Outside a string.
                 (if (= c %ash-bs)
                   ; A backslash at the very end IS the continuation; anywhere
                   ; else it just escapes one character.
                   (if (= (+ i 1) n)
                     ()
-                    (self (+ i 2) q paren ifd dod cased ""))
+                    (self (+ i 2) q paren brace ifd dod cased ""))
                   (if (or (= c %ash-sq) (= c %ash-dq))
-                    (self (+ i 1) c paren ifd dod cased word)
+                    (self (+ i 1) c paren brace ifd dod cased word)
                     (if (%ash-word-char? c)
-                      (self (+ i 1) q paren ifd dod cased
+                      (self (+ i 1) q paren brace ifd dod cased
                             (Str8 append word (Str8 sub i 1 s)))
                       ; A non-word character closes the word in hand and
                       ; applies its keyword delta.
@@ -158,12 +177,21 @@
                               (dod2   (%ash-bump dod   (first (rest d))))
                               (cased2 (%ash-bump cased (first (rest (rest d))))))
                           (if (= c 40)                       ; (
-                            (self (+ i 1) q (+ paren 1) ifd2 dod2 cased2 "")
+                            (self (+ i 1) q (+ paren 1) brace ifd2 dod2 cased2 "")
                             (if (= c 41)                     ; )
-                              (self (+ i 1) q (%ash-bump paren -1) ifd2 dod2 cased2 "")
+                              (self (+ i 1) q (%ash-bump paren -1) brace ifd2 dod2 cased2 "")
                               (if (= c 35)                   ; # -- comment
-                                (self n q paren ifd2 dod2 cased2 "")
-                                (self (+ i 1) q paren ifd2 dod2 cased2 ""))))))))))))))
+                                (self n q paren brace ifd2 dod2 cased2 "")
+                                (if (and (= c %ash-lbrace)
+                                         (%ash-standalone-brace? s i))
+                                  (self (+ i 1) q paren (+ brace 1)
+                                        ifd2 dod2 cased2 "")
+                                (if (and (= c %ash-rbrace)
+                                         (%ash-standalone-brace? s i))
+                                  (self (+ i 1) q paren (%ash-bump brace -1)
+                                        ifd2 dod2 cased2 "")
+                                  (self (+ i 1) q paren brace
+                                        ifd2 dod2 cased2 ""))))))))))))))))
       (if (= n 0)
         #t
         ; A trailing operator wants a right-hand side.  Checked on the raw
@@ -171,7 +199,7 @@
         ; about what the LAST thing on the line was.
         (if (%ash-dangling-op? s)
           ()
-          (go 0 0 0 0 0 0 ""))))))
+          (go 0 0 0 0 0 0 0 ""))))))
 
 ; Does the input end in an operator that needs more?  Trailing whitespace is
 ; ignored first, and a `|` that is part of `||` is the same answer either way.

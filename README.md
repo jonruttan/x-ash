@@ -70,8 +70,9 @@ the spec suite asserts subshell *status* rather than subshell stdout for this
 reason.
 
 At the prompt, an entry that is not finished continues on a `> ` line — an
-unclosed quote, a trailing `|` or `&&` or backslash, or an `if`/`for`/`while`/
-`until`/`case` whose closer has not been typed yet.
+unclosed quote, a trailing `|` or `&&` or backslash, an `if`/`for`/`while`/
+`until`/`case` whose closer has not been typed yet, or a function body whose
+`}` is still to come.
 
 x-ash is a **lang**: a different surface language loaded over an x-lang
 dialect. Where x-lang and ash spell something the same way, ash is free to mean
@@ -83,7 +84,7 @@ The terms are in x-lang's
 
 ## Status
 
-**222 of 222 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**228 of 228 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
@@ -174,8 +175,10 @@ else radon boots — the numeric tower, bigint, rational, complex, decimal,
 regex, the compile pipeline — was cost paid on every invocation and never
 touched. A shell has no use for a rational.
 
-Measured on one machine, `x -l ash` start to prompt: **20.7s on radon, 2.7s on
-helium.**
+Measured on one machine, `x -l ash` start to prompt: **radon 10–18s, helium
+3.0–3.8s** (five and six samples; this box is noisy enough that the spread is
+worth quoting rather than a single number). The first measurement of the pair,
+on a quieter machine, was 20.7s against 2.7s.
 
 ## Pin it instead, for a project
 
