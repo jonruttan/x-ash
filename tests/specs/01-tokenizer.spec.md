@@ -364,3 +364,37 @@
 ---
     #t
 
+
+## INTEGER falling back to a word
+
+### a digit run that continues as a word is one word token
+
+```sh
+(write (sh-tokenize "50$"))
+```
+---
+    ((tok-word "50$"))
+
+### a digit-led mixed word is one word token
+
+```sh
+(write (sh-tokenize "3rd"))
+```
+---
+    ((tok-word "3rd"))
+
+### the shell survives evaluating one
+
+```sh
+(do (sh-eval "echo 50$") ())
+```
+---
+    50$
+
+### digit-led words alongside a plain integer
+
+```sh
+(write (sh-tokenize "2x 50"))
+```
+---
+    ((tok-word "2x") (tok-word "50"))

@@ -15,6 +15,52 @@ b
 c
 ```
 
+## What the shell has
+
+Words and quoting: single quotes (literal), double quotes (expanding),
+backslash escapes inside and outside them. Quoting applies to a *region* of a
+word rather than to the word, so `X="a b"`, `pre"mid"post`, `"$HOME"/bin` and
+`'a'"$b"` are each one word.
+
+Expansion: `$NAME`, `${NAME}`, `$?`, `$$` — anywhere in a word, not only at the
+start of one. An unset name expands to nothing.
+
+Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
+`until`, `for`, `case`, `!` negation, and `( ... )` subshells.
+
+`case` patterns are real globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\`
+to escape any of them.
+
+Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
+— and on a builtin the descriptors are put back afterwards, so `echo x > log`
+does not leave the shell writing to `log`.
+
+Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
+`[`, `.` / `source`, `exit`, `true`, `false`, `:`.
+
+`test` knows `-n`, `-z`, `!`, `=`, `!=`, the file predicates `-e` `-f` `-d`
+`-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
+unknown operator is a usage error (status 2), not a silent false.
+
+**Not there yet**, and worth knowing before you reach for them: functions
+(`name() { ... }`), command substitution (`$(...)` and backticks), arithmetic
+expansion `$((...))`, *pathname* globbing (expanding `*.txt` against a
+directory -- `case` patterns are matched, but a bare `*` on a command line is
+passed through as itself), here-documents,
+positional parameters (`$1`, `$@`, `shift`), `set` and its options, `trap`,
+and job control. Words are not field-split after expansion, so `X="a b"; cmd
+$X` passes one argument rather than two.
+
+One thing worth knowing about subshells: `( ... )` forks, and the interpreter
+has no flush primitive, so a child's buffered output can be lost if the parent
+exits first. In practice it prints correctly to a terminal and through a pipe;
+the spec suite asserts subshell *status* rather than subshell stdout for this
+reason.
+
+At the prompt, an entry that is not finished continues on a `> ` line — an
+unclosed quote, a trailing `|` or `&&` or backslash, or an `if`/`for`/`while`/
+`until`/`case` whose closer has not been typed yet.
+
 x-ash is a **lang**: a different surface language loaded over an x-lang
 dialect. Where x-lang and ash spell something the same way, ash is free to mean
 something different by it — `;` separates commands here rather than starting a
@@ -25,7 +71,8 @@ The terms are in x-lang's
 
 ## Status
 
-**80 of 82 specs green** against x-lang **v0.9.0**.
+**159 of 159 specs green** against x-lang **v0.10.0**, with nothing recorded in
+the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
 but the floor beneath it is a hard requirement, unusually for this bundle:
@@ -39,11 +86,27 @@ Last of the five 2024-era langs to come back, the largest, and the only
 one that is not a Lisp. It is also the only one that was blocked on an engine
 bug rather than on drift — see below.
 
-The 2 that do not pass are the single- and double-quoted string readers: `''`
-tokenizes correctly and `'a'` loses its accumulator, so the closing quote sees
-an empty one. That is in how the tokenizer drives a state that scores nothing
-on entry, and it wants someone reading the C token loop rather than more
-guessing from outside.
+**The session was the thing that did not work.** Until recently `x -l ash` came
+up with a shell's banner and a `$ ` prompt and x's *reader* underneath it:
+
+```
+$ ls
+Error: Unbound SYMBOL 'ls'
+```
+
+The entry set `%repl-prompt` and `%repl-print` and stopped there, and the
+platform loop customizes prompt and print only — its read is the ambient sexp
+reader. A lang whose unit is not an s-expression has to replace the loop, which
+[`ash/repl.x`](ash/repl.x) now does. Nothing in the suite caught it because
+every spec called `sh-eval` directly; none of them ever started a session.
+
+The two quoted-string failures this section used to record are fixed, and the
+diagnosis they carried was wrong: the C token loop was innocent. Both readers
+built their value in the *analyse* callback and converted it with `%cvt`, which
+answers nil there — silently. `''` passed only because the conversion
+short-circuits on the empty list. They take the consumed run from
+`buffer-token` in the read handler now, which is what the word reader beside
+them always did.
 
 ## Install
 
@@ -90,10 +153,17 @@ X_LANG_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
 ```
 
 
-**This bundle needs radon**, and `lang.xon` says so as a requirement rather
-than a preference: ash forks, execs, dup2s and opens files, and Sys's process
-and file doors are radon opt-ins. A lighter dialect would mean an unbound
-symbol at the first pipeline instead of a legible refusal at acquisition.
+**This bundle needs helium plus two modules**, and `lang.xon` says so as a
+requirement rather than a preference. It used to ask for radon on the grounds
+that ash forks, execs, dup2s and opens files — which does not follow: radon is
+a *set of libraries*, not a capability tier, and what ash needs from it is
+`x/sys/posix` and `x/sys/file`, imported by name in `ash/prims.x`. Everything
+else radon boots — the numeric tower, bigint, rational, complex, decimal,
+regex, the compile pipeline — was cost paid on every invocation and never
+touched. A shell has no use for a rational.
+
+Measured on one machine, `x -l ash` start to prompt: **20.7s on radon, 2.7s on
+helium.**
 
 ## Pin it instead, for a project
 
@@ -157,11 +227,12 @@ three paths `-l` searches there. It reports success and the lang stays
 invisible. Install into a real `<share>` tree, or use `X_LANG_DIR`.
 
 
-The two failures are recorded by name in
+Known failures are recorded by name in
 [`tests/contract/known-failures.txt`](tests/contract/known-failures.txt), and
 `make check` gates on that list rather than on a count — red when a new failure
 appears *and* red when a recorded one starts passing. Documented debt can ship;
-a regression cannot, and a fixed test cannot stay quietly excused.
+a regression cannot, and a fixed test cannot stay quietly excused. The list is
+currently empty, so any failure at all is a regression.
 
 The release tarball is byte-reproducible: it is built from the tag with
 `git archive` and a timestamp-free gzip, so two people rolling one tag get one
@@ -179,6 +250,7 @@ ash/prims.x       the platform layer, under the names ash was written against
 ash/tokens.x      shell token types, on an isolated tokenizer base
 ash/eval.x        parser and evaluator in one pass
 ash/printer.x     a shell shows what the command printed
+ash/repl.x        the $ prompt and the -f batch reader -- THE loop
 ```
 
 `lib/parser.x` from the 2024 tree is not here. `eval.x`'s own header says it

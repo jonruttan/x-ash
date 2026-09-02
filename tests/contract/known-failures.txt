@@ -10,26 +10,22 @@
 # THE LIST MAY ONLY SHRINK.  tests/spec-gate.sh is red when a failure appears
 # that is not here, AND when a line here starts passing.
 #
-# WHY THERE ARE ONLY TWO
+# WHY IT IS EMPTY
 #
-# This list describes x-ash on x-engine-c v0.1.3, which x-lang v0.7.1 is the
-# first release to pin.  Before that pin the bundle was dead at load -- 80 of
-# 82 red -- because v0.1.2's x_prim_make_token_base segfaulted on the first
-# character of any input, and an isolated tokenizer base is the one thing this
-# bundle cannot do without.
+# It was not.  Two entries stood here -- the single- and double-quoted string
+# readers -- described as "in how the tokenizer drives a state that scores
+# nothing on entry", wanting "someone reading the C token loop".  The C token
+# loop was innocent.
 #
-# Those 80 were never recorded here, deliberately.  Recording them would have
-# enshrined a platform bug this bundle did not cause as debt this bundle owns,
-# would have been torn up the day the pin moved -- which is today -- and would
-# have buried the two failures that are actually ash's.
+# Both readers accumulated their value character by character in the analyse
+# callback and converted the list to a string there, and list->string is
+# (%cvt l %string): %cvt inside a reader callback answers NIL, silently.  ''
+# passed only because the conversion short-circuits on the empty list and never
+# ran.  The readers now take the consumed run from buffer-token in the READ
+# handler -- where allocating is safe, and which is what the word reader beside
+# them has always done.
 #
-# The two below ARE ash's, and they are what this file is for.
-
-# --- The quoted-string readers (2) -----------------------------------------
-#
-# '' tokenizes correctly and 'a' loses its accumulator, so the closing quote
-# sees an empty one.  The value is accumulated in a module-level global during
-# analyse and does not survive; the same shape as the three reader-callback
-# bugs the README records, and the last of them still open.
-sh-dq-string: tokenizes double-quoted string
-sh-sq-string: tokenizes single-quoted string
+# So the list is empty, and the rule that keeps it honest is unchanged: this
+# file may only SHRINK.  tests/spec-gate.sh is red when a failure appears that
+# is not here, AND when a line here starts passing.  An empty list means every
+# spec passes and any new failure is a regression.
