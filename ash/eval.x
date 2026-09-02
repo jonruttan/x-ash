@@ -401,118 +401,235 @@
                 (sh-wait pid)
                 (%sh-rstrip-newlines out)))))))))
 
+; --- FIELD SPLITTING -------------------------------------------------------
+;
+; The expander answers a LIST OF FIELDS, not a string, and that is the whole
+; of this section.  A word is split on whitespace AFTER it expands, and only
+; the expanded part is split:
+;
+;   X="a b"; cmd $X          two arguments
+;   X="a b"; cmd "$X"        one
+;   for f in $(cat list)     once per line, not once for the whole file
+;   cmd $EMPTY               NO argument at all, not an empty one
+;   cmd "$EMPTY"             one empty argument
+;
+; Until this existed every one of those was one field, which is the single
+; behaviour scripts lean on hardest without noticing.
+;
+; The walker carries (fields cur started).  `started` is what separates "an
+; empty field" from "no field": literal text and quote marks set it, expanded
+; text sets it only for the characters it actually contributes.  That is why
+; `cmd "$EMPTY"` yields an empty argument -- the quotes started a field -- and
+; `cmd $EMPTY` yields none.
+;
+; IFS IS THE DEFAULT SET, space/tab/newline, and is not configurable: `set` is
+; not implemented, so there is nowhere to change it from.
+
+(def %sh-ws-char?
+  (fn (_ c) (or (= c 32) (or (= c 9) (= c 10)))))
+
+(def %sh-lead-ws?
+  (fn (_ text)
+    (if (= (string-length text) 0)
+      ()
+      (%sh-ws-char? (convert (string-ref text 0) %int)))))
+
+(def %sh-trail-ws?
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (if (= n 0)
+        ()
+        (%sh-ws-char? (convert (string-ref text (- n 1)) %int))))))
+
+; The non-empty runs between whitespace, in order.
+(def %sh-ifs-split
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i cur acc)
+          (if (>= i n)
+            (reverse (if (= (string-length cur) 0) acc (pair cur acc)))
+            (let ((c (convert (string-ref text i) %int)))
+              (if (%sh-ws-char? c)
+                (self (+ i 1) ""
+                  (if (= (string-length cur) 0) acc (pair cur acc)))
+                (self (+ i 1)
+                  (string-append cur (substring text i (+ i 1))) acc))))))
+      (go 0 "" ()))))
+
+; Every piece after the first STARTS a field, so the one in hand is pushed
+; ahead of it.
+(def %sh-merge-pieces
+  (fn (self fields cur pieces)
+    (if (null? pieces)
+      (list fields cur)
+      (self (pair cur fields) (first pieces) (rest pieces)))))
+
+; Splice expanded TEXT into the walker's state, splitting it.  Answers the new
+; (fields cur started).
+(def %sh-merge-expanded
+  (fn (_ fields cur started text)
+    (let ((pieces (%sh-ifs-split text)))
+      (if (null? pieces)
+        ; All whitespace (or nothing).  Whitespace still closes a field that
+        ; has content; nothing at all changes nothing.
+        (if (if (> (string-length text) 0) started ())
+          (list (pair cur fields) "" ())
+          (list fields cur started))
+        (let ((lead (if (%sh-lead-ws? text) started ())))
+          (let ((f1 (if lead (pair cur fields) fields))
+                (c1 (if lead "" cur)))
+            (let ((res (%sh-merge-pieces f1
+                         (string-append c1 (first pieces))
+                         (rest pieces))))
+              (if (%sh-trail-ws? text)
+                (list (pair (first (rest res)) (first res)) "" ())
+                (list (first res) (first (rest res)) #t)))))))))
+
+; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
+; build their word list backwards and reverse at the end.
+(def %sh-push-fields
+  (fn (self fields acc)
+    (if (null? fields) acc (self (rest fields) (pair (first fields) acc)))))
+
+; Close the word: the field in hand becomes one iff anything started it.
+(def %sh-fields-finish
+  (fn (_ fields cur started)
+    (reverse (if started (pair cur fields) fields))))
+
+; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
+; a redirection target (where more than one field is an ambiguous redirect).
 (def %sh-expand-str
-  (fn (_ s mode0)
+  (fn (_ s mode0 split?)
     (let ((n (string-length s)))
       (def go
-        (fn (self i mode acc)
+        (fn (self i mode fields cur started)
           (if (>= i n)
-            acc
+            (%sh-fields-finish fields cur started)
             (let ((c (convert (string-ref s i) %int)))
               (match
                 ; --- inside single quotes: literal until the closing quote
                 ((= mode 1)
                   (if (= c %sh-squote)
-                    (self (+ i 1) 0 acc)
-                    (self (+ i 1) 1 (string-append acc (substring s i (+ i 1))))))
-                ; --- region switches
-                ((and (= mode 0) (= c %sh-squote)) (self (+ i 1) 1 acc))
-                ((and (= mode 0) (= c %sh-dquote)) (self (+ i 1) 2 acc))
-                ((and (= mode 2) (= c %sh-dquote)) (self (+ i 1) 0 acc))
-                ; --- backslash: emit what it protects, and resume PAST it, so
-                ;     a `$` it protected stays a `$`
+                    (self (+ i 1) 0 fields cur started)
+                    (self (+ i 1) 1 fields
+                      (string-append cur (substring s i (+ i 1))) #t)))
+                ; --- region switches.  A quote STARTS a field even when it
+                ;     encloses nothing, which is what makes `cmd ""` pass an
+                ;     empty argument.
+                ((and (= mode 0) (= c %sh-squote))
+                  (self (+ i 1) 1 fields cur #t))
+                ((and (= mode 0) (= c %sh-dquote))
+                  (self (+ i 1) 2 fields cur #t))
+                ((and (= mode 2) (= c %sh-dquote))
+                  (self (+ i 1) 0 fields cur #t))
+                ; --- backslash: emit what it protects, and resume PAST it
                 ((and (= c %sh-backslash) (< (+ i 1) n))
                   (let ((d (convert (string-ref s (+ i 1)) %int)))
                     (if (or (= mode 0) (%sh-dq-escapable? d))
-                      (self (+ i 2) mode
-                        (string-append acc (substring s (+ i 1) (+ i 2))))
-                      ; Not escapable in this context: both characters stand.
-                      (self (+ i 2) mode
-                        (string-append acc (substring s i (+ i 2)))))))
-                ; --- the older backtick substitution.  A backtick is not a
-                ;     word-break character, so `pwd` already arrives inside the
-                ;     word and only needs interpreting here.
+                      (self (+ i 2) mode fields
+                        (string-append cur (substring s (+ i 1) (+ i 2))) #t)
+                      (self (+ i 2) mode fields
+                        (string-append cur (substring s i (+ i 2))) #t))))
+                ; --- the older backtick substitution
                 ((= c 96)
                   (let ((e (%sh-bt-end s (+ i 1) n)))
                     (if (< e 0)
-                      (self (+ i 1) mode
-                        (string-append acc (substring s i (+ i 1))))
-                      (self (+ e 1) mode
-                        (string-append acc
-                          (%sh-cmd-subst (substring s (+ i 1) e)))))))
+                      (self (+ i 1) mode fields
+                        (string-append cur (substring s i (+ i 1))) #t)
+                      (%sh-emit self (+ e 1) mode fields cur started
+                        (%sh-cmd-subst (substring s (+ i 1) e)) split?))))
                 ; --- expansion
-                ((= c %sh-dollar) (%sh-expand-dollar self s i n mode acc))
+                ((= c %sh-dollar)
+                  (%sh-expand-dollar self s i n mode fields cur started split?))
                 (#t
-                  (self (+ i 1) mode
-                    (string-append acc (substring s i (+ i 1))))))))))
-      (go 0 mode0 ""))))
+                  (self (+ i 1) mode fields
+                    (string-append cur (substring s i (+ i 1))) #t)))))))
+      ; A tok-dq ARRIVES WITH ITS QUOTES ALREADY STRIPPED (the reader took
+      ; them), so the walker never meets the `"` that would have started the
+      ; field -- and `cmd ""` passed NO argument instead of an empty one.
+      ; Starting mode 2 with the field already open is that quote, restored.
+      (go 0 mode0 () "" (if (= mode0 2) #t ())))))
 
-; The `$` arm, lifted out so the walk above stays readable.  CONT is the
-; walker's own continuation, called with the index to resume at.
+; One expansion's worth of text into the walker.  Split only when splitting is
+; on AND we are outside quotes -- inside `"..."` a value keeps its spaces,
+; which is the entire point of quoting it.
+(def %sh-emit
+  (fn (_ cont nexti mode fields cur started text split?)
+    (if (if split? (= mode 0) ())
+      (let ((r (%sh-merge-expanded fields cur started text)))
+        (cont nexti mode (first r) (first (rest r))
+          (first (rest (rest r)))))
+      (cont nexti mode fields (string-append cur text) #t))))
+
+; The `$` arm.  CONT is the walker's own continuation.
 (def %sh-expand-dollar
-  (fn (_ cont s i n mode acc)
+  (fn (_ cont s i n mode fields cur started split?)
     ; A `$` at the very end is a literal `$`.
     (if (>= (+ i 1) n)
-      (string-append acc "$")
+      (%sh-fields-finish fields (string-append cur "$") #t)
       (let ((d (convert (string-ref s (+ i 1)) %int)))
         (match
           ; $( ... ) -- a command substitution.
           ((= d 40)
             (let ((e (%sh-cs-end s (+ i 2) n 0)))
               (if (< e 0)
-                ; No closing paren: literal, the way an unclosed brace is.
-                (cont (+ i 1) mode (string-append acc "$"))
-                (cont (+ e 1) mode
-                  (string-append acc
-                    (%sh-cmd-subst (substring s (+ i 2) e)))))))
+                (cont (+ i 1) mode fields (string-append cur "$") #t)
+                (%sh-emit cont (+ e 1) mode fields cur started
+                  (%sh-cmd-subst (substring s (+ i 2) e)) split?))))
           ((= d %sh-lbrace)
             (let ((e (%sh-brace-end s (+ i 2) n)))
               (if (< e 0)
-                ; No closing brace: literal, the way a shell that cannot parse
-                ; it prints it back.
-                (cont (+ i 1) mode (string-append acc "$"))
-                (cont (+ e 1) mode
-                  (string-append acc (%sh-var-value (substring s (+ i 2) e)))))))
+                (cont (+ i 1) mode fields (string-append cur "$") #t)
+                (%sh-emit cont (+ e 1) mode fields cur started
+                  (%sh-var-value (substring s (+ i 2) e)) split?))))
           ; The one-character specials: $? $$ $# $@ $* and $1..$9.
           ;
           ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
           ; $1 followed by a literal 0, and ${10} is how the tenth is spelled.
-          ; The brace arm above reaches %sh-var-value with the whole number, so
-          ; both spellings land in the same place.
           ((or (= d 63)                            ; ?
             (or (= d %sh-dollar)                   ; $
              (or (= d 35)                          ; #
               (or (= d 64)                         ; @
                (or (= d 42)                        ; *
                 (and (>= d 48) (<= d 57)))))))     ; 0-9
-            (cont (+ i 2) mode
-              (string-append acc
-                (%sh-var-value (substring s (+ i 1) (+ i 2))))))
+            (%sh-emit cont (+ i 2) mode fields cur started
+              (%sh-var-value (substring s (+ i 1) (+ i 2))) split?))
           ((%sh-name-start? d)
             (let ((e (%sh-name-end s (+ i 1) n)))
-              (cont e mode
-                (string-append acc
-                  (%sh-var-value (substring s (+ i 1) e))))))
+              (%sh-emit cont e mode fields cur started
+                (%sh-var-value (substring s (+ i 1) e)) split?)))
           ; $ followed by anything else is a literal $.
-          (#t (cont (+ i 1) mode (string-append acc "$"))))))))
+          (#t (cont (+ i 1) mode fields (string-append cur "$") #t)))))))
 
-; The unquoted default, for the sites that hold a string rather than a token.
-(def %sh-expand-word
-  (fn (_ word)
-    (if (not (string? word)) word (%sh-expand-str word 0))))
-
-; SINGLE QUOTES SUPPRESS EXPANSION, and that fact lives in the TOKEN, not in
-; the string -- by the time a word is a string, `'$HOME'` and `$HOME` are the
-; same three characters.  The tokenizer already distinguishes them; what was
-; missing is a caller that asks.  So every site that turns a word token into a
-; value goes through here, and expansion happens ONCE, at extraction, where the
-; quoting is still known.
+; --- What the callers see ----------------------------------------------------
+;
+; A tok-sq is one field, always: single quotes suppress everything, splitting
+; included, and `''` is an empty argument rather than none.
 (def %sh-expand-tok
   (fn (_ tok)
-    (let ((val (%tok-word-val tok)))
-      (if (eq? (first tok) (lit tok-sq))
-        val
-        (%sh-expand-str val (if (eq? (first tok) (lit tok-dq)) 2 0))))))
+    (if (eq? (first tok) (lit tok-sq))
+      (list (%tok-word-val tok))
+      (%sh-expand-str (%tok-word-val tok)
+        (if (eq? (first tok) (lit tok-dq)) 2 0) #t))))
+
+; The unsplit reading, for a `case` subject and a redirection target.
+(def %sh-expand-tok-1
+  (fn (_ tok)
+    (if (eq? (first tok) (lit tok-sq))
+      (%tok-word-val tok)
+      (let ((fs (%sh-expand-str (%tok-word-val tok)
+                  (if (eq? (first tok) (lit tok-dq)) 2 0) ())))
+        (if (null? fs) "" (first fs))))))
+
+; Still string-in, string-out, for the sites that hold a value rather than a
+; token.  Unsplit by construction.
+(def %sh-expand-word
+  (fn (_ word)
+    (if (not (string? word))
+      word
+      (let ((fs (%sh-expand-str word 0 ())))
+        (if (null? fs) "" (first fs))))))
 
 (def %sh-expand-words
   (fn (_ wds)
@@ -1080,7 +1197,11 @@
                           (%default-fd rop))))
                   (if (%cursor-empty? cur)
                     (error "parse error: redirect without target")
-                    (let ((target (%sh-expand-tok (%cursor-peek cur))))
+                    ; NOT SPLIT.  `> $f` with two fields in $f is an
+                    ; ambiguous redirect in POSIX, not two files; taking the
+                    ; unsplit reading keeps the common case right and the
+                    ; pathological one harmless.
+                    (let ((target (%sh-expand-tok-1 (%cursor-peek cur))))
                       (%cursor-advance! cur)
                       (%collect-cmd-tokens
                         cur
@@ -1119,7 +1240,8 @@
                       ; expansion, so a variable holding "then" must not become
                       ; one.
                       (%collect-cmd-tokens
-                        cur (pair (%sh-expand-tok tok) wds) redirs))))
+                        cur (%sh-push-fields (%sh-expand-tok tok) wds)
+                        redirs))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
 (def %eval-simple-cmd
@@ -1362,9 +1484,11 @@
             (eq? (first (%cursor-peek cur)) (lit tok-op))
             (string=? (first (rest (%cursor-peek cur))) ";")))
       (reverse ws)
-      (let ((w (%sh-expand-tok (%cursor-peek cur))))
+      (let ((fs (%sh-expand-tok (%cursor-peek cur))))
         (%cursor-advance! cur)
-        (%collect-for-words cur (pair w ws))))))
+        ; SPLICED, which is what makes `for f in $(cat list)` iterate once per
+        ; line instead of once over the whole file.
+        (%collect-for-words cur (%sh-push-fields fs ws))))))
 ; for var [in words...]; do body; done
 
 (def %eval-for
@@ -1656,7 +1780,8 @@
       (%cursor-advance! cur)
       ; consume WORD
 
-      (let ((word (%sh-expand-tok word-tok)))
+      ; The case SUBJECT is expanded without field splitting (POSIX).
+      (let ((word (%sh-expand-tok-1 word-tok)))
         (%skip-newlines cur)
         (%expect-word cur "in")
         (%skip-newlines cur)

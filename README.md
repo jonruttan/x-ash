@@ -29,6 +29,11 @@ one. An unset name expands to nothing.
 Command substitution: `$(...)` and the older `` `...` ``, nested, and inside
 double quotes. Trailing newlines come off, as POSIX asks.
 
+Field splitting: an unquoted expansion splits on whitespace and a quoted one
+does not, so `X="a b"; cmd $X` passes two arguments and `cmd "$X"` one. An
+unquoted expansion of nothing produces *no* argument; `""` produces an empty
+one. `for f in $(cat list)` iterates once per line.
+
 Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
 `until`, `for`, `case`, `!` negation, and `( ... )` subshells.
 
@@ -54,14 +59,9 @@ unknown operator is a usage error (status 2), not a silent false.
 expansion `$((...))`, *pathname* globbing (expanding `*.txt` against a
 directory — `case` patterns are matched, but a bare `*` on a command line is
 passed through as itself), here-documents, `{ ...; }` grouping, `set` and its
-options, `trap`, `local`, `command`, and job control.
-
-**The one to know about is field splitting.** A word is not split on
-whitespace after it expands, so `X="a b"; cmd $X` passes *one* argument rather
-than two, and `for f in $(cat list)` iterates *once* over the whole file
-rather than once per line. Quote-then-split is the shell behaviour most
-scripts lean on without noticing; until it lands, write loops over a fixed
-word list, or drive the per-line work through a pipeline.
+options (so `IFS` is the default space/tab/newline and cannot be changed),
+`trap`, `local`, `command`, `${var:-default}` and its family, and job
+control.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
 has no flush primitive, so a child's buffered output can be lost if the parent
@@ -83,7 +83,7 @@ The terms are in x-lang's
 
 ## Status
 
-**207 of 207 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**222 of 222 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
