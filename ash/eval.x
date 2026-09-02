@@ -287,13 +287,17 @@
         i))))
 
 ; The index of the closing brace at or after I, or -1.
+; The `}` closing a `${` opened before I, or -1.  Depth-aware, so a default
+; that is itself an expansion -- `${X:-${Y}}` -- closes where it should.
 (def %sh-brace-end
-  (fn (self s i n)
+  (fn (self s i n depth)
     (if (>= i n)
       (- 0 1)
-      (if (= (convert (string-ref s i) %int) #\})
-        i
-        (self s (+ i 1) n)))))
+      (let ((c (convert (string-ref s i) %int)))
+        (cond
+          ((= c #\{) (self s (+ i 1) n (+ depth 1)))
+          ((= c #\}) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
+          (else (self s (+ i 1) n depth)))))))
 
 ; Inside double quotes a backslash is literal EXCEPT before one of $ ` " \ and
 ; newline -- so `"a\db"` keeps its backslash and `"a\$b"` does not.  Outside
@@ -556,6 +560,177 @@
   (fn (self fields acc)
     (if (null? fields) acc (self (rest fields) (pair (first fields) acc)))))
 
+; --- ${NAME OP WORD} --------------------------------------------------------
+;
+; The parameter expansion operators.  Each is a NAME, whether a `:` in front of
+; it means "null counts as unset", and what it does -- so they are a table and
+; the walk that finds them is written once.
+;
+;   ${X:-w} ${X-w}   w when X is unset (or null, with the colon)
+;   ${X:=w} ${X=w}   as above, and ASSIGN it
+;   ${X:?w} ${X?w}   as above, but raise w
+;   ${X:+w} ${X+w}   w when X is SET -- the inverted one
+;   ${#X}            the length of X
+;   ${X#p} ${X##p}   shortest / longest PREFIX matching the glob p, removed
+;   ${X%p} ${X%%p}   shortest / longest SUFFIX, removed
+
+; Every value operator answers from the same four facts, so they share a
+; signature: the name (for `=`), the current value, whether the operator FIRED,
+; and the already-expanded word.
+(def %sh-param-default
+  (fn (_ name val fired? word) (if fired? word val)))
+
+(def %sh-param-assign
+  (fn (_ name val fired? word)
+    (if fired? (do (sh-setenv name word) word) val)))
+
+(def %sh-param-error
+  (fn (_ name val fired? word)
+    (if fired?
+      (error (string-append name ": "
+               (if (= (string-length word) 0) "parameter not set" word)))
+      val)))
+
+; `+` fires on the opposite condition to the other three: it wants the word
+; when the parameter IS set.  The caller inverts before calling, so this stays
+; the same shape as its neighbours.
+(def %sh-param-alt
+  (fn (_ name val fired? word) (if fired? word "")))
+
+(def %sh-param-value-ops
+  (list (pair "-" %sh-param-default)
+        (pair "=" %sh-param-assign)
+        (pair "?" %sh-param-error)
+        (pair "+" %sh-param-alt)))
+
+; --- Prefix and suffix trimming ---------------------------------------------
+;
+; %sh-glob-at answers "does this pattern match this WHOLE span", so trimming is
+; a search for the span that matches: a prefix is s[0,k) and a suffix s[k,n).
+; Scanning k upward finds the shortest prefix and the longest suffix; downward
+; finds the other two.  One walk, a direction, and which end.
+(def %sh-span-match
+  (fn (self pat s from to k step)
+    (if (or (< k 0) (> k (string-length s)))
+      (- 0 1)
+      (if (%sh-glob-at pat 0 (string-length pat) s (from k) (to k))
+        k
+        (self pat s from to (+ k step) step)))))
+
+(def %sh-trim-prefix
+  (fn (_ val pat longest?)
+    (let ((n (string-length val)))
+      (let ((k (%sh-span-match pat val (fn (_ k) 0) (fn (_ k) k)
+                 (if longest? n 0) (if longest? (- 0 1) 1))))
+        (if (< k 0) val (substring val k n))))))
+
+(def %sh-trim-suffix
+  (fn (_ val pat longest?)
+    (let ((n (string-length val)))
+      (let ((k (%sh-span-match pat val (fn (_ k) k) (fn (_ k) n)
+                 (if longest? 0 n) (if longest? 1 (- 0 1)))))
+        (if (< k 0) val (substring val 0 k))))))
+
+(def %sh-param-trim-ops
+  (list (pair "#"  (fn (_ val pat) (%sh-trim-prefix val pat ())))
+        (pair "##" (fn (_ val pat) (%sh-trim-prefix val pat #t)))
+        (pair "%"  (fn (_ val pat) (%sh-trim-suffix val pat ())))
+        (pair "%%" (fn (_ val pat) (%sh-trim-suffix val pat #t)))))
+
+; Longest first, so `##` is never read as `#` and `:-` never as `-`.
+(def %sh-param-op-names
+  (list ":-" ":=" ":?" ":+" "##" "%%" "-" "=" "?" "+" "#" "%"))
+
+; --- Reading ${...} apart ----------------------------------------------------
+
+(def %sh-str-starts?
+  (fn (_ s prefix)
+    (let ((n (string-length prefix)))
+      (if (> n (string-length s))
+        ()
+        (string=? (substring s 0 n) prefix)))))
+
+; `tail`, not `rest`: naming a parameter `rest` shadows the list primitive of
+; that name, so the recursive step called a STRING.  ("object: no such method
+; names".)
+(def %sh-first-op
+  (fn (self tail names)
+    (if (null? names)
+      ()
+      (if (%sh-str-starts? tail (first names))
+        (first names)
+        (self tail (rest names))))))
+
+; The leading parameter NAME: a run of name characters, or a single special
+; ($?, $#, $1...), or empty when the braces open with an operator.
+(def %sh-param-name
+  (fn (_ inner)
+    (let ((n (string-length inner)))
+      (if (= n 0)
+        ""
+        (let ((c (convert (string-ref inner 0) %int)))
+          (if (%sh-name-start? c)
+            (substring inner 0 (%sh-name-end inner 0 n))
+            (if (null? (%sh-table-get (substring inner 0 1) %sh-special-vars))
+              (if (%sh-digit? c) (substring inner 0 1) "")
+              (substring inner 0 1))))))))
+
+; Is the parameter unset?  A special is always set; a positional is set when it
+; is within range; anything else asks the environment.
+(def %sh-param-unset?
+  (fn (_ name)
+    (cond
+      ((not (null? (%sh-table-get name %sh-special-vars))) ())
+      ((%all-digits? name) (> (convert name %int) (length %sh-args)))
+      (else (null? (sh-getenv name))))))
+
+(def %sh-param-apply
+  (fn (_ name op word)
+    (let ((val (%sh-var-value name))
+          (trim (%sh-table-get op %sh-param-trim-ops)))
+      (if (not (null? trim))
+        ; A trim takes the word as a PATTERN, so it is expanded but not
+        ; measured against set-ness.
+        (trim val (%sh-expand-word word))
+        ; A leading `:` makes null count as unset.  Tested once, here.
+        (let ((colon? (%sh-str-starts? op ":")))
+          (let ((base (if colon? (substring op 1 (string-length op)) op))
+                (absent? (or (%sh-param-unset? name)
+                             (and colon? (= (string-length val) 0)))))
+            (let ((run (%sh-table-get base %sh-param-value-ops)))
+              (if (null? run)
+                val
+                ; `+` fires on the opposite condition to the other three: it
+                ; wants the word when the parameter is PRESENT.
+                (run name val
+                  (if (string=? base "+") (not absent?) absent?)
+                  (%sh-expand-word word))))))))))
+
+; ${...} in full.  Answers the expanded text.
+(def %sh-brace-expand
+  (fn (_ inner)
+    (let ((n (string-length inner)))
+      (cond
+        ((= n 0) "")
+        ; ${#X} is a length; ${#} alone is the parameter COUNT, which
+        ; %sh-var-value already knows as the special "#".
+        ((and (> n 1) (= (convert (string-ref inner 0) %int) #\#))
+          (convert
+            (string-length (%sh-var-value (substring inner 1 n)))
+            %string))
+        (else
+          (let ((name (%sh-param-name inner)))
+            (let ((tail (substring inner (string-length name) n)))
+              (if (= (string-length tail) 0)
+                (%sh-var-value name)
+                (let ((op (%sh-first-op tail %sh-param-op-names)))
+                  (if (null? op)
+                    ; Not an operator we know -- the whole of it is a name.
+                    (%sh-var-value inner)
+                    (%sh-param-apply name op
+                      (substring tail (string-length op)
+                        (string-length tail)))))))))))))
+
 ; --- The walk ---------------------------------------------------------------
 ;
 ; MODE says which kind of region the scan is in.  A word is not uniformly
@@ -640,10 +815,11 @@
                 (substitute (+ e 1) (%sh-cmd-subst (substring s (+ i 2) e))))))
           ; ${NAME}
           ((= d #\{)
-            (let ((e (%sh-brace-end s (+ i 2) n)))
+            (let ((e (%sh-brace-end s (+ i 2) n 0)))
               (if (< e 0)
                 (literal-dollar)
-                (substitute (+ e 1) (%sh-var-value (substring s (+ i 2) e))))))
+                (substitute (+ e 1)
+                  (%sh-brace-expand (substring s (+ i 2) e))))))
           ; The one-character specials: $? $$ $# $@ $* and $1..$9.
           ;
           ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
