@@ -65,171 +65,242 @@
 ; user has no reason to type.  A shell that will not come back to the prompt
 ; is unusable in a way that a mis-parsed `echo done` is not.
 
-(def %ash-sq 39)   ; '
-(def %ash-dq 34)   ; "
-(def %ash-bs 92)   ; \
+; --- Is this entry finished? -------------------------------------------------
+;
+; TWO PASSES, because the two questions are independent.  The first strips
+; quoting and answers "is a quote or an escape still open"; the second counts
+; brackets and keywords over what is left.  Done as one walk it needed eight
+; positional parameters threaded through every branch -- quote state, four
+; depths, a word accumulator, the index -- which is how a scanner becomes
+; unreadable.  Neither pass now carries more than four.
+;
+; THE SCAN IS OVER TEXT, NOT TOKENS, and deliberately.  Asking the tokenizer
+; would be tidier and is wrong twice: a tokenizer that raises on unterminated
+; input cannot distinguish "broken" from "not finished yet", which is the whole
+; question here -- and the answer is needed BEFORE the input is worth
+; tokenizing.
+;
+; What continues an entry, each a line a real shell keeps reading after:
+;   - an unclosed ' or " (a quoted string spanning lines)
+;   - a trailing backslash (explicit continuation)
+;   - a trailing |, && or || (the pipeline wants a right-hand side)
+;   - an unbalanced if..fi, case..esac, loop..done, ( .. ) or { .. }
+
+(def %ash-tab 9)
+(def %ash-nl 10)
+(def %ash-space 32)
+(def %ash-dq 34)
+(def %ash-hash 35)
+(def %ash-sq 39)
+(def %ash-lparen 40)
+(def %ash-rparen 41)
+(def %ash-semi 59)
+(def %ash-amp 38)
+(def %ash-pipe 124)
+(def %ash-bs 92)
 (def %ash-lbrace 123)
 (def %ash-rbrace 125)
 
-; Is the character at I a brace standing on its own -- the `{` and `}` that
-; open and close a function body -- rather than one of `${NAME}`?  The test is
-; what PRECEDES it: a standalone brace follows whitespace, a `;`, or the start
-; of the entry, and `${` never does.
+(def %ash-ws?
+  (fn (_ c) (or (= c %ash-space) (= c %ash-tab) (= c %ash-nl))))
+
+; --- Pass 1: strip quoting ---------------------------------------------------
 ;
-; Counting every brace would work for `${NAME}` (balanced, so it nets out) and
-; break on `"${X"` inside a string; counting only standalone ones is both
-; narrower and what a shell actually means by the word `{`.
-(def %ash-standalone-brace?
+; Quoted text is replaced by SPACES rather than removed: it must not
+; contribute keywords (`echo 'done'` closes nothing) and must not glue its
+; neighbours into one word.  The result is the same length as the input, which
+; keeps the "what precedes this character" test in pass 2 honest.
+;
+; Answers (bare . open?), where open? is true when a quote or a trailing
+; backslash is still waiting.
+(def %ash-bare (fn (_ text open?) (pair text open?)))
+(def %ash-bare-text (fn (_ r) (first r)))
+(def %ash-bare-open? (fn (_ r) (rest r)))
+
+(def %ash-strip
+  (fn (_ s)
+    (let ((n (Str8 length s)))
+      (def go
+        (fn (self i mode out)
+          (if (>= i n)
+            (%ash-bare out (if (= mode 0) () #t))
+            (let ((c (Str8 ref i s)))
+              (cond
+                ; Inside '...' -- only the matching quote closes it, and a
+                ; backslash is literal (POSIX): 'it\' IS closed.
+                ((= mode 1)
+                  (self (+ i 1) (if (= c %ash-sq) 0 1)
+                        (Str8 append out " ")))
+                ; Inside "..." -- a backslash escapes the next character.
+                ((= mode 2)
+                  (if (and (= c %ash-bs) (< (+ i 1) n))
+                    (self (+ i 2) 2 (Str8 append out "  "))
+                    (self (+ i 1) (if (= c %ash-dq) 0 2)
+                          (Str8 append out " "))))
+                ; Outside quotes.  A backslash at the very END is the
+                ; continuation; anywhere else it just escapes one character.
+                ((= c %ash-bs)
+                  (if (= (+ i 1) n)
+                    (%ash-bare out #t)
+                    (self (+ i 2) 0 (Str8 append out "  "))))
+                ((= c %ash-sq) (self (+ i 1) 1 (Str8 append out " ")))
+                ((= c %ash-dq) (self (+ i 1) 2 (Str8 append out " ")))
+                ; A comment runs to the end of the line -- but `#` only starts
+                ; one where a word could start, the same rule the tokenizer
+                ; follows, so `echo $#` is not a comment.
+                ((and (= c %ash-hash) (%ash-word-boundary? s i))
+                  (self (%ash-eol s (+ i 1) n) 0 out))
+                (else
+                  (self (+ i 1) 0 (Str8 append out (Str8 sub i 1 s)))))))))
+      (go 0 0 ""))))
+
+(def %ash-eol
+  (fn (self s i n)
+    (if (>= i n)
+      i
+      (if (= (Str8 ref i s) %ash-nl) i (self s (+ i 1) n)))))
+
+; Does a word (or a comment, or a standalone brace) begin at I?  True at the
+; start of the entry and after whitespace or a `;`.
+(def %ash-word-boundary?
   (fn (_ s i)
     (if (= i 0)
       #t
       (let ((p (Str8 ref (- i 1) s)))
-        (or (= p 32) (or (= p 9) (or (= p 10) (= p 59))))))))
+        (or (%ash-ws? p) (= p %ash-semi))))))
 
-; The scanner's state rides in a list so one walk answers everything:
-;   (quote-char paren-depth if-depth do-depth case-depth word-acc last-op)
-; quote-char is 0 outside a string, else 39 or 34.
+; --- Pass 2: count what is still open ---------------------------------------
+;
+; The depths travel as ONE vector rather than five parameters:
+;   (paren brace if loop case)
+; Kept separate rather than summed to a single counter, because a `done` inside
+; an if body would otherwise cancel the `if` and the prompt would evaluate an
+; unfinished entry -- `if true; then echo done; fi` typed over four lines.
+(def %ash-depth-zero (list 0 0 0 0 0))
+(def %ash-delta-none (list 0 0 0 0 0))
+
+; Floored at zero, so under-counting can only end an entry EARLY -- never hang
+; the prompt waiting for a closer the user has no reason to type.  A shell that
+; will not come back to the prompt is unusable in a way that a mis-read
+; `echo done` is not.
+(def %ash-depth-add
+  (fn (self ds delta)
+    (if (null? ds)
+      ()
+      (pair (let ((v (+ (first ds) (first delta)))) (if (< v 0) 0 v))
+            (self (rest ds) (rest delta))))))
+
+(def %ash-depth-open?
+  (fn (self ds)
+    (if (null? ds) () (if (> (first ds) 0) #t (self (rest ds))))))
+
+; THE LOOP KEYWORD OPENS THE LOOP, NOT `do`.  Counting `do` against `done`
+; reads `for f in a b` as FINISHED, because the `do` is on the next line and
+; nothing is yet unbalanced -- the prompt then answered "parse error: expected
+; do" before the user had finished typing.  `for`, `while` and `until` each
+; require exactly one `done`, so they are what counts.
+(def %ash-kw-delta
+  (fn (_ w)
+    (match
+      ((str=? w "if")    (list 0 0  1  0  0))
+      ((str=? w "fi")    (list 0 0 -1  0  0))
+      ((str=? w "for")   (list 0 0  0  1  0))
+      ((str=? w "while") (list 0 0  0  1  0))
+      ((str=? w "until") (list 0 0  0  1  0))
+      ((str=? w "done")  (list 0 0  0 -1  0))
+      ((str=? w "case")  (list 0 0  0  0  1))
+      ((str=? w "esac")  (list 0 0  0  0 -1))
+      (#t %ash-delta-none))))
 
 (def %ash-word-char?
   (fn (_ c)
     (or (and (>= c 97) (<= c 122))            ; a-z
-        (or (and (>= c 65) (<= c 90))         ; A-Z
-            (or (and (>= c 48) (<= c 57))     ; 0-9
-                (= c 95))))))                 ; _
+        (and (>= c 65) (<= c 90))             ; A-Z
+        (and (>= c 48) (<= c 57))             ; 0-9
+        (= c 95))))                           ; _
 
-; Bump a depth, never below zero -- see the floor note above.
-(def %ash-bump
-  (fn (_ n d) (let ((v (+ n d))) (if (< v 0) 0 v))))
+; A brace counts only when it stands on its own -- the `{` and `}` of a
+; function body.  `${NAME}` never does, and counting every brace would break on
+; an unclosed `${` inside a string, which must not hang the prompt.
+(def %ash-brace-delta
+  (fn (_ s i c)
+    (if (not (%ash-word-boundary? s i))
+      %ash-delta-none
+      (match
+        ((= c %ash-lbrace) (list 0  1 0 0 0))
+        ((= c %ash-rbrace) (list 0 -1 0 0 0))
+        (#t %ash-delta-none)))))
 
-; A completed word adjusts exactly one depth.  Returns the delta triple
-; (if-delta loop-delta case-delta).
-;
-; THE LOOP KEYWORD OPENS THE LOOP, NOT `do`.  Counting `do` against `done` --
-; which is what this did first -- reads `for f in a b` as a FINISHED entry,
-; because the `do` is on the next line and nothing yet is unbalanced.  The
-; prompt then evaluated it and answered "parse error: expected do" before the
-; user had finished typing.  `for`, `while` and `until` each require exactly
-; one `done`, so they are what counts; `do` itself contributes nothing.
-(def %ash-kw-delta
-  (fn (_ w)
+(def %ash-char-delta
+  (fn (_ s i c)
     (match
-      ((str=? w "if")    (list  1  0  0))
-      ((str=? w "fi")    (list -1  0  0))
-      ((str=? w "for")   (list  0  1  0))
-      ((str=? w "while") (list  0  1  0))
-      ((str=? w "until") (list  0  1  0))
-      ((str=? w "done")  (list  0 -1  0))
-      ((str=? w "case")  (list  0  0  1))
-      ((str=? w "esac")  (list  0  0 -1))
-      (#t (list 0 0 0)))))
+      ((= c %ash-lparen) (list  1 0 0 0 0))
+      ((= c %ash-rparen) (list -1 0 0 0 0))
+      (#t (%ash-brace-delta s i c)))))
+
+; Walk the stripped text, folding each completed word and each bracket into the
+; depth vector.
+(def %ash-depths-of
+  (fn (_ s)
+    (let ((n (Str8 length s)))
+      (def go
+        (fn (self i ds word)
+          (if (>= i n)
+            (%ash-depth-add ds (%ash-kw-delta word))
+            (let ((c (Str8 ref i s)))
+              (if (%ash-word-char? c)
+                (self (+ i 1) ds (Str8 append word (Str8 sub i 1 s)))
+                ; A non-word character closes the word in hand, then may open
+                ; or close a bracket itself.
+                (self (+ i 1)
+                      (%ash-depth-add
+                        (%ash-depth-add ds (%ash-kw-delta word))
+                        (%ash-char-delta s i c))
+                      ""))))))
+      (go 0 %ash-depth-zero ""))))
+
+; --- Does the entry end mid-construct? --------------------------------------
+;
+; A trailing operator wants a right-hand side.  Checked on the raw tail rather
+; than in either walk: it is about what the LAST thing on the line was, not
+; about nesting.
+(def %ash-rstrip-end
+  (fn (self s e)
+    (if (= e 0)
+      0
+      (if (%ash-ws? (Str8 ref (- e 1) s)) (self s (- e 1)) e))))
+
+(def %ash-dangling-op?
+  (fn (_ s)
+    (let ((e (%ash-rstrip-end s (Str8 length s))))
+      (if (= e 0)
+        ()
+        (let ((c (Str8 ref (- e 1) s)))
+          (cond
+            ; `|` covers | and ||.
+            ((= c %ash-pipe) #t)
+            ; A lone `&` is a background job and is COMPLETE; only `&&` waits.
+            ((= c %ash-amp)
+              (if (< e 2) () (= (Str8 ref (- e 2) s) %ash-amp)))
+            (else ())))))))
 
 ; %ash-complete? INPUT -> #t when the entry can be evaluated, () when the
 ; prompt should keep reading.
 (def %ash-complete?
   (fn (_ s)
-    (let ((n (Str8 length s)))
-      (def go
-        (fn (self i q paren brace ifd dod cased word)
-          ; End of input: fold any trailing word, then decide.
-          (if (>= i n)
-            (let ((d (%ash-kw-delta word)))
-              (let ((ifd2   (%ash-bump ifd   (first d)))
-                    (dod2   (%ash-bump dod   (first (rest d))))
-                    (cased2 (%ash-bump cased (first (rest (rest d))))))
-                (if (not (= q 0))
-                  ()                                  ; inside a quoted string
-                  (if (> paren 0)
-                    ()
-                  (if (> brace 0)
-                    ()
-                    (if (> ifd2 0)
-                      ()
-                      (if (> dod2 0)
-                        ()
-                        (if (> cased2 0) () #t))))))))
-            (let ((c (Str8 ref i s)))
-              (if (not (= q 0))
-                ; Inside a string: only the matching quote closes it.  A
-                ; backslash escapes the next character in a "..." but is
-                ; literal in a '...', which is POSIX and matters here --
-                ; 'it\' is a CLOSED string, "it\" is not.
-                (if (and (= q %ash-dq) (= c %ash-bs))
-                  (self (+ i 2) q paren brace ifd dod cased word)
-                  (if (= c q)
-                    (self (+ i 1) 0 paren brace ifd dod cased word)
-                    (self (+ i 1) q paren brace ifd dod cased word)))
-                ; Outside a string.
-                (if (= c %ash-bs)
-                  ; A backslash at the very end IS the continuation; anywhere
-                  ; else it just escapes one character.
-                  (if (= (+ i 1) n)
-                    ()
-                    (self (+ i 2) q paren brace ifd dod cased ""))
-                  (if (or (= c %ash-sq) (= c %ash-dq))
-                    (self (+ i 1) c paren brace ifd dod cased word)
-                    (if (%ash-word-char? c)
-                      (self (+ i 1) q paren brace ifd dod cased
-                            (Str8 append word (Str8 sub i 1 s)))
-                      ; A non-word character closes the word in hand and
-                      ; applies its keyword delta.
-                      (let ((d (%ash-kw-delta word)))
-                        (let ((ifd2   (%ash-bump ifd   (first d)))
-                              (dod2   (%ash-bump dod   (first (rest d))))
-                              (cased2 (%ash-bump cased (first (rest (rest d))))))
-                          (if (= c 40)                       ; (
-                            (self (+ i 1) q (+ paren 1) brace ifd2 dod2 cased2 "")
-                            (if (= c 41)                     ; )
-                              (self (+ i 1) q (%ash-bump paren -1) brace ifd2 dod2 cased2 "")
-                              (if (= c 35)                   ; # -- comment
-                                (self n q paren brace ifd2 dod2 cased2 "")
-                                (if (and (= c %ash-lbrace)
-                                         (%ash-standalone-brace? s i))
-                                  (self (+ i 1) q paren (+ brace 1)
-                                        ifd2 dod2 cased2 "")
-                                (if (and (= c %ash-rbrace)
-                                         (%ash-standalone-brace? s i))
-                                  (self (+ i 1) q paren (%ash-bump brace -1)
-                                        ifd2 dod2 cased2 "")
-                                  (self (+ i 1) q paren brace
-                                        ifd2 dod2 cased2 ""))))))))))))))))
-      (if (= n 0)
-        #t
-        ; A trailing operator wants a right-hand side.  Checked on the raw
-        ; tail rather than in the walk: the walk is about nesting, and this is
-        ; about what the LAST thing on the line was.
-        (if (%ash-dangling-op? s)
-          ()
-          (go 0 0 0 0 0 0 0 ""))))))
-
-; Does the input end in an operator that needs more?  Trailing whitespace is
-; ignored first, and a `|` that is part of `||` is the same answer either way.
-(def %ash-dangling-op?
-  (fn (_ s)
-    (def rstrip
-      (fn (self e)
-        (if (= e 0)
-          0
-          (let ((c (Str8 ref (- e 1) s)))
-            (if (or (= c 32) (or (= c 9) (= c 10)))
-              (self (- e 1))
-              e)))))
-    (let ((e (rstrip (Str8 length s))))
-      (if (= e 0)
+    (if (= (Str8 length s) 0)
+      #t
+      (if (%ash-dangling-op? s)
         ()
-        (let ((c (Str8 ref (- e 1) s)))
-          ; `|` and `&` cover |, ||, && ; a lone `&` is a background job and
-          ; is COMPLETE, so it is excluded by requiring a doubled ampersand.
-          (if (= c 124)                                    ; |
-            #t
-            (if (= c 38)                                   ; &
-              (if (< e 2) () (= (Str8 ref (- e 2) s) 38))   ; && only
-              ())))))))
+        (let ((stripped (%ash-strip s)))
+          (if (%ash-bare-open? stripped)
+            ()
+            ; `()` for false, not `#f`: this bundle spells falsity `()`
+            ; throughout, and `not` would answer `#f` here.
+            (if (%ash-depth-open? (%ash-depths-of (%ash-bare-text stripped)))
+              ()
+              #t)))))))
 
-; --- read one entry, continuing while it is unfinished -----------------------
-;
-; The continuation prompt is PS2, `> `, and the accumulated text keeps its
-; newlines: the tokenizer emits sh-newline tokens and %eval-list treats one as
-; a list separator, which is exactly what a `do` body needs between commands.
 (def %ash-read-entry
   (fn (_ first-line)
     (def more

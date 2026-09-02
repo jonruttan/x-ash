@@ -91,25 +91,63 @@
       ())))
 ; --- Reserved word check ---
 
+; --- The character codes this file compares against -------------------------
+;
+; Named once, here, because `(= c 96)` in the middle of a scanner is a puzzle
+; and `%sh-backtick` is not.  x has character literals (`#\$`), but the
+; tokenizer's own note explains why the scanners hold ints: the comparisons run
+; per character inside reader callbacks, where the conversion allocates.
+(def %sh-tab 9)
+(def %sh-newline 10)
+(def %sh-space 32)
+(def %sh-dquote 34)
+(def %sh-hash 35)
+(def %sh-dollar 36)
+(def %sh-squote 39)
+(def %sh-lparen 40)
+(def %sh-rparen 41)
+(def %sh-star 42)
+(def %sh-dash 45)
+(def %sh-digit-0 48)
+(def %sh-digit-9 57)
+(def %sh-question 63)
+(def %sh-at 64)
+(def %sh-upper-a 65)
+(def %sh-upper-z 90)
+(def %sh-lbracket 91)
+(def %sh-backslash 92)
+(def %sh-rbracket 93)
+(def %sh-bang 33)
+(def %sh-caret 94)
+(def %sh-underscore 95)
+(def %sh-backtick 96)
+(def %sh-lbrace 123)
+(def %sh-rbrace 125)
+
+; --- Word sets --------------------------------------------------------------
+;
+; A set of words is a LIST of words.  Written as a chain of string=? it reads
+; as logic when it is data, and every addition means editing the shape rather
+; than the contents.
+(def %sh-word-in?
+  (fn (_ word words) (not (null? (List index-of word words)))))
+
+(def %sh-reserved-words
+  (list "if" "then" "elif" "else" "fi"
+        "while" "until" "for" "do" "done"
+        "case" "in" "esac" "!" "{" "}"))
+
+; The subset that CLOSES a construct.  %sh-reserved-words is the full sixteen
+; and is right for asking "could this word be syntax"; these are the ones that
+; may terminate a command already in progress.  `if`, `while`, `for`, `case`,
+; `in`, `!` and `{` are all OPENERS -- no compound parser looks for one as a
+; terminator, so treating them as arguments costs nothing and is what a shell
+; does.
+(def %sh-closing-words
+  (list "then" "elif" "else" "fi" "do" "done" "esac" "}"))
+
 (def %reserved-word?
-  (fn (_ word)
-    (or
-      (string=? word "if")
-      (string=? word "then")
-      (string=? word "elif")
-      (string=? word "else")
-      (string=? word "fi")
-      (string=? word "while")
-      (string=? word "until")
-      (string=? word "for")
-      (string=? word "do")
-      (string=? word "done")
-      (string=? word "case")
-      (string=? word "in")
-      (string=? word "esac")
-      (string=? word "!")
-      (string=? word "{")
-      (string=? word "}"))))
+  (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
 ; The reserved words that CLOSE a construct.  %reserved-word? is the full
 ; fifteen and is right for asking "could this word be syntax"; this is the
 ; subset that may terminate a command already in progress.  `if`, `while`,
@@ -133,14 +171,7 @@
   (fn (_ word)
     (if (= %sh-compound-depth 0)
       ()
-    (or (string=? word "then")
-        (or (string=? word "elif")
-            (or (string=? word "else")
-                (or (string=? word "fi")
-                    (or (string=? word "do")
-                        (or (string=? word "done")
-                            (or (string=? word "esac")
-                                (string=? word "}")))))))))))
+      (%sh-word-in? word %sh-closing-words))))
 
 ; --- Stop-word helper ---
 
@@ -206,19 +237,16 @@
 ; An unset variable expands to the empty string, which is POSIX default (no
 ; `set -u` here yet).
 
-(def %sh-dollar 36)
-(def %sh-lbrace 123)
-(def %sh-rbrace 125)
+(def %sh-digit? (fn (_ c) (and (>= c %sh-digit-0) (<= c %sh-digit-9))))
 
 (def %sh-name-start?
   (fn (_ c)
-    (or (and (>= c 65) (<= c 90))
-        (or (and (>= c 97) (<= c 122))
-            (= c 95)))))
+    (or (and (>= c %sh-upper-a) (<= c %sh-upper-z))
+        (and (>= c 97) (<= c 122))
+        (= c %sh-underscore))))
 
 (def %sh-name-char?
-  (fn (_ c)
-    (or (%sh-name-start? c) (and (>= c 48) (<= c 57)))))
+  (fn (_ c) (or (%sh-name-start? c) (%sh-digit? c))))
 
 ; --- Positional parameters and the function table ---------------------------
 ;
@@ -281,20 +309,13 @@
         i
         (self s (+ i 1) n)))))
 
-(def %sh-backslash 92)
-(def %sh-squote 39)
-(def %sh-dquote 34)
-
 ; Inside double quotes a backslash is literal EXCEPT before one of $ ` " \ and
 ; newline -- so `"a\db"` keeps its backslash and `"a\$b"` does not.  Outside
 ; quotes a backslash escapes whatever follows it.
 (def %sh-dq-escapable?
   (fn (_ c)
-    (or (= c %sh-dollar)
-        (or (= c 96)                       ; `
-            (or (= c %sh-dquote)
-                (or (= c %sh-backslash)
-                    (= c 10)))))))         ; newline
+    (or (= c %sh-dollar) (= c %sh-backtick) (= c %sh-dquote)
+        (= c %sh-backslash) (= c %sh-newline))))
 
 ; QUOTING IS A PROPERTY OF REGIONS WITHIN A WORD, not of the word, and this
 ; scanner is where that becomes true.  `X="a b"` arrives as ONE word token
@@ -334,7 +355,7 @@
     (if (>= i n)
       i
       (let ((c (convert (string-ref s i) %int)))
-        (if (and (= q 34) (= c 92))
+        (if (and (= q %sh-dquote) (= c %sh-backslash))
           (self s (+ i 2) n q)
           (if (= c q) (+ i 1) (self s (+ i 1) n q)))))))
 
@@ -344,10 +365,12 @@
       (- 0 1)
       (let ((c (convert (string-ref s i) %int)))
         (match
-          ((= c 40) (self s (+ i 1) n (+ depth 1)))                  ; (
-          ((= c 41) (if (= depth 0) i (self s (+ i 1) n (- depth 1)))); )
-          ((= c 39) (self s (%sh-skip-quoted s (+ i 1) n 39) n depth))
-          ((= c 34) (self s (%sh-skip-quoted s (+ i 1) n 34) n depth))
+          ((= c %sh-lparen) (self s (+ i 1) n (+ depth 1)))
+          ((= c %sh-rparen) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
+          ((= c %sh-squote)
+            (self s (%sh-skip-quoted s (+ i 1) n %sh-squote) n depth))
+          ((= c %sh-dquote)
+            (self s (%sh-skip-quoted s (+ i 1) n %sh-dquote) n depth))
           (#t (self s (+ i 1) n depth)))))))
 
 ; The index of the closing backtick, or -1.  A backslash escapes one character.
@@ -356,9 +379,9 @@
     (if (>= i n)
       (- 0 1)
       (let ((c (convert (string-ref s i) %int)))
-        (if (= c 92)
+        (if (= c %sh-backslash)
           (self s (+ i 2) n)
-          (if (= c 96) i (self s (+ i 1) n)))))))
+          (if (= c %sh-backtick) i (self s (+ i 1) n)))))))
 
 ; Trailing newlines come off, and only trailing ones -- `$(printf 'a\n\nb\n')`
 ; keeps the blank line in the middle.
@@ -368,7 +391,7 @@
       (fn (self e)
         (if (= e 0)
           0
-          (if (= (convert (string-ref out (- e 1)) %int) 10)
+          (if (= (convert (string-ref out (- e 1)) %int) %sh-newline)
             (self (- e 1))
             e))))
     (let ((e (back (string-length out))))
@@ -426,7 +449,7 @@
 ; not implemented, so there is nowhere to change it from.
 
 (def %sh-ws-char?
-  (fn (_ c) (or (= c 32) (or (= c 9) (= c 10)))))
+  (fn (_ c) (or (= c %sh-space) (= c %sh-tab) (= c %sh-newline))))
 
 (def %sh-lead-ws?
   (fn (_ text)
@@ -457,34 +480,89 @@
                   (string-append cur (substring text i (+ i 1))) acc))))))
       (go 0 "" ()))))
 
-; Every piece after the first STARTS a field, so the one in hand is pushed
-; ahead of it.
-(def %sh-merge-pieces
-  (fn (self fields cur pieces)
-    (if (null? pieces)
-      (list fields cur)
-      (self (pair cur fields) (first pieces) (rest pieces)))))
+; --- The word being built ---------------------------------------------------
+;
+; Three values travel together through the whole of the expansion walk: the
+; FIELDS finished so far (reversed), the field CURrently being built, and
+; whether anything has STARTED that field.  They were passed as three
+; positional parameters and returned as a bare (list a b c), read back with
+; (first (rest (rest r))) -- which is not a data structure, it is a dare.
+;
+; Named constructor and accessors instead.  The representation is still a
+; list, because that is what the language offers; what changes is that no
+; caller has to know it.
+(def %sh-acc (fn (_ fields cur started) (list fields cur started)))
+(def %sh-acc-fields  (fn (_ a) (first a)))
+(def %sh-acc-cur     (fn (_ a) (first (rest a))))
+(def %sh-acc-started (fn (_ a) (first (rest (rest a)))))
 
-; Splice expanded TEXT into the walker's state, splitting it.  Answers the new
-; (fields cur started).
-(def %sh-merge-expanded
-  (fn (_ fields cur started text)
+(def %sh-acc-empty (%sh-acc () "" ()))
+
+; Append one character's worth of text to the field in hand.  Anything literal
+; starts a field, which is what makes `cmd ""` an empty argument.
+(def %sh-acc-add
+  (fn (_ a text)
+    (%sh-acc (%sh-acc-fields a) (string-append (%sh-acc-cur a) text) #t)))
+
+; Mark the field open without adding to it -- what a quote mark does.
+(def %sh-acc-open
+  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-cur a) #t)))
+
+; Close the field in hand and begin the next one.
+(def %sh-acc-break
+  (fn (_ a)
+    (%sh-acc (pair (%sh-acc-cur a) (%sh-acc-fields a)) "" ())))
+
+; Close the word: the field in hand becomes one iff anything started it.
+(def %sh-acc-finish
+  (fn (_ a)
+    (reverse
+      (if (%sh-acc-started a)
+        (pair (%sh-acc-cur a) (%sh-acc-fields a))
+        (%sh-acc-fields a)))))
+
+; --- Splicing expanded text in --------------------------------------------
+;
+; Every piece after the first STARTS a field, so the one in hand is closed
+; ahead of it.
+(def %sh-add-pieces
+  (fn (self a pieces)
+    (if (null? pieces)
+      a
+      (self (%sh-acc-add (%sh-acc-break a) (first pieces)) (rest pieces)))))
+
+; Splice expanded TEXT into the accumulator, splitting it on IFS whitespace.
+;
+; Leading whitespace closes the field in hand; the first piece JOINS whatever
+; is left of it (`p${X}s` is one word made of three); each later piece starts
+; its own; trailing whitespace closes the last.
+(def %sh-add-split
+  (fn (_ a text)
     (let ((pieces (%sh-ifs-split text)))
-      (if (null? pieces)
-        ; All whitespace (or nothing).  Whitespace still closes a field that
-        ; has content; nothing at all changes nothing.
-        (if (if (> (string-length text) 0) started ())
-          (list (pair cur fields) "" ())
-          (list fields cur started))
-        (let ((lead (if (%sh-lead-ws? text) started ())))
-          (let ((f1 (if lead (pair cur fields) fields))
-                (c1 (if lead "" cur)))
-            (let ((res (%sh-merge-pieces f1
-                         (string-append c1 (first pieces))
-                         (rest pieces))))
-              (if (%sh-trail-ws? text)
-                (list (pair (first (rest res)) (first res)) "" ())
-                (list (first res) (first (rest res)) #t)))))))))
+      (cond
+        ; Nothing at all changes nothing; all-whitespace still closes a field
+        ; that has content.
+        ((null? pieces)
+          (if (and (> (string-length text) 0) (%sh-acc-started a))
+            (%sh-acc-break a)
+            a))
+        (else
+          (let ((opened (if (and (%sh-lead-ws? text) (%sh-acc-started a))
+                          (%sh-acc-break a)
+                          a)))
+            (let ((filled (%sh-add-pieces
+                            (%sh-acc-add opened (first pieces))
+                            (rest pieces))))
+              (if (%sh-trail-ws? text) (%sh-acc-break filled) filled))))))))
+
+; One expansion's worth of text.  Split only when splitting is on AND we are
+; outside quotes -- inside `"..."` a value keeps its spaces, which is the
+; entire point of quoting it.
+(def %sh-add-expansion
+  (fn (_ a mode text split?)
+    (if (and split? (= mode %sh-mode-bare))
+      (%sh-add-split a text)
+      (%sh-acc-add a text))))
 
 ; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
 ; build their word list backwards and reverse at the end.
@@ -492,134 +570,128 @@
   (fn (self fields acc)
     (if (null? fields) acc (self (rest fields) (pair (first fields) acc)))))
 
-; Close the word: the field in hand becomes one iff anything started it.
-(def %sh-fields-finish
-  (fn (_ fields cur started)
-    (reverse (if started (pair cur fields) fields))))
+; --- The walk ---------------------------------------------------------------
+;
+; MODE says which kind of region the scan is in.  A word is not uniformly
+; quoted: `X="a b"` and `pre'lit'$X` are each several regions in one word, and
+; the mode is which one the scan is inside right now.
+(def %sh-mode-bare 0)          ; outside quotes
+(def %sh-mode-sq 1)            ; inside '...'
+(def %sh-mode-dq 2)            ; inside "..."
 
 ; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
 ; a redirection target (where more than one field is an ambiguous redirect).
+;
+; A tok-word starts bare.  A tok-dq starts in mode 2 -- its outer quotes were
+; already stripped by the reader, so there is no opening quote left to switch
+; on, and the field must start open or `cmd ""` passes no argument at all.
 (def %sh-expand-str
   (fn (_ s mode0 split?)
     (let ((n (string-length s)))
       (def go
-        (fn (self i mode fields cur started)
+        (fn (self i mode a)
           (if (>= i n)
-            (%sh-fields-finish fields cur started)
-            (let ((c (convert (string-ref s i) %int)))
-              (match
-                ; --- inside single quotes: literal until the closing quote
-                ((= mode 1)
+            (%sh-acc-finish a)
+            (let ((c (convert (string-ref s i) %int))
+                  (here (substring s i (+ i 1))))
+              (cond
+                ; Inside single quotes: literal until the closing quote.
+                ((= mode %sh-mode-sq)
                   (if (= c %sh-squote)
-                    (self (+ i 1) 0 fields cur started)
-                    (self (+ i 1) 1 fields
-                      (string-append cur (substring s i (+ i 1))) #t)))
-                ; --- region switches.  A quote STARTS a field even when it
-                ;     encloses nothing, which is what makes `cmd ""` pass an
-                ;     empty argument.
-                ((and (= mode 0) (= c %sh-squote))
-                  (self (+ i 1) 1 fields cur #t))
-                ((and (= mode 0) (= c %sh-dquote))
-                  (self (+ i 1) 2 fields cur #t))
-                ((and (= mode 2) (= c %sh-dquote))
-                  (self (+ i 1) 0 fields cur #t))
-                ; --- backslash: emit what it protects, and resume PAST it
+                    (self (+ i 1) %sh-mode-bare a)
+                    (self (+ i 1) mode (%sh-acc-add a here))))
+                ; A quote mark switches region and starts a field.
+                ((and (= mode %sh-mode-bare) (= c %sh-squote))
+                  (self (+ i 1) %sh-mode-sq (%sh-acc-open a)))
+                ((and (= mode %sh-mode-bare) (= c %sh-dquote))
+                  (self (+ i 1) %sh-mode-dq (%sh-acc-open a)))
+                ((and (= mode %sh-mode-dq) (= c %sh-dquote))
+                  (self (+ i 1) %sh-mode-bare (%sh-acc-open a)))
+                ; A backslash emits what it protects and resumes PAST it, so a
+                ; `$` it protected stays a `$`.
                 ((and (= c %sh-backslash) (< (+ i 1) n))
                   (let ((d (convert (string-ref s (+ i 1)) %int)))
-                    (if (or (= mode 0) (%sh-dq-escapable? d))
-                      (self (+ i 2) mode fields
-                        (string-append cur (substring s (+ i 1) (+ i 2))) #t)
-                      (self (+ i 2) mode fields
-                        (string-append cur (substring s i (+ i 2))) #t))))
-                ; --- the older backtick substitution
-                ((= c 96)
+                    (self (+ i 2) mode
+                      (%sh-acc-add a
+                        (if (or (= mode %sh-mode-bare) (%sh-dq-escapable? d))
+                          (substring s (+ i 1) (+ i 2))
+                          (substring s i (+ i 2)))))))
+                ; The older backtick substitution.
+                ((= c %sh-backtick)
                   (let ((e (%sh-bt-end s (+ i 1) n)))
                     (if (< e 0)
-                      (self (+ i 1) mode fields
-                        (string-append cur (substring s i (+ i 1))) #t)
-                      (%sh-emit self (+ e 1) mode fields cur started
-                        (%sh-cmd-subst (substring s (+ i 1) e)) split?))))
-                ; --- expansion
-                ((= c %sh-dollar)
-                  (%sh-expand-dollar self s i n mode fields cur started split?))
-                (#t
-                  (self (+ i 1) mode fields
-                    (string-append cur (substring s i (+ i 1))) #t)))))))
-      ; A tok-dq ARRIVES WITH ITS QUOTES ALREADY STRIPPED (the reader took
-      ; them), so the walker never meets the `"` that would have started the
-      ; field -- and `cmd ""` passed NO argument instead of an empty one.
-      ; Starting mode 2 with the field already open is that quote, restored.
-      (go 0 mode0 () "" (if (= mode0 2) #t ())))))
+                      (self (+ i 1) mode (%sh-acc-add a here))
+                      (self (+ e 1) mode
+                        (%sh-add-expansion a mode
+                          (%sh-cmd-subst (substring s (+ i 1) e)) split?)))))
+                ((= c %sh-dollar) (%sh-expand-dollar self s i n mode a split?))
+                (else (self (+ i 1) mode (%sh-acc-add a here))))))))
+      (go 0 mode0
+        (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))))
 
-; One expansion's worth of text into the walker.  Split only when splitting is
-; on AND we are outside quotes -- inside `"..."` a value keeps its spaces,
-; which is the entire point of quoting it.
-(def %sh-emit
-  (fn (_ cont nexti mode fields cur started text split?)
-    (if (if split? (= mode 0) ())
-      (let ((r (%sh-merge-expanded fields cur started text)))
-        (cont nexti mode (first r) (first (rest r))
-          (first (rest (rest r)))))
-      (cont nexti mode fields (string-append cur text) #t))))
-
-; The `$` arm.  CONT is the walker's own continuation.
+; The `$` arm, lifted out so the walk above stays readable.  CONT is the
+; walker's own continuation, resumed at an index with an accumulator.
 (def %sh-expand-dollar
-  (fn (_ cont s i n mode fields cur started split?)
+  (fn (_ cont s i n mode a split?)
+    ; Two local helpers, in a `let` so they stay local: this file already has
+    ; more module-level %-names than it needs, and neither is meaningful
+    ; outside these fifteen lines.
+    (let ((literal-dollar
+            (fn (_) (cont (+ i 1) mode (%sh-acc-add a "$"))))
+          (substitute
+            (fn (_ next text)
+              (cont next mode (%sh-add-expansion a mode text split?)))))
     ; A `$` at the very end is a literal `$`.
     (if (>= (+ i 1) n)
-      (%sh-fields-finish fields (string-append cur "$") #t)
+      (%sh-acc-finish (%sh-acc-add a "$"))
       (let ((d (convert (string-ref s (+ i 1)) %int)))
-        (match
+        (cond
           ; $( ... ) -- a command substitution.
-          ((= d 40)
+          ((= d %sh-lparen)
             (let ((e (%sh-cs-end s (+ i 2) n 0)))
               (if (< e 0)
-                (cont (+ i 1) mode fields (string-append cur "$") #t)
-                (%sh-emit cont (+ e 1) mode fields cur started
-                  (%sh-cmd-subst (substring s (+ i 2) e)) split?))))
+                (literal-dollar)
+                (substitute (+ e 1) (%sh-cmd-subst (substring s (+ i 2) e))))))
+          ; ${NAME}
           ((= d %sh-lbrace)
             (let ((e (%sh-brace-end s (+ i 2) n)))
               (if (< e 0)
-                (cont (+ i 1) mode fields (string-append cur "$") #t)
-                (%sh-emit cont (+ e 1) mode fields cur started
-                  (%sh-var-value (substring s (+ i 2) e)) split?))))
+                (literal-dollar)
+                (substitute (+ e 1) (%sh-var-value (substring s (+ i 2) e))))))
           ; The one-character specials: $? $$ $# $@ $* and $1..$9.
           ;
           ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
           ; $1 followed by a literal 0, and ${10} is how the tenth is spelled.
-          ((or (= d 63)                            ; ?
-            (or (= d %sh-dollar)                   ; $
-             (or (= d 35)                          ; #
-              (or (= d 64)                         ; @
-               (or (= d 42)                        ; *
-                (and (>= d 48) (<= d 57)))))))     ; 0-9
-            (%sh-emit cont (+ i 2) mode fields cur started
-              (%sh-var-value (substring s (+ i 1) (+ i 2))) split?))
+          ((or (= d %sh-question) (= d %sh-dollar) (= d %sh-hash)
+               (= d %sh-at) (= d %sh-star) (%sh-digit? d))
+            (substitute (+ i 2) (%sh-var-value (substring s (+ i 1) (+ i 2)))))
+          ; $NAME
           ((%sh-name-start? d)
             (let ((e (%sh-name-end s (+ i 1) n)))
-              (%sh-emit cont e mode fields cur started
-                (%sh-var-value (substring s (+ i 1) e)) split?)))
+              (substitute e (%sh-var-value (substring s (+ i 1) e)))))
           ; $ followed by anything else is a literal $.
-          (#t (cont (+ i 1) mode fields (string-append cur "$") #t)))))))
+          (else (literal-dollar))))))))
 
 ; --- What the callers see ----------------------------------------------------
 ;
 ; A tok-sq is one field, always: single quotes suppress everything, splitting
 ; included, and `''` is an empty argument rather than none.
+(def %sh-tok-mode
+  (fn (_ tok)
+    (if (eq? (first tok) (lit tok-dq)) %sh-mode-dq %sh-mode-bare)))
+
 (def %sh-expand-tok
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (list (%tok-word-val tok))
-      (%sh-expand-str (%tok-word-val tok)
-        (if (eq? (first tok) (lit tok-dq)) 2 0) #t))))
+      (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (%tok-word-val tok)
-      (let ((fs (%sh-expand-str (%tok-word-val tok)
-                  (if (eq? (first tok) (lit tok-dq)) 2 0) ())))
+      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) ())))
         (if (null? fs) "" (first fs))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
@@ -628,7 +700,7 @@
   (fn (_ word)
     (if (not (string? word))
       word
-      (let ((fs (%sh-expand-str word 0 ())))
+      (let ((fs (%sh-expand-str word %sh-mode-bare ())))
         (if (null? fs) "" (first fs))))))
 
 (def %sh-expand-words
@@ -679,13 +751,28 @@
       0
       (if (string=? op "<>") 0 (if (string=? op "<&") 0 1)))))
 
+; --- The redirection record -------------------------------------------------
+;
+; (sh-redir OP FD TARGET), and its three fields were read back as
+; (first (rest (rest redir))) at each of three sites.  Named, so the shape
+; lives in one place and a reader does not have to count `rest`s.
+;
+; FD arrives as a string when the script wrote one (`2> log`) and as an int
+; from %default-fd otherwise; %sh-redir-fd is where that is reconciled, once.
+(def %sh-redir (fn (_ op fd target) (list (lit sh-redir) op fd target)))
+(def %sh-redir-op     (fn (_ r) (first (rest r))))
+(def %sh-redir-target (fn (_ r) (first (rest (rest (rest r))))))
+(def %sh-redir-fd
+  (fn (_ r)
+    (let ((fd (first (rest (rest r)))))
+      (if (string? fd) (convert fd %int) fd))))
+
 (def %sh-setup-redir
   (fn (_ redir)
-    (let ((op (first (rest redir)))
-           (fd-val (first (rest (rest redir))))
+    (let ((op (%sh-redir-op redir))
            ; Expanded at collection, with its quoting in hand.
-           (target (first (rest (rest (rest redir))))))
-      (let ((fd (if (string? fd-val) (convert fd-val %int) fd-val)))
+           (target (%sh-redir-target redir)))
+      (let ((fd (%sh-redir-fd redir)))
         (if (string=? op "<")
           (let ((fh (sh-open-read target)))
             (sh-dup2 fh fd)
@@ -736,11 +823,6 @@
 ; x.sh's fd 3, and %sh-stdin-save at 19).
 (def %sh-fd-save-base 30)
 
-(def %sh-redir-fd
-  (fn (_ redir)
-    (let ((fd-val (first (rest (rest redir)))))
-      (if (string? fd-val) (convert fd-val %int) fd-val))))
-
 (def %sh-save-fds
   (fn (self redirs)
     (unless (null? redirs)
@@ -757,30 +839,13 @@
         (self (rest redirs))))))
 ; --- Built-in commands ---
 
-(def %sh-builtin?
-  (fn (_ name)
-    (or
-      (string=? name "echo")
-      (or (string=? name "cd")
-      (or (string=? name "export")
-      (or (string=? name "exit")
-      (or (string=? name "true")
-      (or (string=? name "false")
-      (or (string=? name ":")
-      (or (string=? name "test")
-      (or (string=? name "[")
-      ; --- added: a shell without these is a demo, not a shell -----------
-      (or (string=? name "pwd")
-      (or (string=? name "unset")
-      (or (string=? name "read")
-      (or (string=? name "return")
-      (or (string=? name "shift")
-      (or (string=? name ".")
-          (string=? name "source"))))))))))))))))))
+(def %sh-builtins
+  (list "echo" "cd" "pwd" "export" "unset" "read" "return" "shift"
+        "test" "[" "." "source" "exit" "true" "false" ":"))
 
-; `-n` suppresses the trailing newline.  Only the FIRST argument is read as
-; the flag, and only when it is exactly "-n": `echo -n -n` prints "-n", which
-; is what dash does.
+(def %sh-builtin?
+  (fn (_ name) (%sh-word-in? name %sh-builtins)))
+
 (def %sh-echo
   (fn (_ wds)
     (def %print-words ())
@@ -836,6 +901,10 @@
                 (substring word (+ eq-pos 1) (string-length word)))
               0)))))))
 
+; A shell's truth is INVERTED: 0 is true.  %sh-bool turns a predicate's answer
+; into that, once, instead of every arm spelling `(if p 0 1)`.
+(def %sh-bool (fn (_ p) (if p 0 1)))
+
 ; --- test / [ -------------------------------------------------------------
 ;
 ; The 2024 version knew -n, -z, = and != and answered 1 (false) to everything
@@ -852,11 +921,11 @@
   (fn (_ op path)
     (let ((kind (sh-path-kind path)))
       (match
-        ((string=? op "-e") (if (null? kind) 1 0))
-        ((string=? op "-f") (if (eq? kind (lit file)) 0 1))
-        ((string=? op "-d") (if (eq? kind (lit dir)) 0 1))
+        ((string=? op "-e") (%sh-bool (not (null? kind))))
+        ((string=? op "-f") (%sh-bool (eq? kind (lit file))))
+        ((string=? op "-d") (%sh-bool (eq? kind (lit dir))))
         ((string=? op "-s")
-          (if (null? kind) 1 (if (> (sh-path-size path) 0) 0 1)))
+          (%sh-bool (and (not (null? kind)) (> (sh-path-size path) 0))))
         ; nil, not 1: "this is not a file operator", which the caller has to
         ; be able to tell apart from "the test was false".
         (#t ())))))
@@ -865,51 +934,61 @@
   (fn (_ l op r)
     (let ((a (convert l %int)) (b (convert r %int)))
       (match
-        ((string=? op "-eq") (if (= a b) 0 1))
-        ((string=? op "-ne") (if (= a b) 1 0))
-        ((string=? op "-lt") (if (< a b) 0 1))
-        ((string=? op "-le") (if (<= a b) 0 1))
-        ((string=? op "-gt") (if (> a b) 0 1))
-        ((string=? op "-ge") (if (>= a b) 0 1))
+        ((string=? op "-eq") (%sh-bool (= a b)))
+        ((string=? op "-ne") (%sh-bool (not (= a b))))
+        ((string=? op "-lt") (%sh-bool (< a b)))
+        ((string=? op "-le") (%sh-bool (<= a b)))
+        ((string=? op "-gt") (%sh-bool (> a b)))
+        ((string=? op "-ge") (%sh-bool (>= a b)))
         (#t ())))))
 
 (def %sh-test ())
+; The three arities are three different questions, so they get three
+; functions.  As one nested if-ladder this was ten deep, and the arity test,
+; the operator test and the "unknown operator" fallback were interleaved.
+;
+(def %sh-test-1
+  (fn (_ word) (%sh-bool (> (string-length word) 0))))
+
+(def %sh-test-2
+  (fn (_ op val)
+    (match
+      ((string=? op "-n") (%sh-bool (> (string-length val) 0)))
+      ((string=? op "-z") (%sh-bool (= (string-length val) 0)))
+      ((string=? op "!")  (%sh-bool (not (= (%sh-test (list val)) 0))))
+      (#t
+        (let ((r (%sh-test-file op val)))
+          ; An unknown unary operator is a usage error (2), not a false --
+          ; `test -q x` should complain, not quietly fail.
+          (if (null? r)
+            (do (%stderr "ash: test: " op ": unary operator expected\n") 2)
+            r))))))
+
+(def %sh-test-3
+  (fn (_ left op right)
+    (match
+      ((string=? op "=")  (%sh-bool (string=? left right)))
+      ((string=? op "!=") (%sh-bool (not (string=? left right))))
+      (#t
+        (let ((r (%sh-test-num left op right)))
+          (if (null? r)
+            (do (%stderr "ash: test: " op ": binary operator expected\n") 2)
+            r))))))
+
 (set! %sh-test
   (fn (_ wds)
-    (if (null? wds)
-      1
-      (if (= (length wds) 1)
-        (if (= (string-length (first wds)) 0) 1 0)
-        (if (= (length wds) 2)
-          (let ((op (first wds)) (val (first (rest wds))))
-            (if (string=? op "-n")
-              (if (= (string-length val) 0) 1 0)
-              (if (string=? op "-z")
-                (if (= (string-length val) 0) 0 1)
-                (if (string=? op "!")
-                  (if (= (%sh-test (rest wds)) 0) 1 0)
-                  (let ((r (%sh-test-file op val)))
-                    ; An unknown unary operator is a usage error (2), not a
-                    ; false -- `test -q x` should complain, not quietly fail.
-                    (if (null? r)
-                      (do (%stderr "ash: test: " op ": unary operator expected\n") 2)
-                      r))))))
-          (if (= (length wds) 3)
-            (let ((left (first wds))
-                   (op (first (rest wds)))
-                   (right (first (rest (rest wds)))))
-              (if (string=? op "=")
-                (if (string=? left right) 0 1)
-                (if (string=? op "!=")
-                  (if (string=? left right) 1 0)
-                  (let ((r (%sh-test-num left op right)))
-                    (if (null? r)
-                      (do (%stderr "ash: test: " op ": binary operator expected\n") 2)
-                      r)))))
-            ; `! EXPR` at any length, so `test ! -f x` works.
-            (if (string=? (first wds) "!")
-              (if (= (%sh-test (rest wds)) 0) 1 0)
-              1)))))))
+    (let ((n (length wds)))
+      (cond
+        ((= n 0) 1)
+        ; `! EXPR` at any length, so `test ! -f x` works.  Checked before the
+        ; arities so the negation composes with all of them.
+        ((and (> n 1) (string=? (first wds) "!"))
+          (%sh-bool (not (= (%sh-test (rest wds)) 0))))
+        ((= n 1) (%sh-test-1 (first wds)))
+        ((= n 2) (%sh-test-2 (first wds) (first (rest wds))))
+        ((= n 3) (%sh-test-3 (first wds) (first (rest wds))
+                             (first (rest (rest wds)))))
+        (else 1)))))
 
 ; --- pwd / unset / read / . -----------------------------------------------
 
@@ -934,14 +1013,14 @@
     (if (>= i n)
       i
       (let ((c (convert (string-ref s i) %int)))
-        (if (or (= c 32) (= c 9)) (self s (+ i 1) n) i)))))
+        (if (or (= c %sh-space) (= c %sh-tab)) (self s (+ i 1) n) i)))))
 
 (def %sh-read-word-end
   (fn (self s i n)
     (if (>= i n)
       i
       (let ((c (convert (string-ref s i) %int)))
-        (if (or (= c 32) (= c 9)) i (self s (+ i 1) n))))))
+        (if (or (= c %sh-space) (= c %sh-tab)) i (self s (+ i 1) n))))))
 
 (def %sh-read-assign
   (fn (self names line i n)
@@ -1087,36 +1166,33 @@
         wds))))
 ; --- Execute collected command ---
 
+; Every arm of the dispatch below ended `(set! %sh-status status) status`, so
+; that is one function and the dispatch is one `cond`.
+(def %sh-set-status
+  (fn (_ status) (set! %sh-status status) status))
+
 (def %sh-run-cmd
   (fn (_ wds redirs)
-    ; ALREADY EXPANDED, at extraction (%collect-cmd-tokens).  Re-expanding
-    ; here would expand a variable's VALUE -- `X='$Y'; echo $X` would print
-    ; $Y's contents rather than the two characters it holds.
-    (let ((expanded wds))
-      (let ((remaining (%process-assignments expanded)))
-        (if (null? remaining)
-          (do (set! %sh-status 0) 0)
-          (let ((name (first remaining)) (cmd-wds (rest remaining)))
-            ; A FUNCTION WINS OVER AN EXTERNAL AND LOSES TO A BUILTIN, which is
-            ; the POSIX order and is what lets a script define `ls()` that ends
-            ; in `command ls` without recursing forever -- if ash had `command`
-            ; yet.  It does not, so a function shadowing an external is the
-            ; shape to be careful with.
-            (let ((body (%sh-fn-lookup name %sh-functions)))
-              (if (%sh-builtin? name)
-                (let ((status (%sh-run-builtin-redir name cmd-wds redirs)))
-                  (set! %sh-status status)
-                  status)
-                (if (not (null? body))
-                  ; Redirections on a function call apply for the whole body,
-                  ; and the shell's own descriptors must survive it -- the same
-                  ; save/apply/restore a builtin gets.
-                  (let ((status (%sh-run-fn-redir body cmd-wds redirs)))
-                    (set! %sh-status status)
-                    status)
-                  (let ((status (%sh-run-external name cmd-wds redirs)))
-                    (set! %sh-status status)
-                    status))))))))))
+    ; ALREADY EXPANDED, at extraction (%collect-cmd-tokens).  Re-expanding here
+    ; would expand a variable's VALUE -- `X='$Y'; echo $X` would print $Y's
+    ; contents rather than the two characters it holds.
+    (let ((remaining (%process-assignments wds)))
+      (if (null? remaining)
+        ; A bare assignment is a command that did nothing and succeeded.
+        (%sh-set-status 0)
+        (let ((name (first remaining))
+              (args (rest remaining)))
+          (let ((body (%sh-fn-lookup name %sh-functions)))
+            (%sh-set-status
+              (cond
+                ; A FUNCTION WINS OVER AN EXTERNAL AND LOSES TO A BUILTIN,
+                ; which is the POSIX order.
+                ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
+                ; Redirections on a function call apply for the whole body, and
+                ; the shell's own descriptors must survive it -- the same
+                ; save/apply/restore a builtin gets.
+                ((not (null? body)) (%sh-run-fn-redir body args redirs))
+                (else (%sh-run-external name args redirs))))))))))
 
 ; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
@@ -1206,7 +1282,7 @@
                       (%collect-cmd-tokens
                         cur
                         wds
-                        (pair (list (lit sh-redir) rop fd target) redirs))))))
+                        (pair (%sh-redir rop fd target) redirs))))))
               (if (%tok-is-word? tok)
                 (let ((val (%tok-word-val tok)))
                   ; A RESERVED WORD IN ARGUMENT POSITION IS AN ARGUMENT.  This
@@ -1568,7 +1644,7 @@
       ()
       ; A range `a-b` needs its closing character inside the class.
       (if (and (< (+ i 2) hi)
-               (= (convert (string-ref pat (+ i 1)) %int) 45))       ; -
+               (= (convert (string-ref pat (+ i 1)) %int) %sh-dash))
         (if (and (>= c (convert (string-ref pat i) %int))
                  (<= c (convert (string-ref pat (+ i 2)) %int)))
           #t
@@ -1582,7 +1658,7 @@
     (let ((c (convert (string-ref s si) %int)))
       (let ((neg (if (< lo hi)
                    (let ((f (convert (string-ref pat lo) %int)))
-                     (or (= f 33) (= f 94)))                          ; ! ^
+                     (or (= f %sh-bang) (= f %sh-caret)))
                    ())))
         (let ((hit (%sh-glob-class-scan pat (if neg (+ lo 1) lo) hi c)))
           (if neg (if hit () #t) (if hit #t ())))))))
@@ -1595,12 +1671,12 @@
       (fn (self j)
         (if (>= j pn)
           (- 0 1)
-          (if (= (convert (string-ref pat j) %int) 93) j (self (+ j 1))))))
+          (if (= (convert (string-ref pat j) %int) %sh-rbracket) j (self (+ j 1))))))
     (let ((a (if (and (< i pn)
                       (let ((c (convert (string-ref pat i) %int)))
-                        (or (= c 33) (= c 94))))
+                        (or (= c %sh-bang) (= c %sh-caret))))
                (+ i 1) i)))
-      (scan (if (and (< a pn) (= (convert (string-ref pat a) %int) 93))
+      (scan (if (and (< a pn) (= (convert (string-ref pat a) %int) %sh-rbracket))
               (+ a 1) a)))))
 
 (def %sh-glob-at ())
@@ -1620,20 +1696,20 @@
       (if (>= si sn) #t ())
       (let ((pc (convert (string-ref pat pi) %int)))
         (match
-          ((= pc 42) (%sh-glob-star pat (+ pi 1) pn s si sn))         ; *
-          ((= pc 63)                                                  ; ?
+          ((= pc %sh-star) (%sh-glob-star pat (+ pi 1) pn s si sn))
+          ((= pc %sh-question)
             (if (>= si sn) () (self pat (+ pi 1) pn s (+ si 1) sn)))
-          ((= pc 91)                                                  ; [
+          ((= pc %sh-lbracket)
             (let ((e (%sh-glob-class-end pat (+ pi 1) pn)))
               (if (< e 0)
                 ; Unterminated: a literal [
-                (if (and (< si sn) (= (convert (string-ref s si) %int) 91))
+                (if (and (< si sn) (= (convert (string-ref s si) %int) %sh-lbracket))
                   (self pat (+ pi 1) pn s (+ si 1) sn)
                   ())
                 (if (and (< si sn) (%sh-glob-class-match? pat (+ pi 1) e s si))
                   (self pat (+ e 1) pn s (+ si 1) sn)
                   ()))))
-          ((and (= pc 92) (< (+ pi 1) pn))                            ; backslash
+          ((and (= pc %sh-backslash) (< (+ pi 1) pn))
             (if (and (< si sn)
                      (= (convert (string-ref pat (+ pi 1)) %int)
                         (convert (string-ref s si) %int)))
@@ -1873,17 +1949,13 @@
       (if (eq? (first tok) (lit tok-op))
         (%eval-subshell cur)
         (let ((word (first (rest tok))))
-          (if (string=? word "if")
-            (%eval-if cur)
-            (if (string=? word "while")
-              (%eval-while cur)
-              (if (string=? word "until")
-                (%eval-until cur)
-                (if (string=? word "for")
-                  (%eval-for cur)
-                  (if (string=? word "case")
-                    (%eval-case cur)
-                    (error (string-append "parse error: unexpected " word))))))))))))
+          (match
+            ((string=? word "if")    (%eval-if cur))
+            ((string=? word "while") (%eval-while cur))
+            ((string=? word "until") (%eval-until cur))
+            ((string=? word "for")   (%eval-for cur))
+            ((string=? word "case")  (%eval-case cur))
+            (#t (error (string-append "parse error: unexpected " word)))))))))
 ; --- Pipeline execution ---
 
 (set! %sh-pipe-chain
