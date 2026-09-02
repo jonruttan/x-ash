@@ -25,7 +25,7 @@
 (import ash/prims)
 (import ash/printer)
 
-(provide ash/base ash-version sh-tokenize sh-eval %ash-repl-print)
+(provide ash/base ash-version sh-tokenize sh-eval %sh-status %ash-repl-print)
 
 (def ash-version "0.1.0")
 

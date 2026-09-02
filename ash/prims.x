@@ -26,6 +26,19 @@
 ; ONE FILE, so the two files above this one stay readable as what they are: a
 ; tokenizer and a shell.
 
+; THE DIALECT IS HELIUM, so the doors this file forwards to arrive by NAME.
+; lang.xon carries the arithmetic; the operative half is here.  x/sys/posix is
+; the Sys class -- fork, exec, wait, pipe, dup2, the open family, getenv and
+; chdir -- and importing it at the top of the platform layer is what makes an
+; unsatisfiable requirement fail at ACQUISITION rather than at the first
+; pipeline.  Base, Str8, Io and List are core; only this one is an opt-in.
+(import x/sys/posix)
+; x/sys/file is the File class: stat (which is what `test -f` and `test -d`
+; actually ask) and read-all (which is what `.` needs to source a script).
+; Sys alone answers only "does this path exist", and a shell that cannot tell
+; a directory from a file has no working `test`.
+(import x/sys/file)
+
 (provide ash/prims
   make-token-base base-make-type token-read-string
   first-int set-first-int! convert buffer-token
@@ -33,22 +46,29 @@
   string=? string? make-string list->string length reverse append map filter
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
-  sh-getenv sh-setenv sh-chdir)
+  sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
+  sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd)
 
 ; --- The tokenizer base ------------------------------------------------------
 ; (Base make-tok) is the isolated, type-free tokenizer base -- the exact
 ; successor to 2024's make-token-base, and the reason ash's `;` can be a
 ; separator rather than a comment.
 ;
-; IT SEGFAULTS ON THE FIRST CHARACTER OF ANY INPUT (x-lang#528).  This bundle
-; does not work today, and that is recorded rather than dodged: the alternative
-; is (Base make), which arrives with the built-in sexp types already registered
-; so shell tokens compete with them by score -- `a b` tokenizes as a bare
+; IT USED TO SEGFAULT ON THE FIRST CHARACTER OF ANY INPUT (x-lang#528), and
+; this comment described a bundle that was dead at load for that reason.  It is
+; not: x-lang v0.7.1 was the first release pinning an x-engine-c where an
+; isolated tokenizer base works, and the pairing row in lang.xon has been past
+; that for several releases.  The note is kept in the past tense because the
+; alternative it argued against is still the wrong answer, and the argument is
+; the useful part:
+;
+; (Base make) would arrive with the built-in sexp types already registered, so
+; shell tokens would compete with them by score -- `a b` tokenizes as a bare
 ; symbol followed by a word, `a|b` as one word, and ash's own INTEGER type
 ; collides with the platform's.  A shell that reports the wrong tokens is not a
 ; shell, and a green suite bought that way would be a lie about the port.
 ;
-; So the faithful call stays, and the bundle is blocked.
+; So the faithful call stays, and it works.
 (def make-token-base (fn (_) (Base make-tok)))
 
 ; (Base make-type TARGET NAME HANDLERS) -- cross-base registration, which is
@@ -178,3 +198,72 @@
 (def sh-getenv (fn (_ name) (Sys getenv name)))
 (def sh-setenv (fn (_ name value) (Sys setenv name value)))
 (def sh-chdir (fn (_ dir) (Sys chdir dir)))
+
+(def sh-unsetenv (fn (_ name) (Sys unsetenv name)))
+(def sh-getcwd (fn (_) (Sys getcwd)))
+
+; --- What `test` needs to know about a path ------------------------------
+; The kind symbol ('file, 'dir, 'link, ...) or nil when the path is not there
+; at all -- so one call answers -e, -f and -d, and a missing path is a nil
+; rather than a raise.  File stat raises a kind-'io Err on failure, which for
+; a shell test is an ANSWER, not an error.
+(def sh-path-kind
+  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit kind) (File stat path))))))
+
+(def sh-path-size
+  (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit size) (File stat path))))))
+
+(def sh-read-file (fn (_ path) (File read-all path)))
+
+; --- One line from the current input, or nil at EOF ----------------------
+; bytes->str, NOT list->string: the accumulator holds raw input BYTES, and the
+; utf8-aware conversion would re-encode anything >= 128 and corrupt a UTF-8
+; filename on its way to exec.  EOF with a partial line is still a line -- a
+; script whose last line has no trailing newline must run.
+;
+; ONE COPY, used by both the `read` builtin and the session loop in
+; ash/repl.x: they are the same question asked from two places.
+(def %sh-read-char (prim-ref (lit io) (lit read-char)))
+
+(def sh-read-line
+  (fn (_)
+    (def go
+      (fn (self acc)
+        (let ((ch (%sh-read-char)))
+          (if (null? ch)
+            (if (null? acc) () (bytes->str (List reverse acc)))
+            (if (= ch 10)
+              (bytes->str (List reverse acc))
+              (self (pair (integer->char ch) acc)))))))
+    (go ())))
+
+; --- One line straight off a DESCRIPTOR ----------------------------------
+; The `read` builtin cannot use the reader above, and the difference is the
+; whole reason both exist.  sh-read-line goes through the ENGINE's reader,
+; which is right for the session loop -- that reader is what the prompt is
+; already positioned in.  But the engine's reader is bound to the stream it
+; was opened on, not to whatever fd 0 currently names, so
+;
+;   read a b < input.txt
+;
+; dup2s the file onto fd 0 and the engine reader never notices: both variables
+; came back empty.  A shell's `read` reads its STANDARD INPUT, redirections
+; included, so it has to ask the descriptor.
+;
+; ONE BYTE AT A TIME, which is not the pessimisation it looks like: reading
+; ahead would swallow bytes past the newline that belong to the NEXT reader of
+; that descriptor -- the engine's own, when input is a script.  A shell's read
+; is specified to consume exactly the line it returns, and this is what that
+; costs.
+(def sh-read-line-fd
+  (fn (_ fd)
+    (def go
+      (fn (self acc)
+        (let ((b (Sys fd-read fd 1)))
+          (if (null? b)
+            (if (null? acc) () (bytes->str (List reverse acc)))
+            (let ((c (first b)))
+              (if (= c 10)
+                (bytes->str (List reverse acc))
+                (self (pair (integer->char c) acc))))))))
+    (go ())))

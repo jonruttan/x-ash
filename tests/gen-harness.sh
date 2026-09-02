@@ -62,6 +62,13 @@ fi
 #    that one line is what took this suite from dead to 68/72.  run.x owns
 #    the boot; nothing under ash/ includes anything from the platform.
 #
+# ash/repl IS IMPORTED, and it is safe to: that file is defs and a provide,
+# with no top-level effect -- run.x is what CALLS the loop, not repl.x.  It is
+# here because the entry-completeness rule (%ash-complete?, which decides
+# whether the prompt keeps reading) is testable logic, and the session bug this
+# bundle shipped with is exactly the kind a suite that stops at sh-eval cannot
+# see.
+#
 # The bundle root is armed the same way run.x arms it, so `import ash/base`
 # resolves here exactly as it does at the prompt.
 cat > "$OUT" <<EOF
@@ -71,5 +78,6 @@ cat > "$OUT" <<EOF
 (include "$X_BASE")
 (import-path! "$BUNDLE")
 (import ash/base)
+(import ash/repl)
 (set! %repl-print %ash-repl-print)
 EOF

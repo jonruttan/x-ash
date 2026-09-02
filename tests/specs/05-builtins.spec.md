@@ -1,0 +1,272 @@
+## sh-eval expansion
+
+### expands an embedded variable
+
+```sh
+(do (sh-eval "X=v; echo pre${X}post") ())
+```
+---
+    prevpost
+
+### expands a name that ends at a non-name character
+
+```sh
+(do (sh-eval "X=v; echo $X.txt") ())
+```
+---
+    v.txt
+
+### an unset variable expands to nothing
+
+```sh
+(do (sh-eval "echo [$NOSUCHVAR_ASH]") ())
+```
+---
+    []
+
+### a trailing dollar is literal
+
+```sh
+(do (sh-eval "echo 50$") ())
+```
+---
+    50$
+
+### an unclosed brace is literal
+
+```sh
+(do (sh-eval "echo ${X") ())
+```
+---
+    ${X
+
+## sh-eval test operators
+
+### -d is true for a directory
+
+```sh
+(sh-eval "test -d /")
+```
+---
+    0
+
+### -d is false for a path that is not a directory
+
+```sh
+(sh-eval "test -d /no-such-path-ash-spec")
+```
+---
+    1
+
+### -e is false for a missing path
+
+```sh
+(sh-eval "test -e /no-such-path-ash-spec")
+```
+---
+    1
+
+### -f is false for a directory
+
+```sh
+(sh-eval "test -f /")
+```
+---
+    1
+
+### numeric greater-than
+
+```sh
+(sh-eval "test 5 -gt 3")
+```
+---
+    0
+
+### numeric greater-than, false
+
+```sh
+(sh-eval "test 2 -gt 3")
+```
+---
+    1
+
+### numeric equality
+
+```sh
+(sh-eval "test 4 -eq 4")
+```
+---
+    0
+
+### numeric less-than-or-equal
+
+```sh
+(sh-eval "test 3 -le 3")
+```
+---
+    0
+
+### an unknown binary operator is a usage error
+
+```sh
+(sh-eval "test 1 -zz 2")
+```
+---
+    2
+
+## sh-eval builtins
+
+### echo -n suppresses the newline
+
+```sh
+(do (sh-eval "echo -n hi") (newline))
+```
+---
+    hi
+
+### unset removes a variable
+
+```sh
+(do (sh-eval "X=v; unset X; echo [$X]") ())
+```
+---
+    []
+
+### pwd reports a non-empty path
+
+```sh
+(sh-eval "pwd > /dev/null")
+```
+---
+    0
+
+## sh-eval redirection
+
+### a builtin's redirection is applied and then undone
+
+```sh
+(do (sh-eval "echo to-file > /dev/null") (sh-eval "echo to-stdout") ())
+```
+---
+    to-stdout
+
+## sh-eval case patterns
+
+### a trailing-star pattern matches
+
+```sh
+(do (sh-eval "case abc in a*) echo hit ;; esac") ())
+```
+---
+    hit
+
+### a leading-star pattern matches a suffix
+
+```sh
+(do (sh-eval "case foo.txt in *.txt) echo txt ;; esac") ())
+```
+---
+    txt
+
+### ? matches exactly one character
+
+```sh
+(do (sh-eval "case abc in a?c) echo q ;; esac") ())
+```
+---
+    q
+
+### ? does not match two characters
+
+```sh
+(do (sh-eval "case abcd in a?d) echo no ;; *) echo miss ;; esac") ())
+```
+---
+    miss
+
+### a character class matches a member
+
+```sh
+(do (sh-eval "case b in [abc]) echo cls ;; esac") ())
+```
+---
+    cls
+
+### a range class matches
+
+```sh
+(do (sh-eval "case m in [a-z]) echo range ;; esac") ())
+```
+---
+    range
+
+### a negated class excludes its members
+
+```sh
+(do (sh-eval "case d in [!abc]) echo neg ;; *) echo miss ;; esac") ())
+```
+---
+    neg
+
+### a negated class rejects a member
+
+```sh
+(do (sh-eval "case b in [!abc]) echo no ;; *) echo miss ;; esac") ())
+```
+---
+    miss
+
+### an exact pattern still matches exactly
+
+```sh
+(do (sh-eval "case abc in abd) echo no ;; abc) echo exact ;; esac") ())
+```
+---
+    exact
+
+## sh-eval reserved words in quotes
+
+The body prints without a newline and the following command supplies the `:`,
+so each case asserts ONE line: the harness compares the last line of a
+snippet's output, and a two-line expectation would silently check only half of
+what these are about.
+
+### a quoted keyword in a while body does not open a block
+
+```sh
+(do (sh-eval "N=0; while test $N -eq 0; do echo -n \"while\"; N=1; done; echo :after") ())
+```
+---
+    while:after
+
+### a quoted keyword in an if body does not open a block
+
+```sh
+(do (sh-eval "if test a = a; then echo -n \"fi\"; fi; echo :after") ())
+```
+---
+    fi:after
+
+### a quoted keyword in a for body does not open a block
+
+```sh
+(do (sh-eval "for f in 1; do echo -n \"done\"; done; echo :after") ())
+```
+---
+    done:after
+
+### a quoted keyword in a skipped if branch does not open a block
+
+```sh
+(do (sh-eval "if false; then echo \"done\"; else echo -n taken; fi; echo :after") ())
+```
+---
+    taken:after
+
+### a quoted keyword in a case body does not open a block
+
+```sh
+(do (sh-eval "case a in a) echo -n \"esac\" ;; esac; echo :after") ())
+```
+---
+    esac:after

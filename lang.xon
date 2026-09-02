@@ -16,12 +16,24 @@
 
 (lang "ash")
 
-; RADON, and the only one of the five that needs it.  ash forks, execs, dup2s
-; and opens files; Sys's process and file doors are radon opt-ins.  Declaring
-; anything lighter would mean an unbound symbol at the first pipeline instead of
-; a legible refusal at acquisition -- which is the whole argument for this row
-; being a requirement rather than a preference.
-(dialect rn)
+; HELIUM PLUS WHAT ASH ACTUALLY IMPORTS, which is the whole of the boot cost.
+; ash forks, execs, dup2s and opens files, and the 2024 reading of that was
+; "therefore radon".  It does not follow: radon is a SET OF LIBRARIES, not a
+; capability tier, and the process and file doors ash needs are one module --
+; x/sys/posix, imported by name in ash/prims.x.  Everything else radon boots
+; (the numeric tower: bigint, rational, complex, decimal, regex, the compile
+; pipeline) is cost this bundle pays on every single invocation and never
+; touches: a shell has no use for a rational.
+;
+; Measured on this machine, `x -l ash` start to prompt: 20.7s on rn, 2.3s on
+; he.  The other six arc bundles made this same move on 2026-09-02; ash was
+; last only because it was the one whose manifest argued hardest for radon.
+;
+; STILL A REQUIREMENT, NOT A TASTE -- the row just names a smaller one.  An
+; unbound `Sys` at the first pipeline is exactly the failure the old comment
+; wanted to avoid, and the import in prims.x is what prevents it: acquisition
+; refuses legibly, before any shell syntax is read.
+(dialect he)
 
 ; PAIRING, NOT PINNING.  A digest freezes bytes; it says nothing about whether
 ; those bytes still run against a platform that moved.  This row is the part
