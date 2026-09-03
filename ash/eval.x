@@ -817,6 +817,155 @@
         (self s (+ i 1) n mode)
         i))))
 
+; --- Arithmetic expansion: $(( ... )) ---------------------------------------
+;
+; The tokenizer already hands this over whole -- %sh-cs-end counts parens, so
+; `$((1+2))` is one word -- and `$(` and `$((` are told apart by their CONTENT:
+; an inner text that opens with `(` and closes with `)` is arithmetic.  That is
+; also how POSIX disambiguates, and why `$( (cmd) )` needs its space: with one,
+; the inner text starts with a space and is a command substitution.
+;
+; Integers only, which is what POSIX requires; a name evaluates to its value
+; and anything unset or non-numeric is 0.
+
+(def %sh-ar (fn (_ v i) (pair v i)))
+(def %sh-ar-val (fn (_ r) (first r)))
+(def %sh-ar-pos (fn (_ r) (rest r)))
+
+(def %sh-bool-int (fn (_ p) (if p 1 0)))
+(def %sh-truthy? (fn (_ n) (not (= n 0))))
+
+; The operators, by precedence: each level binds tighter than the one before.
+; Adding one is adding it to a level and to the table -- the parser below reads
+; both and knows nothing else about them.
+(def %sh-ar-levels
+  (list (list "||")
+        (list "&&")
+        (list "==" "!=")
+        (list "<=" ">=" "<" ">")
+        (list "+" "-")
+        (list "*" "/" "%")))
+
+(def %sh-ar-ops
+  (list (pair "||" (fn (_ a b) (%sh-bool-int (or (%sh-truthy? a) (%sh-truthy? b)))))
+        (pair "&&" (fn (_ a b) (%sh-bool-int (and (%sh-truthy? a) (%sh-truthy? b)))))
+        (pair "==" (fn (_ a b) (%sh-bool-int (= a b))))
+        (pair "!=" (fn (_ a b) (%sh-bool-int (not (= a b)))))
+        (pair "<=" (fn (_ a b) (%sh-bool-int (<= a b))))
+        (pair ">=" (fn (_ a b) (%sh-bool-int (>= a b))))
+        (pair "<"  (fn (_ a b) (%sh-bool-int (< a b))))
+        (pair ">"  (fn (_ a b) (%sh-bool-int (> a b))))
+        (pair "+"  (fn (_ a b) (+ a b)))
+        (pair "-"  (fn (_ a b) (- a b)))
+        (pair "*"  (fn (_ a b) (* a b)))
+        ; INTEGER division, truncating toward zero.  Bare `/` answers a
+        ; RATIONAL here -- x has a numeric tower, so `$((10/3))` came out as
+        ; the two characters `10/3` -- and POSIX arithmetic is integer-only.
+        ; convert-to-int truncates the right way at both signs (10/3 -> 3,
+        ; -10/3 -> -3).
+        (pair "/"  (fn (_ a b)
+                     (if (= b 0)
+                       (error "ash: arithmetic: division by 0")
+                       (convert (/ a b) %int))))
+        (pair "%"  (fn (_ a b)
+                     (if (= b 0) (error "ash: arithmetic: division by 0") (% a b))))))
+
+(def %sh-ar-skip-ws
+  (fn (self s i n)
+    (if (and (< i n) (%sh-ws-char? (string-ref s i)))
+      (self s (+ i 1) n)
+      i)))
+
+; Which of this level's operators the text at I begins with, or nil.  The level
+; lists put `<=` before `<` so the longer match is found first.
+(def %sh-ar-match-op
+  (fn (self s i n ops)
+    (if (null? ops)
+      ()
+      (if (%sh-str-starts? (substring s i n) (first ops))
+        (first ops)
+        (self s i n (rest ops))))))
+
+(def %sh-ar-digits-end
+  (fn (self s i n)
+    (if (and (< i n) (%sh-digit? (string-ref s i))) (self s (+ i 1) n) i)))
+
+; An unset or non-numeric name is 0, which is POSIX.  `convert` ANSWERS NIL
+; for both rather than raising, so a guard alone does not catch it -- that nil
+; reached `+` as an operand and the whole expansion died.
+(def %sh-ar-num
+  (fn (_ text)
+    (let ((v (guard (_ ()) (convert text %int))))
+      (if (null? v) 0 v))))
+
+(def %sh-ar-level ())
+(def %sh-ar-level-loop ())
+(def %sh-ar-primary ())
+
+(set! %sh-ar-primary
+  (fn (_ s i0 n)
+    (let ((i (%sh-ar-skip-ws s i0 n)))
+      (if (>= i n)
+        (%sh-ar 0 i)
+        (let ((c (string-ref s i)))
+          (cond
+            ((= c #\()
+              (let ((inner (%sh-ar-level s (+ i 1) n %sh-ar-levels)))
+                ; Step over the closing paren if it is there.
+                (let ((e (%sh-ar-skip-ws s (%sh-ar-pos inner) n)))
+                  (%sh-ar (%sh-ar-val inner)
+                          (if (and (< e n) (= (string-ref s e) #\))) (+ e 1) e)))))
+            ((= c #\-)
+              (let ((r (%sh-ar-primary s (+ i 1) n)))
+                (%sh-ar (- 0 (%sh-ar-val r)) (%sh-ar-pos r))))
+            ((= c #\+) (%sh-ar-primary s (+ i 1) n))
+            ((= c #\!)
+              (let ((r (%sh-ar-primary s (+ i 1) n)))
+                (%sh-ar (%sh-bool-int (not (%sh-truthy? (%sh-ar-val r))))
+                        (%sh-ar-pos r))))
+            ((%sh-digit? c)
+              (let ((e (%sh-ar-digits-end s i n)))
+                (%sh-ar (%sh-ar-num (substring s i e)) e)))
+            ((%sh-name-start? c)
+              (let ((e (%sh-name-end s i n)))
+                (%sh-ar (%sh-ar-num (%sh-var-value (substring s i e))) e)))
+            ; Anything else is not arithmetic; step over it rather than loop.
+            (else (%sh-ar 0 (+ i 1)))))))))
+
+(set! %sh-ar-level
+  (fn (_ s i n levels)
+    (if (null? levels)
+      (%sh-ar-primary s i n)
+      (%sh-ar-level-loop s (%sh-ar-level s i n (rest levels)) n levels))))
+
+; Left-associative: fold each further operator of this level onto what is
+; already built.
+(set! %sh-ar-level-loop
+  (fn (_ s left n levels)
+    (let ((i (%sh-ar-skip-ws s (%sh-ar-pos left) n)))
+      (let ((op (%sh-ar-match-op s i n (first levels))))
+        (if (null? op)
+          (%sh-ar (%sh-ar-val left) i)
+          (let ((right (%sh-ar-level s (+ i (string-length op)) n (rest levels))))
+            (%sh-ar-level-loop s
+              (%sh-ar ((%sh-table-get op %sh-ar-ops)
+                        (%sh-ar-val left) (%sh-ar-val right))
+                      (%sh-ar-pos right))
+              n levels)))))))
+
+(def %sh-arith-eval
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (convert (%sh-ar-val (%sh-ar-level text 0 n %sh-ar-levels)) %string))))
+
+; Is this `$(` inner text an arithmetic expansion rather than a command one?
+(def %sh-arith?
+  (fn (_ inner)
+    (let ((n (string-length inner)))
+      (and (>= n 2)
+           (and (= (string-ref inner 0) #\()
+                (= (string-ref inner (- n 1)) #\)))))))
+
 ; --- The walk ---------------------------------------------------------------
 ;
 ; MODE says which kind of region the scan is in.  A word is not uniformly
@@ -914,7 +1063,11 @@
             (let ((e (%sh-cs-end s (+ i 2) n 0)))
               (if (< e 0)
                 (literal-dollar)
-                (substitute (+ e 1) (%sh-cmd-subst (substring s (+ i 2) e))))))
+                (let ((inner (substring s (+ i 2) e)))
+                  (substitute (+ e 1)
+                    (if (%sh-arith? inner)
+                      (%sh-arith-eval (substring inner 1 (- (string-length inner) 1)))
+                      (%sh-cmd-subst inner)))))))
           ; ${NAME}
           ((= d #\{)
             (let ((e (%sh-brace-end s (+ i 2) n 0)))
