@@ -44,11 +44,12 @@
   first-int set-first-int! convert buffer-token
   char->integer integer->char string-length string-ref substring string-append
   string=? string? make-string list->string length reverse append map filter
+  take drop nth last
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
   sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd
-  sh-read-all-fd)
+  sh-read-all-fd sh-list-dir sh-sort-strings)
 
 ; --- The tokenizer base ------------------------------------------------------
 ; (Base make-tok) is the isolated, type-free tokenizer base -- the exact
@@ -171,6 +172,10 @@
 (def take (fn (_ n l) (List take n l)))
 (def drop (fn (_ n l) (List drop n l)))
 (def nth (fn (_ n l) (List ref n l)))
+; NEVER DEFINED, and %sh-run-builtin's `[` arm has called it since 2024: every
+; `[ x = x ]` answered "Unbound SYMBOL 'last'".  No spec reached it -- the
+; suite tested `test` and never the bracket spelling of the same builtin.
+(def last (fn (_ l) (List last l)))
 (def set-first! %set-first!)
 
 ; --- The shell's syscalls ----------------------------------------------------
@@ -287,3 +292,14 @@
         (let ((b (Sys fd-read fd 4096)))
           (if (null? b) chunks (self (pair b chunks))))))
     (bytes->str (%sh-join-chunks (go ()) ()))))
+
+; --- A directory's entry names, sorted -----------------------------------
+; What pathname expansion matches against.  `.` and `..` are already excluded
+; by File list-dir.  An unreadable or missing directory answers the empty list
+; rather than raising: a glob that matches nothing is not an error, it is a
+; glob that matches nothing.
+(def sh-sort-strings
+  (fn (_ xs) (List sort (fn (_ a b) (Str8 <? a b)) xs)))
+
+(def sh-list-dir
+  (fn (_ path) (sh-sort-strings (guard (_ ()) (File list-dir path)))))

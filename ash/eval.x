@@ -282,7 +282,7 @@
   (fn (self s i n)
     (if (>= i n)
       i
-      (if (%sh-name-char? (convert (string-ref s i) %int))
+      (if (%sh-name-char? (string-ref s i))
         (self s (+ i 1) n)
         i))))
 
@@ -293,7 +293,7 @@
   (fn (self s i n depth)
     (if (>= i n)
       (- 0 1)
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (cond
           ((= c #\{) (self s (+ i 1) n (+ depth 1)))
           ((= c #\}) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
@@ -344,7 +344,7 @@
   (fn (self s i n q)
     (if (>= i n)
       i
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (if (and (= q #\") (= c #\\))
           (self s (+ i 2) n q)
           (if (= c q) (+ i 1) (self s (+ i 1) n q)))))))
@@ -353,7 +353,7 @@
   (fn (self s i n depth)
     (if (>= i n)
       (- 0 1)
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (match
           ((= c #\() (self s (+ i 1) n (+ depth 1)))
           ((= c #\)) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
@@ -368,7 +368,7 @@
   (fn (self s i n)
     (if (>= i n)
       (- 0 1)
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (if (= c #\\)
           (self s (+ i 2) n)
           (if (= c #\`) i (self s (+ i 1) n)))))))
@@ -381,7 +381,7 @@
       (fn (self e)
         (if (= e 0)
           0
-          (if (= (convert (string-ref out (- e 1)) %int) #\newline)
+          (if (= (string-ref out (- e 1)) #\newline)
             (self (- e 1))
             e))))
     (let ((e (back (string-length out))))
@@ -445,14 +445,14 @@
   (fn (_ text)
     (if (= (string-length text) 0)
       ()
-      (%sh-ws-char? (convert (string-ref text 0) %int)))))
+      (%sh-ws-char? (string-ref text 0)))))
 
 (def %sh-trail-ws?
   (fn (_ text)
     (let ((n (string-length text)))
       (if (= n 0)
         ()
-        (%sh-ws-char? (convert (string-ref text (- n 1)) %int))))))
+        (%sh-ws-char? (string-ref text (- n 1)))))))
 
 ; The non-empty runs between whitespace, in order.
 (def %sh-ifs-split
@@ -462,7 +462,7 @@
         (fn (self i cur acc)
           (if (>= i n)
             (reverse (if (= (string-length cur) 0) acc (pair cur acc)))
-            (let ((c (convert (string-ref text i) %int)))
+            (let ((c (string-ref text i)))
               (if (%sh-ws-char? c)
                 (self (+ i 1) ""
                   (if (= (string-length cur) 0) acc (pair cur acc)))
@@ -481,27 +481,40 @@
 ; Named constructor and accessors instead.  The representation is still a
 ; list, because that is what the language offers; what changes is that no
 ; caller has to know it.
-(def %sh-acc (fn (_ fields cur started) (list fields cur started)))
+; THE FIELD IN HAND IS A LIST OF PIECES, not a string.  It was a string, grown
+; with (string-append cur here) once per character -- which copies the whole
+; accumulated field every time, so building an n-character word cost O(n^2) and
+; two allocations per character.  With the per-snippet collect off (this
+; bundle's runner turns it off; see tests/spec-runner.sh) a batched spec run
+; accumulates all of that and died on the interpreter's allocation ceiling.
+;
+; Pieces are pushed in reverse and joined ONCE, when the field closes.  Per
+; character that is one cons; the copying happens exactly once per field.
+(def %sh-acc (fn (_ fields pieces started) (list fields pieces started)))
 (def %sh-acc-fields  (fn (_ a) (first a)))
-(def %sh-acc-cur     (fn (_ a) (first (rest a))))
+(def %sh-acc-pieces  (fn (_ a) (first (rest a))))
 (def %sh-acc-started (fn (_ a) (first (rest (rest a)))))
 
-(def %sh-acc-empty (%sh-acc () "" ()))
+(def %sh-acc-empty (%sh-acc () () ()))
 
-; Append one character's worth of text to the field in hand.  Anything literal
-; starts a field, which is what makes `cmd ""` an empty argument.
+; The field in hand, materialized.  Only the two closers below need it.
+(def %sh-acc-cur
+  (fn (_ a) (Str8 join "" (List reverse (%sh-acc-pieces a)))))
+
+; Anything literal starts a field, which is what makes `cmd ""` an empty
+; argument.
 (def %sh-acc-add
   (fn (_ a text)
-    (%sh-acc (%sh-acc-fields a) (string-append (%sh-acc-cur a) text) #t)))
+    (%sh-acc (%sh-acc-fields a) (pair text (%sh-acc-pieces a)) #t)))
 
 ; Mark the field open without adding to it -- what a quote mark does.
 (def %sh-acc-open
-  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-cur a) #t)))
+  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-pieces a) #t)))
 
 ; Close the field in hand and begin the next one.
 (def %sh-acc-break
   (fn (_ a)
-    (%sh-acc (pair (%sh-acc-cur a) (%sh-acc-fields a)) "" ())))
+    (%sh-acc (pair (%sh-acc-cur a) (%sh-acc-fields a)) () ())))
 
 ; Close the word: the field in hand becomes one iff anything started it.
 (def %sh-acc-finish
@@ -510,6 +523,60 @@
       (if (%sh-acc-started a)
         (pair (%sh-acc-cur a) (%sh-acc-fields a))
         (%sh-acc-fields a)))))
+
+; --- Keeping quoted glob characters literal ---------------------------------
+;
+; Pathname expansion happens AFTER the word is built, by which point `"*"` and
+; `*` are the same character -- so the accumulator has to carry the difference.
+; It carries it as a BACKSLASH: text that was quoted or escaped goes in with
+; its glob metacharacters escaped, which is exactly the notation %sh-glob-at
+; already understands and %sh-glob-unescape takes back off at the end.
+;
+; A backslash is escaped too, so the unescape is exact: every backslash in a
+; finished field is one this put there (an unquoted one was consumed by the
+; walk as an escape and never reached here).
+(def %sh-glob-meta (list #\* #\? #\[ #\\))
+
+(def %sh-char-in?
+  (fn (self c chars)
+    (if (null? chars)
+      ()
+      (if (= c (first chars)) #t (self c (rest chars))))))
+
+; SCAN FIRST, BUILD ONLY IF NEEDED.  This runs on every literal character of
+; every word; almost none is a metacharacter, so the almost-always path
+; allocates nothing.
+(def %sh-has-glob-meta?
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i)
+          (if (>= i n)
+            ()
+            (if (%sh-char-in? (string-ref text i) %sh-glob-meta)
+              #t
+              (self (+ i 1))))))
+      (go 0))))
+
+(def %sh-glob-escape
+  (fn (_ text)
+    (if (not (%sh-has-glob-meta? text))
+      text
+      (let ((n (string-length text)))
+        (def go
+          (fn (self i out)
+            (if (>= i n)
+              (Str8 join "" (List reverse out))
+              (let ((here (substring text i (+ i 1))))
+                (self (+ i 1)
+                  (pair (if (%sh-char-in? (string-ref text i) %sh-glob-meta)
+                          (string-append "\\" here)
+                          here)
+                        out))))))
+        (go 0 ())))))
+
+(def %sh-acc-add-literal
+  (fn (_ a text) (%sh-acc-add a (%sh-glob-escape text))))
 
 ; --- Splicing expanded text in --------------------------------------------
 ;
@@ -550,9 +617,11 @@
 ; entire point of quoting it.
 (def %sh-add-expansion
   (fn (_ a mode text split?)
-    (if (and split? (= mode %sh-mode-bare))
-      (%sh-add-split a text)
-      (%sh-acc-add a text))))
+    (if (= mode %sh-mode-bare)
+      ; An unquoted expansion's RESULT is subject to both splitting and
+      ; globbing -- `X='*'; echo $X` globs, `echo "$X"` does not.
+      (if split? (%sh-add-split a text) (%sh-acc-add a text))
+      (%sh-acc-add-literal a text))))
 
 ; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
 ; build their word list backwards and reverse at the end.
@@ -668,7 +737,7 @@
     (let ((n (string-length inner)))
       (if (= n 0)
         ""
-        (let ((c (convert (string-ref inner 0) %int)))
+        (let ((c (string-ref inner 0)))
           (if (%sh-name-start? c)
             (substring inner 0 (%sh-name-end inner 0 n))
             (if (null? (%sh-table-get (substring inner 0 1) %sh-special-vars))
@@ -714,7 +783,7 @@
         ((= n 0) "")
         ; ${#X} is a length; ${#} alone is the parameter COUNT, which
         ; %sh-var-value already knows as the special "#".
-        ((and (> n 1) (= (convert (string-ref inner 0) %int) #\#))
+        ((and (> n 1) (= (string-ref inner 0) #\#))
           (convert
             (string-length (%sh-var-value (substring inner 1 n)))
             %string))
@@ -730,6 +799,23 @@
                     (%sh-param-apply name op
                       (substring tail (string-length op)
                         (string-length tail)))))))))))))
+
+; How far the ORDINARY text starting at I runs: up to the next character the
+; walk has an arm for.  In single quotes only the closing quote is special, so
+; a `'...'` region is one run.
+(def %sh-plain-char?
+  (fn (_ c mode)
+    (if (= mode %sh-mode-sq)
+      (not (= c #\'))
+      (not (or (= c #\') (= c #\") (= c #\\) (= c #\`) (= c #\$))))))
+
+(def %sh-plain-run-end
+  (fn (self s i n mode)
+    (if (>= i n)
+      i
+      (if (%sh-plain-char? (string-ref s i) mode)
+        (self s (+ i 1) n mode)
+        i))))
 
 ; --- The walk ---------------------------------------------------------------
 ;
@@ -753,14 +839,15 @@
         (fn (self i mode a)
           (if (>= i n)
             (%sh-acc-finish a)
-            (let ((c (convert (string-ref s i) %int))
-                  (here (substring s i (+ i 1))))
+            (let ((c (string-ref s i)))
               (cond
                 ; Inside single quotes: literal until the closing quote.
                 ((= mode %sh-mode-sq)
                   (if (= c #\')
                     (self (+ i 1) %sh-mode-bare a)
-                    (self (+ i 1) mode (%sh-acc-add a here))))
+                    (let ((e (%sh-plain-run-end s i n mode)))
+                      (self e mode
+                        (%sh-acc-add-literal a (substring s i e))))))
                 ; A quote mark switches region and starts a field.
                 ((and (= mode %sh-mode-bare) (= c #\'))
                   (self (+ i 1) %sh-mode-sq (%sh-acc-open a)))
@@ -771,9 +858,9 @@
                 ; A backslash emits what it protects and resumes PAST it, so a
                 ; `$` it protected stays a `$`.
                 ((and (= c #\\) (< (+ i 1) n))
-                  (let ((d (convert (string-ref s (+ i 1)) %int)))
+                  (let ((d (string-ref s (+ i 1))))
                     (self (+ i 2) mode
-                      (%sh-acc-add a
+                      (%sh-acc-add-literal a
                         (if (or (= mode %sh-mode-bare) (%sh-dq-escapable? d))
                           (substring s (+ i 1) (+ i 2))
                           (substring s i (+ i 2)))))))
@@ -781,12 +868,27 @@
                 ((= c #\`)
                   (let ((e (%sh-bt-end s (+ i 1) n)))
                     (if (< e 0)
-                      (self (+ i 1) mode (%sh-acc-add a here))
+                      (self (+ i 1) mode (%sh-acc-add a (substring s i (+ i 1))))
                       (self (+ e 1) mode
                         (%sh-add-expansion a mode
                           (%sh-cmd-subst (substring s (+ i 1) e)) split?)))))
                 ((= c #\$) (%sh-expand-dollar self s i n mode a split?))
-                (else (self (+ i 1) mode (%sh-acc-add a here))))))))
+                ; ORDINARY TEXT GOES IN A RUN AT A TIME.  One character per
+                ; step meant one substring allocation per character of every
+                ; word; a plain word is now one substring, which is what took
+                ; a batched spec run back under the interpreter's allocation
+                ; ceiling.
+                ;
+                ; A bare `*` IS the glob; the same character inside quotes is
+                ; not -- so the run is escaped or not by the mode it was read
+                ; in, exactly as a single character was.
+                (else
+                  (let ((e (%sh-plain-run-end s i n mode)))
+                    (let ((run (substring s i e)))
+                      (self e mode
+                        (if (= mode %sh-mode-bare)
+                          (%sh-acc-add a run)
+                          (%sh-acc-add-literal a run)))))))))))
       (go 0 mode0
         (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))))
 
@@ -805,7 +907,7 @@
     ; A `$` at the very end is a literal `$`.
     (if (>= (+ i 1) n)
       (%sh-acc-finish (%sh-acc-add a "$"))
-      (let ((d (convert (string-ref s (+ i 1)) %int)))
+      (let ((d (string-ref s (+ i 1))))
         (cond
           ; $( ... ) -- a command substitution.
           ((= d #\()
@@ -834,6 +936,185 @@
           ; $ followed by anything else is a literal $.
           (else (literal-dollar))))))))
 
+; --- Pathname expansion -----------------------------------------------------
+;
+; A field holding an UNESCAPED glob character is matched against the
+; filesystem, and becomes the sorted list of what it matched.  A field that
+; matches nothing stays as it is -- POSIX's default, and the reason
+; `echo *.nosuch` prints the pattern rather than nothing.
+;
+; The escapes %sh-acc-add-literal put in are what distinguishes `echo *` from
+; `echo "*"`; they come off here, whether or not the field globbed.
+
+; Same short-circuit: a field with no backslash is already its own unescaping.
+(def %sh-has-backslash?
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i)
+          (if (>= i n)
+            ()
+            (if (= (string-ref text i) #\\) #t (self (+ i 1))))))
+      (go 0))))
+
+(def %sh-glob-unescape
+  (fn (_ text)
+    (if (not (%sh-has-backslash? text))
+      text
+      (let ((n (string-length text)))
+        (def go
+          (fn (self i out)
+            (if (>= i n)
+              (Str8 join "" (List reverse out))
+              (if (and (= (string-ref text i) #\\) (< (+ i 1) n))
+                (self (+ i 2) (pair (substring text (+ i 1) (+ i 2)) out))
+                (self (+ i 1) (pair (substring text i (+ i 1)) out))))))
+        (go 0 ())))))
+
+; Does this text hold a glob character the user meant AS one?  Escaped ones do
+; not count, which is the whole point of the escaping.
+(def %sh-glob-pattern?
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i)
+          (if (>= i n)
+            ()
+            (let ((c (string-ref text i)))
+              (if (= c #\\)
+                (self (+ i 2))
+                (if (or (= c #\*) (= c #\?) (= c #\[)) #t (self (+ i 1))))))))
+      (go 0))))
+
+; Split on UNESCAPED `/`.
+(def %sh-glob-split
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i seg acc)
+          (if (>= i n)
+            (reverse (pair seg acc))
+            (let ((c (string-ref text i)))
+              (if (= c #\\)
+                (self (+ i 2) (string-append seg (substring text i (+ i 2))) acc)
+                (if (= c #\/)
+                  (self (+ i 1) "" (pair seg acc))
+                  (self (+ i 1)
+                    (string-append seg (substring text i (+ i 1))) acc)))))))
+      (go 0 "" ()))))
+
+; "" means the current directory, and stays invisible in what is built: a
+; relative glob answers `bin/sh`, not `./bin/sh`.
+(def %sh-path-join
+  (fn (_ base name)
+    (cond
+      ((= (string-length base) 0) name)
+      ((string=? base "/") (string-append "/" name))
+      (else (string-append base (string-append "/" name))))))
+
+(def %sh-dir-of (fn (_ base) (if (= (string-length base) 0) "." base)))
+
+; A leading `.` is matched only by a pattern that starts with one -- the rule
+; that keeps `*` from answering dotfiles.
+(def %sh-glob-visible?
+  (fn (_ pattern name)
+    (if (= (string-ref name 0) #\.)
+      (if (= (string-length pattern) 0)
+        ()
+        (= (string-ref pattern 0) #\.))
+      #t)))
+
+(def %sh-glob-entries
+  (fn (_ base segment)
+    (%sh-keep
+      (fn (_ name)
+        (and (%sh-glob-visible? segment name)
+             (%sh-pattern-match? segment name)))
+      (sh-list-dir (%sh-dir-of base)))))
+
+(def %sh-keep
+  (fn (self p xs)
+    (if (null? xs)
+      ()
+      (if (p (first xs))
+        (pair (first xs) (self p (rest xs)))
+        (self p (rest xs))))))
+
+; One segment against every base reached so far.
+(def %sh-glob-step
+  (fn (self segment bases acc)
+    (if (null? bases)
+      (reverse acc)
+      (let ((base (first bases)))
+        (self segment (rest bases)
+          (%sh-prepend-rev
+            (if (%sh-glob-pattern? segment)
+              (%sh-map-join base (%sh-glob-entries base segment))
+              ; A literal segment contributes only if it is really there.
+              (let ((cand (%sh-path-join base (%sh-glob-unescape segment))))
+                (if (null? (sh-path-kind cand)) () (list cand))))
+            acc))))))
+
+(def %sh-map-join
+  (fn (self base names)
+    (if (null? names)
+      ()
+      (pair (%sh-path-join base (first names))
+            (self base (rest names))))))
+
+(def %sh-prepend-rev
+  (fn (self xs acc)
+    (if (null? xs) acc (self (rest xs) (pair (first xs) acc)))))
+
+(def %sh-glob-walk
+  (fn (self segments bases)
+    (if (or (null? segments) (null? bases))
+      bases
+      ; An empty segment is a `//` or a trailing `/`: it moves nothing on.
+      (self (rest segments)
+        (if (= (string-length (first segments)) 0)
+          bases
+          (%sh-glob-step (first segments) bases ()))))))
+
+; A TRAILING `/` MEANS DIRECTORIES ONLY, and keeps the slash -- `echo */`
+; answers `sub/`, not every entry.  The split leaves an empty last segment for
+; it, which the walk skips as it does any empty one; the restriction is applied
+; here, where the whole match is in hand.
+(def %sh-dirs-only
+  (fn (self hits)
+    (if (null? hits)
+      ()
+      (let ((tail (self (rest hits))))
+        (if (eq? (sh-path-kind (first hits)) (lit dir))
+          (pair (string-append (first hits) "/") tail)
+          tail)))))
+
+(def %sh-trailing-slash?
+  (fn (_ segments)
+    (and (not (null? segments))
+         (= (string-length (last segments)) 0))))
+
+(def %sh-glob-field
+  (fn (_ field)
+    (if (not (%sh-glob-pattern? field))
+      (list (%sh-glob-unescape field))
+      (let ((absolute? (= (string-ref field 0) #\/))
+            (segments (%sh-glob-split field)))
+        (let ((hits (%sh-glob-walk
+                      (if absolute? (rest segments) segments)
+                      (list (if absolute? "/" "")))))
+          (let ((final (if (%sh-trailing-slash? segments)
+                         (%sh-dirs-only hits)
+                         hits)))
+            ; No match: the pattern stands, with its escapes removed.
+            (if (null? final) (list (%sh-glob-unescape field)) final)))))))
+
+(def %sh-glob-fields
+  (fn (self fields)
+    (if (null? fields)
+      ()
+      (List append (%sh-glob-field (first fields)) (self (rest fields))))))
+
 ; --- What the callers see ----------------------------------------------------
 ;
 ; A tok-sq is one field, always: single quotes suppress everything, splitting
@@ -845,8 +1126,10 @@
 (def %sh-expand-tok
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
+      ; Single quotes suppress everything, globbing included.
       (list (%tok-word-val tok))
-      (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t))))
+      (%sh-glob-fields
+        (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t)))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
@@ -854,7 +1137,9 @@
     (if (eq? (first tok) (lit tok-sq))
       (%tok-word-val tok)
       (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) ())))
-        (if (null? fs) "" (first fs))))))
+        ; Not globbed, but the escapes still come off -- a redirection target
+        ; and a case subject are literal strings.
+        (if (null? fs) "" (%sh-glob-unescape (first fs)))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
 ; token.  Unsplit by construction.
@@ -899,7 +1184,7 @@
       (fn (_ i len)
         (if (= i len)
           #t
-          (let ((c (convert (string-ref s i) %int)))
+          (let ((c (string-ref s i)))
             (if (and (>= c (convert #\0 %int)) (<= c (convert #\9 %int)))
               (%check (+ i 1) len)
               ())))))
@@ -1044,7 +1329,7 @@
           (fn (_ i)
             (if (= i (string-length word))
               -1
-              (if (= (convert (string-ref word i) %int) (convert #\= %int))
+              (if (= (string-ref word i) (convert #\= %int))
                 i
                 (%find-eq (+ i 1))))))
         (let ((eq-pos (%find-eq 0)))
@@ -1173,14 +1458,14 @@
     ; index of the first non-space at or after i
     (if (>= i n)
       i
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (if (or (= c #\space) (= c #\tab)) (self s (+ i 1) n) i)))))
 
 (def %sh-read-word-end
   (fn (self s i n)
     (if (>= i n)
       i
-      (let ((c (convert (string-ref s i) %int)))
+      (let ((c (string-ref s i)))
         (if (or (= c #\space) (= c #\tab)) i (self s (+ i 1) n))))))
 
 (def %sh-read-assign
@@ -1341,7 +1626,7 @@
       (fn (_ i)
         (if (= i (string-length word))
           ()
-          (if (= (convert (string-ref word i) %int) (convert #\= %int))
+          (if (= (string-ref word i) (convert #\= %int))
             (if (= i 0) () #t)
             (%has-eq (+ i 1))))))
     (if (= (string-length word) 0) () (%has-eq 0))))
@@ -1815,20 +2100,20 @@
       ()
       ; A range `a-b` needs its closing character inside the class.
       (if (and (< (+ i 2) hi)
-               (= (convert (string-ref pat (+ i 1)) %int) #\-))
-        (if (and (>= c (convert (string-ref pat i) %int))
-                 (<= c (convert (string-ref pat (+ i 2)) %int)))
+               (= (string-ref pat (+ i 1)) #\-))
+        (if (and (>= c (string-ref pat i))
+                 (<= c (string-ref pat (+ i 2))))
           #t
           (self pat (+ i 3) hi c))
-        (if (= c (convert (string-ref pat i) %int))
+        (if (= c (string-ref pat i))
           #t
           (self pat (+ i 1) hi c))))))
 
 (def %sh-glob-class-match?
   (fn (_ pat lo hi s si)
-    (let ((c (convert (string-ref s si) %int)))
+    (let ((c (string-ref s si)))
       (let ((neg (if (< lo hi)
-                   (let ((f (convert (string-ref pat lo) %int)))
+                   (let ((f (string-ref pat lo)))
                      (or (= f #\!) (= f #\^)))
                    ())))
         (let ((hit (%sh-glob-class-scan pat (if neg (+ lo 1) lo) hi c)))
@@ -1842,12 +2127,12 @@
       (fn (self j)
         (if (>= j pn)
           (- 0 1)
-          (if (= (convert (string-ref pat j) %int) #\]) j (self (+ j 1))))))
+          (if (= (string-ref pat j) #\]) j (self (+ j 1))))))
     (let ((a (if (and (< i pn)
-                      (let ((c (convert (string-ref pat i) %int)))
+                      (let ((c (string-ref pat i)))
                         (or (= c #\!) (= c #\^))))
                (+ i 1) i)))
-      (scan (if (and (< a pn) (= (convert (string-ref pat a) %int) #\]))
+      (scan (if (and (< a pn) (= (string-ref pat a) #\]))
               (+ a 1) a)))))
 
 (def %sh-glob-at ())
@@ -1865,7 +2150,7 @@
     (if (>= pi pn)
       ; Pattern exhausted: a match only if the word is exhausted too.
       (if (>= si sn) #t ())
-      (let ((pc (convert (string-ref pat pi) %int)))
+      (let ((pc (string-ref pat pi)))
         (match
           ((= pc #\*) (%sh-glob-star pat (+ pi 1) pn s si sn))
           ((= pc #\?)
@@ -1874,7 +2159,7 @@
             (let ((e (%sh-glob-class-end pat (+ pi 1) pn)))
               (if (< e 0)
                 ; Unterminated: a literal [
-                (if (and (< si sn) (= (convert (string-ref s si) %int) #\[))
+                (if (and (< si sn) (= (string-ref s si) #\[))
                   (self pat (+ pi 1) pn s (+ si 1) sn)
                   ())
                 (if (and (< si sn) (%sh-glob-class-match? pat (+ pi 1) e s si))
@@ -1882,12 +2167,12 @@
                   ()))))
           ((and (= pc #\\) (< (+ pi 1) pn))
             (if (and (< si sn)
-                     (= (convert (string-ref pat (+ pi 1)) %int)
-                        (convert (string-ref s si) %int)))
+                     (= (string-ref pat (+ pi 1))
+                        (string-ref s si)))
               (self pat (+ pi 2) pn s (+ si 1) sn)
               ()))
           (#t
-            (if (and (< si sn) (= pc (convert (string-ref s si) %int)))
+            (if (and (< si sn) (= pc (string-ref s si)))
               (self pat (+ pi 1) pn s (+ si 1) sn)
               ())))))))
 
