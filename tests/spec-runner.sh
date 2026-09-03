@@ -68,23 +68,49 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 # pinned release) ignores the export.
 export SPEC_SEAM_COLLECT=0
 
-# NO SPEC_BATCH OVERRIDE, and the reason is worth keeping.
+# TWO KNOBS FOR ONE FACT: with the seam collect off (above), a spec job
+# accumulates every file's garbage until the process exits.  The platform's
+# guards are calibrated for a dev box; this suite also runs on a 16 GB CI
+# runner, and there the default ceiling is larger than the machine.
 #
-# The platform runner buckets up to SPEC_BATCH same-@lib files into ONE
-# interpreter process, and with the seam collect off (above) that process
-# accumulates every file's garbage until it exits -- so the alloc-limit guard
-# bounds a batch SUM here, not a peak.  Adding pathname expansion pushed the
-# suite over it: "allocation limit exceeded", 11 of 263 specs dead.
+# X_ALLOC_LIMIT_OBJS: the platform default is 300M objects, ~14 GB at ~48
+# B/obj.  On a 16 GB runner a process approaching that exhausts the MACHINE
+# before the guard trips -- which is not a failed spec, it is a killed job:
 #
-# Lowering the batch to 4 made it green, and that was the wrong fix -- it
-# lowers the peak by running more processes instead of allocating less.  The
-# cause was ash/eval.x building every expanded word one character at a time
-# with substring and string-append, which is quadratic in the word length and
-# allocates twice per character.  The accumulator now collects pieces and joins
-# once, and the walk appends whole runs; the suite passes at the platform
-# default of 8 with room to spare.
+#   spec-gate: killed by SIGTERM -- the suite did not finish
 #
-# So: if this suite ever dies with "allocation limit exceeded" again, SPEC_BATCH
-# is the lever that will mask it, and the expander is where to look first.
+# and no output at all to say why.  A lower ceiling turns that back into a
+# legible per-spec failure.
+#
+# SPEC_BATCH: the platform runner buckets up to this many same-@lib files into
+# ONE process, so it is the lever that sets how much a single process
+# accumulates.
+#
+# MEASURED, at 293 specs:
+#
+#   ceiling 300M (platform default), batch 8   green here, KILLED both CI legs
+#   ceiling 200M,                    batch 4   green
+#   ceiling 120M,                    batch 4   legitimate specs die
+#   ceiling 120M,                    batch 2   still die, in a DIFFERENT file
+#
+# so the peak is per-FILE, not per-bucket -- one file's process needs somewhere
+# between 120M and 200M objects, and batching is not what sets that.  200M is
+# ~9.6 GB, which a 16 GB runner survives and 300M (~14 GB) does not.  The
+# margin is thin, and the thing to reduce is the expander, not this number:
+# every expanded word still allocates per character-run, and the suite has no
+# per-snippet collect to reclaim it (see above).
+#
+# Turning the seam collect back on was tried and still fails, exactly as the
+# note above says: the tokenizer specs go first.
+#
+# MEASURED LOCALLY, THEN TRUSTED TOO FAR.  Adding pathname expansion pushed the
+# suite over the ceiling; batch 4 fixed it, and then making the expander stop
+# building words character-by-character fixed it properly, so batch 8 passed
+# HERE and I removed the override.  CI then killed both legs.  A 64 GB
+# workstation is not evidence about a 16 GB runner, and the platform runner's
+# own header says exactly that: "a default that is safe only when the caller
+# remembers a comment is not a guard."
+export X_ALLOC_LIMIT_OBJS="${X_ALLOC_LIMIT_OBJS:-200000000}"
+export SPEC_BATCH="${SPEC_BATCH:-4}"
 
 . "$X_ROOT/tests/spec-runner.sh"
