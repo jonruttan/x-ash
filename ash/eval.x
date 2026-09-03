@@ -225,6 +225,15 @@
 (def %sh-name-char?
   (fn (_ c) (or (%sh-name-start? c) (%sh-digit? c))))
 
+; `set -u`: a plain `$X` on an unset name is an error.  ONLY the plain form --
+; `${X:-default}` and `${X+alt}` exist precisely to ask about an unset
+; parameter, and POSIX exempts them, so they go through %sh-var-value directly.
+(def %sh-var-value-checked
+  (fn (_ name)
+    (if (and (not (null? %sh-opt-nounset)) (%sh-param-unset? name))
+      (error (string-append name ": parameter not set"))
+      (%sh-var-value name))))
+
 ; --- Positional parameters and the function table ---------------------------
 ;
 ; %sh-args holds $1 upward, as a plain list of strings.  It is SAVED AND
@@ -232,6 +241,33 @@
 ; parameters are dynamically scoped to the call, which is exactly what
 ; save/restore expresses, and nothing here is re-entrant in a way a list of
 ; frames would help with.
+; --- Shell options ----------------------------------------------------------
+;
+; `set -e` exit on a failed command, `-u` treat an unset parameter as an error,
+; `-x` trace commands to stderr.  `set +e` and friends turn them off, which is
+; why each is a cell rather than a flag set once.
+(def %sh-opt-errexit ())
+(def %sh-opt-nounset ())
+(def %sh-opt-xtrace ())
+
+; ERREXIT MUST NOT FIRE IN A CONDITION.  `if false; then`, `false || echo`,
+; `! cmd` and a `while` test all run commands whose failure is the POINT, and a
+; shell that exited on them would be unusable.  POSIX lists those contexts
+; explicitly; this counts them, and %sh-should-exit? asks whether any is open.
+(def %sh-cond-depth 0)
+
+(def %sh-in-condition
+  (fn (_ thunk)
+    (set! %sh-cond-depth (+ %sh-cond-depth 1))
+    (guard (e (do (set! %sh-cond-depth (- %sh-cond-depth 1)) (error e)))
+      (let ((r (thunk)))
+        (set! %sh-cond-depth (- %sh-cond-depth 1))
+        r))))
+
+(def %sh-should-exit?
+  (fn (_ status)
+    (and %sh-opt-errexit (and (not (= status 0)) (= %sh-cond-depth 0)))))
+
 (def %sh-args ())
 (def %sh-functions ())
 (def %sh-fn-depth 0)
@@ -455,20 +491,83 @@
         (%sh-ws-char? (string-ref text (- n 1)))))))
 
 ; The non-empty runs between whitespace, in order.
-(def %sh-ifs-split
-  (fn (_ text)
+; --- IFS ---------------------------------------------------------------------
+;
+; The default is space/tab/newline, and until `set` existed there was nowhere
+; to change it from -- so this was hard-coded.  POSIX gives IFS two kinds of
+; character and they behave differently:
+;
+;   WHITESPACE in IFS   a run of them is ONE delimiter, and leading or trailing
+;                       runs produce no field:  `a  b` is two fields
+;   anything else       EACH occurrence delimits, so adjacent ones make empty
+;                       fields:  IFS=: over `a::b` is three
+;
+; and a non-whitespace delimiter may have IFS whitespace either side of it,
+; which belongs to it rather than delimiting again.
+;
+; IFS set but EMPTY means no splitting at all -- the one case people reach for
+; deliberately, to read a whole line into one field.
+
+(def %sh-ifs-default " \t\n")
+
+(def %sh-ifs
+  (fn (_)
+    (let ((v (sh-getenv "IFS")))
+      (if (null? v) %sh-ifs-default v))))
+
+(def %sh-in-ifs? (fn (_ c ifs) (%sh-str-has-char? ifs c)))
+
+(def %sh-str-has-char?
+  (fn (_ text c)
     (let ((n (string-length text)))
       (def go
-        (fn (self i cur acc)
-          (if (>= i n)
-            (reverse (if (= (string-length cur) 0) acc (pair cur acc)))
-            (let ((c (string-ref text i)))
-              (if (%sh-ws-char? c)
-                (self (+ i 1) ""
-                  (if (= (string-length cur) 0) acc (pair cur acc)))
-                (self (+ i 1)
-                  (string-append cur (substring text i (+ i 1))) acc))))))
-      (go 0 "" ()))))
+        (fn (self i)
+          (if (>= i n) () (if (= (string-ref text i) c) #t (self (+ i 1))))))
+      (go 0))))
+
+; How far a run of IFS WHITESPACE reaches from I.
+(def %sh-ifs-ws-end
+  (fn (self text i n ifs)
+    (if (and (< i n)
+             (and (%sh-ws-char? (string-ref text i))
+                  (%sh-in-ifs? (string-ref text i) ifs)))
+      (self text (+ i 1) n ifs)
+      i)))
+
+(def %sh-ifs-split
+  (fn (_ text)
+    (let ((ifs (%sh-ifs)))
+      (if (= (string-length ifs) 0)
+        ; IFS="" -- no splitting.  An empty text is still no fields.
+        (if (= (string-length text) 0) () (list text))
+        (let ((n (string-length text)))
+          (def go
+            (fn (self i cur started acc)
+              (if (>= i n)
+                (reverse (if started (pair cur acc) acc))
+                (let ((c (string-ref text i)))
+                  (if (not (%sh-in-ifs? c ifs))
+                    (self (+ i 1)
+                      (string-append cur (substring text i (+ i 1))) #t acc)
+                    ; A delimiter.  Take any IFS whitespace around it, and at
+                    ; most ONE non-whitespace delimiter with it.
+                    (let ((after-ws (%sh-ifs-ws-end text i n ifs)))
+                      (let ((hard? (and (< after-ws n)
+                                        (and (%sh-in-ifs?
+                                               (string-ref text after-ws) ifs)
+                                             (not (%sh-ws-char?
+                                                    (string-ref text after-ws))))))
+                        )
+                        (let ((j (%sh-ifs-ws-end text
+                                   (if hard? (+ after-ws 1) after-ws) n ifs)))
+                          ; A whitespace-only delimiter never makes an empty
+                          ; field; a non-whitespace one does.
+                          (if (or hard? started)
+                            (self j "" (and hard? (< j n))
+                              (pair cur acc))
+                            (self j "" () acc))))))))))
+          ; A leading run of IFS whitespace is skipped rather than delimiting.
+          (go (%sh-ifs-ws-end text 0 n ifs) "" () ()))))))
 
 ; --- The word being built ---------------------------------------------------
 ;
@@ -1085,7 +1184,7 @@
           ; $NAME
           ((%sh-name-start? d)
             (let ((e (%sh-name-end s (+ i 1) n)))
-              (substitute e (%sh-var-value (substring s (+ i 1) e)))))
+              (substitute e (%sh-var-value-checked (substring s (+ i 1) e)))))
           ; $ followed by anything else is a literal $.
           (else (literal-dollar))))))))
 
@@ -1716,6 +1815,48 @@
           1
           (do (set! %sh-args (drop n %sh-args)) 0))))))
 
+; --- set --------------------------------------------------------------------
+;
+;   set -- a b c     replace the positional parameters
+;   set -e -u -x     turn options on;  set +e  turns one off
+;   set              answers 0 (POSIX prints the variables; nothing here reads
+;                    that, and inventing a format would be inventing a
+;                    contract)
+;
+; `--` ends the options even when no parameters follow, which is how a script
+; clears them: `set --`.
+(def %sh-set-opts
+  (list (pair "e" (fn (_ on?) (set! %sh-opt-errexit on?)))
+        (pair "u" (fn (_ on?) (set! %sh-opt-nounset on?)))
+        (pair "x" (fn (_ on?) (set! %sh-opt-xtrace on?)))))
+
+; One `-abc` or `+abc` cluster.
+(def %sh-set-flags
+  (fn (self word on? i)
+    (if (>= i (string-length word))
+      0
+      (let ((f (%sh-table-get (substring word i (+ i 1)) %sh-set-opts)))
+        (if (null? f)
+          (do (%stderr "ash: set: " (substring word i (+ i 1))
+                       ": unknown option\n") 2)
+          (do (f on?) (self word on? (+ i 1))))))))
+
+(def %sh-set
+  (fn (self wds)
+    (if (null? wds)
+      0
+      (let ((w (first wds)))
+        (cond
+          ((string=? w "--") (do (set! %sh-args (rest wds)) 0))
+          ((%sh-str-starts? w "-")
+            (let ((r (%sh-set-flags w #t 1)))
+              (if (= r 0) (self (rest wds)) r)))
+          ((%sh-str-starts? w "+")
+            (let ((r (%sh-set-flags w () 1)))
+              (if (= r 0) (self (rest wds)) r)))
+          ; A bare operand: POSIX treats `set a b` as setting the parameters.
+          (else (do (set! %sh-args wds) 0)))))))
+
 ; `.` / `source` FILE -- read the file and run it in THIS shell, so its
 ; assignments and cd survive.  The status is the last command's.
 (def %sh-source
@@ -1771,6 +1912,7 @@
         (pair "read"   %sh-read)
         (pair "return" %sh-return)
         (pair "shift"  %sh-shift)
+        (pair "set"    %sh-set)
         (pair "test"   %sh-test)
         (pair "["      %sh-bracket)
         (pair "."      %sh-source)
@@ -1862,8 +2004,11 @@
         (%sh-set-status 0)
         (let ((name (first remaining))
               (args (rest remaining)))
+          (unless (null? %sh-opt-xtrace)
+            (%stderr "+ " (%sh-join-args remaining) "\n"))
           (let ((body (%sh-fn-lookup name %sh-functions)))
-            (%sh-set-status
+            (%sh-exit-on-error
+             (%sh-set-status
               (cond
                 ; A FUNCTION WINS OVER AN EXTERNAL AND LOSES TO A BUILTIN,
                 ; which is the POSIX order.
@@ -1872,7 +2017,12 @@
                 ; the shell's own descriptors must survive it -- the same
                 ; save/apply/restore a builtin gets.
                 ((not (null? body)) (%sh-run-fn-redir body args redirs))
-                (else (%sh-run-external name args redirs))))))))))
+                (else (%sh-run-external name args redirs)))))))))))
+
+; `set -e`: a failed command ends the shell, unless a condition is open.
+(def %sh-exit-on-error
+  (fn (_ status)
+    (if (%sh-should-exit? status) (sh-exit status) status)))
 
 ; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
@@ -2006,7 +2156,9 @@
     ; consume 'if'
 
     (%skip-newlines cur)
-    (let ((cond-result (%eval-list cur)))
+    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
+    ; `while test ...` run commands whose failure is the point.
+    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
       (%skip-newlines cur)
       (%expect-word cur "then")
       (%skip-newlines cur)
@@ -2114,7 +2266,9 @@
           (do
             (%cursor-advance! cur)
             (%skip-newlines cur)
-            (let ((cond-result (%eval-list cur)))
+            ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
+    ; `while test ...` run commands whose failure is the point.
+    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
               (%skip-newlines cur)
               (%expect-word cur "then")
               (%skip-newlines cur)
@@ -2163,7 +2317,9 @@
     ; reset cursor to condition
 
     (%skip-newlines cur)
-    (let ((cond-result (%eval-list cur)))
+    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
+    ; `while test ...` run commands whose failure is the point.
+    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
       (%skip-newlines cur)
       (%expect-word cur "do")
       (%skip-newlines cur)
@@ -2190,7 +2346,9 @@
     ; reset cursor to condition
 
     (%skip-newlines cur)
-    (let ((cond-result (%eval-list cur)))
+    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
+    ; `while test ...` run commands whose failure is the point.
+    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
       (%skip-newlines cur)
       (%expect-word cur "do")
       (%skip-newlines cur)
@@ -2828,6 +2986,9 @@
                   (string=? (%tok-word-val (%cursor-peek cur)) "!"))
               (do (%cursor-advance! cur) (%skip-newlines cur) #t)
               ())))
+      ; `! cmd` inverts the status, so cmd's failure is expected -- and the
+      ; left operand of && / || is not the list's final command either.  POSIX
+      ; exempts both from -e.
       ; Compound commands (if/while/for) contain internal ';' delimiters
 
       ; that %collect-stage would incorrectly split on. Handle directly.
@@ -2856,28 +3017,90 @@
           result)))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
+; Skip an operand without running it -- what a short-circuit must do with the
+; side it does not take.
+;
+; RECURSIVE DESCENT DOES NOT SKIP TOKENS BY ITSELF, and the old code's comment
+; said it did: "since we use recursive descent, the right side won't be
+; evaluated if we just return".  True of the EVALUATION and false of the
+; CURSOR, which was left sitting on the skipped operand -- so %eval-list found
+; a command where it expected a separator, gave up, and silently discarded the
+; whole rest of the script:
+;
+;   false && echo no; echo after      printed nothing at all
+;   true  || echo no; echo after      printed nothing at all
+;
+; Pre-existing since 2024, and invisible for as long as nothing followed the
+; short-circuit on the same line.
+; An operand ends at a list separator OR at the next connective -- skipping
+; through `||` swallowed the alternative, so `false && a || b` ran nothing.
+; `|` is NOT here: the operand of `&&` is a PIPELINE, so the skip has to cross
+; pipes.  Stopping at one left `grep a` behind in `false && echo a | grep a`
+; and abandoned the rest of the list all over again.
+(def %sh-operand-end-ops (list ";" "&" "&&" "||"))
+
+(def %sh-operand-end?
+  (fn (_ tok)
+    (and (eq? (first tok) (lit tok-op))
+         (%sh-word-in? (first (rest tok)) %sh-operand-end-ops))))
+
+(def %sh-paren-delta
+  (fn (_ tok)
+    (cond
+      ((%tok-is-op? tok "(") 1)
+      ((%tok-is-op? tok ")") (- 0 1))
+      (else 0))))
+
+(def %sh-skip-operand
+  (fn (self cur depth)
+    (if (%cursor-empty? cur)
+      ()
+      (let ((tok (%cursor-peek cur)))
+        (if (and (= depth 0)
+                 (or (%tok-is-newline? tok)
+                     (%sh-operand-end? tok)
+                     (%at-stop-word? cur)))
+          ()
+          (do
+            (%cursor-advance! cur)
+            ; PARENS COUNT TOO, and only here: %sh-nest-delta is the keyword
+            ; nesting the compound skippers share, and a subshell's `(` is
+            ; punctuation rather than a keyword.  Without it the skip stopped
+            ; on the `)` of `false && (echo a)` -- %at-stop-word? treats one as
+            ; a terminator -- and abandoned the list again.
+            (let ((d (+ depth
+                        (+ (%sh-nest-delta tok) (%sh-paren-delta tok)))))
+              (self cur (if (< d 0) 0 d)))))))))
+
+; A command in an AND-OR list is exempt from `set -e` unless it is the LAST
+; COMMAND RUN -- `false || echo` must not exit, `false && cmd` must not (the
+; failure was not the last thing run), and a bare `false` must.  So the check
+; is applied only where the loop ends having just EVALUATED an operand, never
+; where it ends having skipped one.
+(def %eval-and-or-loop ())
+
 (def %eval-and-or
   (fn (_ cur)
-    (let ((result (%eval-pipeline cur)))
-      (if (%cursor-empty? cur)
-        result
-        (if (%match-op cur "&&")
-          (do
-            (%skip-newlines cur)
-            (if (= result 0)
-              (%eval-and-or cur)
-              ; Short-circuit: skip remaining, but need to not evaluate right side
+    (%eval-and-or-loop cur
+      (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)))
 
-              ; Actually, since we use recursive descent, the right side
+(set! %eval-and-or-loop
+  (fn (self cur result evaluated-last?)
+    (cond
+      ((%cursor-empty? cur)
+        (if evaluated-last? (%sh-exit-on-error result) result))
+      ((%match-op cur "&&")
+        (%skip-newlines cur)
+        (if (= result 0)
+          (self cur (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)
+          (do (%sh-skip-operand cur 0) (self cur result ()))))
+      ((%match-op cur "||")
+        (%skip-newlines cur)
+        (if (= result 0)
+          (do (%sh-skip-operand cur 0) (self cur result ()))
+          (self cur (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)))
+      (else (if evaluated-last? (%sh-exit-on-error result) result)))))
 
-              ; won't be evaluated if we just return
-
-              result))
-          (if (%match-op cur "||")
-            (do
-              (%skip-newlines cur)
-              (if (= result 0) 0 (%eval-and-or cur)))
-            result))))))
 ; list: and_or ((';'|'&'|newline) and_or)*
 
 (set! %eval-list

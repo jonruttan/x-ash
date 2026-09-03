@@ -70,16 +70,25 @@ Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
 does not leave the shell writing to `log`.
 
-Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
-`[`, `.` / `source`, `return`, `shift`, `exit`, `true`, `false`, `:`.
+Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `set`,
+`test` / `[`, `.` / `source`, `return`, `shift`, `exit`, `true`, `false`, `:`.
+
+`set -- a b c` replaces the positional parameters; `set -e` exits on a failed
+command, `-u` makes an unset parameter an error, `-x` traces to stderr, and
+`set +e` (etc.) turns each back off. `-e` is correctly suppressed where a
+failure is the point — a condition, `!`, and any operand of an AND-OR list but
+the last.
+
+`IFS` is honoured: whitespace runs collapse to one delimiter, a non-whitespace
+delimiter keeps empty fields (`IFS=:` over `a::b` is three), and an empty `IFS`
+suppresses splitting entirely.
 
 `test` knows `-n`, `-z`, `!`, `=`, `!=`, the file predicates `-e` `-f` `-d`
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
 **Not there yet**, and worth knowing before you reach for them: `{ ...; }`
-grouping, `set` and its options (so `IFS` is the default space/tab/newline and
-cannot be changed), `trap`, `local`, `command`, and job control.
+grouping, `trap`, `local`, `command`, and job control.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
 has no flush primitive, so a child's buffered output can be lost if the parent
@@ -102,7 +111,7 @@ The terms are in x-lang's
 
 ## Status
 
-**329 of 329 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**363 of 363 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
