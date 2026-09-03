@@ -111,6 +111,16 @@ export SPEC_SEAM_COLLECT=0
 # own header says exactly that: "a default that is safe only when the caller
 # remembers a comment is not a guard."
 export X_ALLOC_LIMIT_OBJS="${X_ALLOC_LIMIT_OBJS:-200000000}"
-export SPEC_BATCH="${SPEC_BATCH:-4}"
+# 4 -> 2 at 316 specs (arithmetic and here-documents landing).  This is the
+# THIRD time this knob has moved for the same reason, which is the point: with
+# no per-snippet collect the suite's peak grows with every feature, and the
+# only levers on this side are how many files share a process and how high the
+# ceiling is.  Neither is a fix.
+#
+# The fix is x-lang#599 -- a type registered on an isolated tokenizer base does
+# not survive a collect, which is WHY SPEC_SEAM_COLLECT is 0 above.  When that
+# closes, turn the seam collect back on and delete both knobs; the suite will
+# bound itself per snippet instead of per file.
+export SPEC_BATCH="${SPEC_BATCH:-2}"
 
 . "$X_ROOT/tests/spec-runner.sh"
