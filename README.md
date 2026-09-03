@@ -62,6 +62,10 @@ Functions: `name() { ... }`, with `$1`…, `$#` and `$@` scoped to the call and
 restored afterwards, `return [n]` for an early exit, and `shift [n]`. A
 function shadows an external of the same name and is shadowed by a builtin.
 
+Here-documents: `<<EOF` and `<<-EOF` (which strips leading tabs), with the body
+expanded unless the delimiter is quoted. Several on one line are taken in
+order.
+
 Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
 does not leave the shell writing to `log`.
@@ -73,9 +77,9 @@ Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-**Not there yet**, and worth knowing before you reach for them: here-documents, `{ ...; }` grouping, `set` and its
-options (so `IFS` is the default space/tab/newline and cannot be changed),
-`trap`, `local`, `command`, and job control.
+**Not there yet**, and worth knowing before you reach for them: `{ ...; }`
+grouping, `set` and its options (so `IFS` is the default space/tab/newline and
+cannot be changed), `trap`, `local`, `command`, and job control.
 
 One thing worth knowing about subshells: `( ... )` forks, and the interpreter
 has no flush primitive, so a child's buffered output can be lost if the parent
@@ -98,7 +102,7 @@ The terms are in x-lang's
 
 ## Status
 
-**316 of 316 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**329 of 329 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —

@@ -402,7 +402,7 @@
               (set! %sh-compound-depth 0)
               ; A failing substitution answers what it managed to print, the
               ; way a shell does -- the error has already gone to stderr.
-              (guard (e ()) (sh-eval src))
+              (guard (e ()) (sh-eval-extracted src))
               (sh-exit %sh-status))
             ; READ BEFORE WAIT.  A child whose output exceeds the pipe buffer
             ; blocks in write() until someone drains it, so waiting first would
@@ -1345,11 +1345,11 @@
       ()
       (%check 0 (string-length s)))))
 
+; Which descriptor an operator redirects when the script names none.
+(def %sh-input-ops (list "<" "<>" "<&" "<<" "<<-"))
+
 (def %default-fd
-  (fn (_ op)
-    (if (string=? op "<")
-      0
-      (if (string=? op "<>") 0 (if (string=? op "<&") 0 1)))))
+  (fn (_ op) (if (%sh-word-in? op %sh-input-ops) 0 1)))
 
 ; --- The redirection record -------------------------------------------------
 ;
@@ -1367,12 +1367,63 @@
     (let ((fd (first (rest (rest r)))))
       (if (string? fd) (convert fd %int) fd))))
 
+; A here-document's body reaches the command down a pipe.
+;
+; THE WRITER IS A FORKED CHILD, not this process.  Writing the body here and
+; then reading it back would deadlock on any body larger than the pipe buffer
+; (64 KB on the usual boxes): nothing is draining the other end yet.  The child
+; writes and exits; the parent keeps only the read end.
+;
+; It is not waited for.  Waiting would be the same deadlock from the other
+; side -- the reader has not run yet -- so the writer is reaped when the shell
+; exits, which is what a shell using a temp file avoids and what this trades
+; for having no temp file at all.
+(def %sh-setup-heredoc
+  (fn (_ index fd)
+    (let ((h (%sh-heredoc-at (convert index %int))))
+      (if (null? h)
+        ()
+        (let ((text (if (%sh-heredoc-expand? h)
+                      ; An unquoted delimiter expands the body the way a
+                      ; double-quoted string is expanded.
+                      (%sh-expand-str-dq (%sh-heredoc-text h))
+                      (%sh-heredoc-text h))))
+          (let ((p (%sh-pipe-create)))
+            (let ((r (first p)) (w (rest p)))
+              (let ((pid (sh-fork)))
+                (if (= pid 0)
+                  (do
+                    (sh-close r)
+                    (sh-fd-write w text)
+                    (sh-close w)
+                    (sh-exit 0))
+                  (do
+                    (sh-close w)
+                    (sh-dup2 r fd)
+                    (sh-close r)))))))))))
+
+(def %sh-heredoc-at
+  (fn (self n)
+    (def pick
+      (fn (self i hs)
+        (if (null? hs) () (if (= i n) (first hs) (self (+ i 1) (rest hs))))))
+    (pick 0 %sh-heredocs)))
+
+; The body of an unquoted here-document expands like a double-quoted string:
+; parameters and substitutions, but no field splitting and no globbing.
+(def %sh-expand-str-dq
+  (fn (_ text)
+    (let ((fs (%sh-expand-str text %sh-mode-dq ())))
+      (if (null? fs) "" (%sh-glob-unescape (first fs))))))
+
 (def %sh-setup-redir
   (fn (_ redir)
     (let ((op (%sh-redir-op redir))
            ; Expanded at collection, with its quoting in hand.
            (target (%sh-redir-target redir)))
       (let ((fd (%sh-redir-fd redir)))
+        (if (or (string=? op "<<") (string=? op "<<-"))
+          (%sh-setup-heredoc target fd)
         (if (string=? op "<")
           (let ((fh (sh-open-read target)))
             (sh-dup2 fh fd)
@@ -1393,7 +1444,7 @@
                   (sh-dup2 (convert target %int) fd)
                   (if (string=? op "<&")
                     (sh-dup2 (convert target %int) fd)
-                    ()))))))))))
+                    ())))))))))))
 
 (def %sh-setup-redirs
   (fn (_ redirs)
@@ -2856,11 +2907,208 @@
                         (%skip-newlines cur)
                         (if (%at-stop-word? cur) 0 (%eval-list cur)))))
                   result)))))))))
+; --- Here-documents ---------------------------------------------------------
+;
+;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
+;     one                exactly the delimiter
+;     two
+;     EOF
+;
+; The body lives on lines the tokenizer has not reached, which is a shape
+; nothing else in this reader has: every other construct is decided by the
+; characters in front of it.  So here-documents are lifted out BEFORE
+; tokenizing, in one pass over the raw text:
+;
+;   - each `<<DELIM` (or `<<-DELIM`) becomes `<<N`, where N indexes a body
+;   - the body lines are removed from the text entirely
+;
+; after which the tokenizer and the parser see an ordinary redirection whose
+; target happens to be a number, and %sh-setup-redir looks the body up.  That
+; keeps the whole feature out of the reader, which cannot look ahead a line.
+;
+; `<<-` strips leading TABS from the body and from the terminator, which is
+; what lets a here-document indent with the block it sits in.
+; A QUOTED delimiter (`<<'EOF'`) means the body is literal; unquoted means it
+; is expanded, exactly as a double-quoted string would be.
+
+(def %sh-heredocs ())
+
+(def %sh-heredoc (fn (_ text expand?) (pair text expand?)))
+(def %sh-heredoc-text (fn (_ h) (first h)))
+(def %sh-heredoc-expand? (fn (_ h) (rest h)))
+
+(def %sh-split-lines
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i start acc)
+          (if (>= i n)
+            (reverse (pair (substring text start n) acc))
+            (if (= (string-ref text i) #\newline)
+              (self (+ i 1) (+ i 1) (pair (substring text start i) acc))
+              (self (+ i 1) start acc)))))
+      (go 0 0 ()))))
+
+(def %sh-strip-tabs
+  (fn (_ line)
+    (let ((n (string-length line)))
+      (def go
+        (fn (self i)
+          (if (and (< i n) (= (string-ref line i) #\tab)) (self (+ i 1)) i)))
+      (substring line (go 0) n))))
+
+; The delimiter word that follows `<<`, and where it ends.  A quoted one is
+; taken literally and marks the body as unexpanded.
+(def %sh-hd-delim
+  (fn (_ line i n)
+    (let ((j (%sh-ar-skip-ws line i n)))
+      (if (>= j n)
+        (list "" j #t)
+        (let ((q (string-ref line j)))
+          (if (or (= q #\') (= q #\"))
+            (let ((e (%sh-quote-scan line (+ j 1) n q)))
+              (list (substring line (+ j 1) e) (+ e 1) ()))
+            (let ((e (%sh-word-scan line j n)))
+              (list (substring line j e) e #t))))))))
+
+(def %sh-quote-scan
+  (fn (self line i n q)
+    (if (>= i n) i (if (= (string-ref line i) q) i (self line (+ i 1) n q)))))
+
+(def %sh-word-scan
+  (fn (self line i n)
+    (if (>= i n)
+      i
+      (let ((c (string-ref line i)))
+        (if (or (%sh-ws-char? c) (or (= c #\;) (or (= c #\<) (= c #\>))))
+          i
+          (self line (+ i 1) n))))))
+
+; Rewrite one line, collecting the here-documents it opens.  Answers
+; (rewritten pending), where pending is a list of (delim strip? expand?) in the
+; order the bodies must follow.
+(def %sh-hd-scan-line
+  (fn (_ line index)
+    (let ((n (string-length line)))
+      (def go
+        (fn (self i mode out pending idx)
+          (if (>= i n)
+            (list (Str8 join "" (List reverse out)) (reverse pending))
+            (let ((c (string-ref line i)))
+              (cond
+                ; Quoted regions are copied through; `<<` inside them is text.
+                ((not (= mode 0))
+                  (self (+ i 1) (if (= c mode) 0 mode)
+                        (pair (substring line i (+ i 1)) out) pending idx))
+                ((or (= c #\') (= c #\"))
+                  (self (+ i 1) c (pair (substring line i (+ i 1)) out)
+                        pending idx))
+                ; `<<` but not `<<<`, and not `<&`
+                ((and (= c #\<)
+                      (and (< (+ i 1) n) (= (string-ref line (+ i 1)) #\<)))
+                  (let ((strip? (and (< (+ i 2) n)
+                                     (= (string-ref line (+ i 2)) #\-))))
+                    (let ((d (%sh-hd-delim line (if strip? (+ i 3) (+ i 2)) n)))
+                      (self (first (rest d)) 0
+                        (pair (string-append "<<" (convert idx %string)) out)
+                        (pair (list (first d) strip?
+                                    (first (rest (rest d)))) pending)
+                        (+ idx 1)))))
+                (else
+                  (self (+ i 1) 0 (pair (substring line i (+ i 1)) out)
+                        pending idx)))))))
+      (go 0 0 () () index))))
+
+; Take a body off the front of LINES, to the terminator.
+(def %sh-hd-take
+  (fn (_ lines delim strip?)
+    ; `remaining`, not `rest`: a parameter of that name shadows the list
+    ; primitive, so the recursive step called a LIST.  Second time in this
+    ; bundle -- see %sh-first-op.
+    (def go
+      (fn (self remaining acc)
+        (if (null? remaining)
+          ; Unterminated: what is left is the body, which is what a shell does
+          ; at end of input.
+          (list (Str8 join "" (List reverse acc)) ())
+          (let ((line (if strip?
+                        (%sh-strip-tabs (first remaining))
+                        (first remaining))))
+            (if (string=? line delim)
+              (list (Str8 join "" (List reverse acc)) (rest remaining))
+              (self (rest remaining)
+                (pair (string-append line "\n") acc)))))))
+    (go lines ())))
+
+(def %sh-hd-collect
+  (fn (self lines pending bodies)
+    (if (null? pending)
+      (list lines bodies)
+      (let ((p (first pending)))
+        (let ((taken (%sh-hd-take lines (first p) (first (rest p)))))
+          (self (first (rest taken)) (rest pending)
+            (pair (%sh-heredoc (first taken) (first (rest (rest p))))
+                  bodies)))))))
+
+(def %sh-hd-walk
+  (fn (self lines out bodies)
+    (if (null? lines)
+      (list (Str8 join "\n" (List reverse out)) (reverse bodies))
+      (let ((scanned (%sh-hd-scan-line (first lines) (length bodies))))
+        (let ((collected (%sh-hd-collect (rest lines)
+                           (first (rest scanned)) bodies)))
+          (self (first collected)
+                (pair (first scanned) out)
+                (first (rest collected))))))))
+
+; Lift every here-document out of INPUT, leaving `<<N` behind.  Answers the
+; rewritten text; the bodies land in %sh-heredocs.
+(def %sh-heredoc-extract
+  (fn (_ input)
+    ; Nothing to do for the overwhelming majority of input, so ask the cheap
+    ; question first -- but ask it by SCANNING.  The first version built a list
+    ; of every character to hand to List index-of, which allocated a cons per
+    ; character of every command the shell ever runs: more than the pass it was
+    ; avoiding, and enough to take the spec suite over its allocation ceiling.
+    (if (not (%sh-str-has-heredoc-op? input))
+      input
+      (let ((r (%sh-hd-walk (%sh-split-lines input) () ())))
+        (set! %sh-heredocs (first (rest r)))
+        (first r)))))
+
+; `<<`, not `<`.  A single `<` is far too common to gate on -- `$((3<5))` has
+; one, and every arithmetic comparison was paying for the whole line-splitting
+; pass because of it.
+(def %sh-str-has-heredoc-op?
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i)
+          (if (>= (+ i 1) n)
+            ()
+            (if (and (= (string-ref text i) #\<)
+                     (= (string-ref text (+ i 1)) #\<))
+              #t
+              (self (+ i 1))))))
+      (go 0))))
+
 ; --- Public API ---
 
-(def sh-eval
+; EXTRACTION HAPPENS ONCE, at the top.  A command substitution evaluates a
+; FRAGMENT of text whose here-documents the outer pass already lifted -- the
+; fragment still carries the `<<N` markers, and running the pass again over it
+; would find `N` as a delimiter, consume no body (there is none left), and
+; overwrite %sh-heredocs with the result.  `X=$(cat <<EOF ... )` came back
+; empty for exactly that.
+;
+; So the substitution path evaluates already-extracted text.  Reading a FILE
+; (`.` / source) is fresh text and goes through the full entry.
+(def sh-eval-extracted
   (fn (_ input)
     (let ((tokens (sh-tokenize input)))
       (if (null? tokens)
         0
         (let ((cur (%mk-cursor tokens))) (%eval-list cur))))))
+
+(def sh-eval
+  (fn (_ input) (sh-eval-extracted (%sh-heredoc-extract input))))
