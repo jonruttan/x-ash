@@ -29,6 +29,11 @@ one. An unset name expands to nothing.
 Command substitution: `$(...)` and the older `` `...` ``, nested, and inside
 double quotes. Trailing newlines come off, as POSIX asks.
 
+Arithmetic expansion: `$((...))` — integers, `+ - * / %` (division truncates
+toward zero), comparisons, `&&` / `||` / `!`, parentheses, and bare names read
+as their values (unset or non-numeric is zero). So a counting loop works:
+`i=$((i+1))`.
+
 Parameter expansion: `${X:-default}`, `${X:=assign}`, `${X:?message}`,
 `${X:+alternative}` and their colonless forms (which treat a null value as
 set), `${#X}` for length, and `${X#p}` / `${X##p}` / `${X%p}` / `${X%%p}` to
@@ -68,8 +73,7 @@ Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `test` /
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-**Not there yet**, and worth knowing before you reach for them: arithmetic
-expansion `$((...))`, here-documents, `{ ...; }` grouping, `set` and its
+**Not there yet**, and worth knowing before you reach for them: here-documents, `{ ...; }` grouping, `set` and its
 options (so `IFS` is the default space/tab/newline and cannot be changed),
 `trap`, `local`, `command`, and job control.
 
@@ -94,7 +98,7 @@ The terms are in x-lang's
 
 ## Status
 
-**293 of 293 specs green** against x-lang **v0.10.0**, with nothing recorded in
+**316 of 316 specs green** against x-lang **v0.10.0**, with nothing recorded in
 the contract.
 
 That row is a *pairing* — what this bundle was last built and tested against —
