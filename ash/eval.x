@@ -1803,6 +1803,45 @@
         (do (%stderr "ash: return: can only `return' from a function\n") 1)
         (do (set! %sh-return-status n) (error (lit %sh-return)))))))
 
+; --- Loop control -----------------------------------------------------------
+;
+; `break [n]` and `continue [n]` unwind to the n-th enclosing loop the way
+; `return` unwinds to the call site: a sentinel symbol raised here and caught
+; by the loop that owns the iteration (%sh-run-loop-body).  The count rides in
+; %sh-loop-level, and every loop the signal passes through takes one off it.
+;
+; Measured against /bin/sh: outside any loop both are a silent no-op with
+; status 0; a count deeper than the nesting leaves every loop there is; a
+; count below one is "loop count out of range" and leaves the innermost loop
+; with status 1 -- the one case where the signal carries a status.
+(def %sh-loop-depth 0)
+(def %sh-loop-level 0)
+(def %sh-loop-status 0)
+
+(def %sh-loop-count
+  (fn (_ wds who)
+    (if (null? wds)
+      1
+      (let ((n (convert (first wds) %int)))
+        (if (< n 1)
+          (do
+            (%stderr (Str8 join "" (list "ash: " who ": " (first wds)
+                                         ": loop count out of range\n")))
+            ())
+          n)))))
+
+(def %sh-loop-signal
+  (fn (_ wds who signal)
+    (if (= %sh-loop-depth 0)
+      0
+      (let ((n (%sh-loop-count wds who)))
+        (set! %sh-loop-level (if (null? n) 1 n))
+        (set! %sh-loop-status (if (null? n) 1 0))
+        (error (if (null? n) (lit %sh-break) signal))))))
+
+(def %sh-break    (fn (_ wds) (%sh-loop-signal wds "break"    (lit %sh-break))))
+(def %sh-continue (fn (_ wds) (%sh-loop-signal wds "continue" (lit %sh-continue))))
+
 ; `shift [n]` drops the first n positional parameters (default 1).  Shifting
 ; more than there are is an error and leaves them alone, which is what
 ; `while shift; do` relies on to terminate.
@@ -1912,6 +1951,8 @@
         (pair "read"   %sh-read)
         (pair "return" %sh-return)
         (pair "shift"  %sh-shift)
+        (pair "break"  %sh-break)
+        (pair "continue" %sh-continue)
         (pair "set"    %sh-set)
         (pair "test"   %sh-test)
         (pair "["      %sh-bracket)
@@ -2300,6 +2341,49 @@
 
               (do (%cursor-advance! cur) (set! %sh-status 0) 0)
               (error "parse error: expected elif, else, or fi"))))))))
+; --- One iteration, under the loop-control guard ----------------------------
+;
+; Answers (pair HOW status): HOW is `ran` when the body reached its `done`,
+; `break` or `continue` when a signal aimed at THIS loop cut it short.  A
+; signal aimed further out -- `break 2` from an inner loop -- passes through
+; with one taken off its count, and only while there is an outer loop to take
+; it: a count deeper than the nesting stops at the outermost, which is
+; /bin/sh's answer too.  Anything that is not a loop signal is re-raised
+; untouched, `return` included.
+(def %sh-loop-signals
+  (list (pair "%sh-break" (lit break)) (pair "%sh-continue" (lit continue))))
+
+(def %sh-loop-signal-kind
+  (fn (_ e)
+    (if (atom? e) (%sh-table-get (symbol->str e) %sh-loop-signals) ())))
+
+(def %sh-loop-catch
+  (fn (_ e)
+    (let ((kind (%sh-loop-signal-kind e)))
+      (if (null? kind)
+        (error e)
+        (if (and (> %sh-loop-level 1) (> %sh-loop-depth 0))
+          (do (set! %sh-loop-level (- %sh-loop-level 1)) (error e))
+          (pair kind %sh-loop-status))))))
+
+(def %sh-run-loop-body
+  (fn (_ cur)
+    (set! %sh-loop-depth (+ %sh-loop-depth 1))
+    (guard (e
+        (do (set! %sh-loop-depth (- %sh-loop-depth 1)) (%sh-loop-catch e)))
+      (let ((result (%eval-list cur)))
+        (set! %sh-loop-depth (- %sh-loop-depth 1))
+        (pair (lit ran) result)))))
+
+; Leave the cursor just past this loop's `done`.  A body that ran is standing
+; on it; one cut short by a signal is somewhere inside, so walk from the
+; loop's own start -- the same balanced skip the false-condition path takes.
+(def %sh-loop-after-body
+  (fn (_ cur start how)
+    (if (eq? how (lit ran))
+      (do (%skip-newlines cur) (%expect-word cur "done"))
+      (do (set-first! cur start) (%skip-to-done cur 0)))))
+
 ; while cond; do body; done
 
 (def %eval-while
@@ -2324,10 +2408,11 @@
       (%expect-word cur "do")
       (%skip-newlines cur)
       (if (= cond-result 0)
-        (let ((result (%eval-list cur)))
-          (%skip-newlines cur)
-          (%expect-word cur "done")
-          (let ((new-saved saved)) (%eval-while-body cur new-saved)))
+        (let ((r (%sh-run-loop-body cur)))
+          (%sh-loop-after-body cur saved (first r))
+          (if (eq? (first r) (lit break))
+            (do (set! %sh-status (rest r)) (rest r))
+            (%eval-while-body cur saved)))
         ; Condition false: skip body, done
 
         (do (%skip-to-done cur 0) (set! %sh-status 0) 0)))))
@@ -2353,10 +2438,11 @@
       (%expect-word cur "do")
       (%skip-newlines cur)
       (if (not (= cond-result 0))
-        (let ((result (%eval-list cur)))
-          (%skip-newlines cur)
-          (%expect-word cur "done")
-          (let ((new-saved saved)) (%eval-until-body cur new-saved)))
+        (let ((r (%sh-run-loop-body cur)))
+          (%sh-loop-after-body cur saved (first r))
+          (if (eq? (first r) (lit break))
+            (do (set! %sh-status (rest r)) (rest r))
+            (%eval-until-body cur saved)))
         ; Condition succeeded: skip body, done
 
         (do (%skip-to-done cur 0) (set! %sh-status 0) 0)))))
@@ -2432,12 +2518,13 @@
         (set-first! cur body-start)
         ; reset to body
 
-        (let ((result (%eval-list cur)))
-          (%skip-newlines cur)
-          (%expect-word cur "done")
-          (if (null? (rest words))
-            (do (set! %sh-status 0) 0)
-            (%eval-for-body cur var (rest words) body-start)))))))
+        (let ((r (%sh-run-loop-body cur)))
+          (%sh-loop-after-body cur body-start (first r))
+          (if (eq? (first r) (lit break))
+            (do (set! %sh-status (rest r)) (rest r))
+            (if (null? (rest words))
+              (do (set! %sh-status 0) 0)
+              (%eval-for-body cur var (rest words) body-start))))))))
 ; case WORD in PATTERN[|PATTERN]...) BODY;; ... esac
 
 ; CASE PATTERNS ARE GLOBS, and this used to be `pat = "*"` or string equality
@@ -2900,8 +2987,10 @@
 ; lib/x/type/err.x documents ("re-raise what we don't handle").  atom? guards
 ; the symbol->str: reading a structured Err's memory as a symbol name is how
 ; the REPL used to print garbage bytes.
-(def %sh-return?
-  (fn (_ e) (if (atom? e) (str=? (symbol->str e) "%sh-return") ())))
+(def %sh-signal?
+  (fn (_ e name) (if (atom? e) (str=? (symbol->str e) name) ())))
+
+(def %sh-return? (fn (_ e) (%sh-signal? e "%sh-return")))
 
 (def %sh-call-fn
   (fn (_ body args)
