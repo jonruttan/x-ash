@@ -583,9 +583,9 @@
 ; THE FIELD IN HAND IS A LIST OF PIECES, not a string.  It was a string, grown
 ; with (string-append cur here) once per character -- which copies the whole
 ; accumulated field every time, so building an n-character word cost O(n^2) and
-; two allocations per character.  With the per-snippet collect off (this
-; bundle's runner turns it off; see tests/spec-runner.sh) a batched spec run
-; accumulates all of that and died on the interpreter's allocation ceiling.
+; two allocations per character.  While this bundle's runner had to keep the
+; per-snippet collect off (x-lang#599, fixed in x-engine-c v0.2.7) a batched
+; spec run accumulated all of that and died on the allocation ceiling.
 ;
 ; Pieces are pushed in reverse and joined ONCE, when the field closes.  Per
 ; character that is one cons; the copying happens exactly once per field.

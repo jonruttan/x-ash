@@ -58,69 +58,14 @@ LANG_LIB="$BUNDLE/tests/lib/harness.gen.x"
 # while diagnosing, without moving anything into the suite.
 SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 
-# NO COLLECT AT THE SNIPPET SEAM.  The platform runner grew a per-seam
-# heap-collect (x-lang#568 has the diagnosis, #572 the knob), and with it on,
-# this suite dies wholesale: 78 of 82 red -- the tokenizer specs first, which is
-# every spec in a bundle whose whole point is its own tokenizer types.  With
-# the knob at 0 the suite is exactly its recorded self.  Measured both ways
-# against the #572 head rather than reasoned about; x-python's wrapper made
-# the same call for the same reason, and a runner without the knob (the
-# pinned release) ignores the export.
-export SPEC_SEAM_COLLECT=0
-
-# TWO KNOBS FOR ONE FACT: with the seam collect off (above), a spec job
-# accumulates every file's garbage until the process exits.  The platform's
-# guards are calibrated for a dev box; this suite also runs on a 16 GB CI
-# runner, and there the default ceiling is larger than the machine.
-#
-# X_ALLOC_LIMIT_OBJS: the platform default is 300M objects, ~14 GB at ~48
-# B/obj.  On a 16 GB runner a process approaching that exhausts the MACHINE
-# before the guard trips -- which is not a failed spec, it is a killed job:
-#
-#   spec-gate: killed by SIGTERM -- the suite did not finish
-#
-# and no output at all to say why.  A lower ceiling turns that back into a
-# legible per-spec failure.
-#
-# SPEC_BATCH: the platform runner buckets up to this many same-@lib files into
-# ONE process, so it is the lever that sets how much a single process
-# accumulates.
-#
-# MEASURED, at 293 specs:
-#
-#   ceiling 300M (platform default), batch 8   green here, KILLED both CI legs
-#   ceiling 200M,                    batch 4   green
-#   ceiling 120M,                    batch 4   legitimate specs die
-#   ceiling 120M,                    batch 2   still die, in a DIFFERENT file
-#
-# so the peak is per-FILE, not per-bucket -- one file's process needs somewhere
-# between 120M and 200M objects, and batching is not what sets that.  200M is
-# ~9.6 GB, which a 16 GB runner survives and 300M (~14 GB) does not.  The
-# margin is thin, and the thing to reduce is the expander, not this number:
-# every expanded word still allocates per character-run, and the suite has no
-# per-snippet collect to reclaim it (see above).
-#
-# Turning the seam collect back on was tried and still fails, exactly as the
-# note above says: the tokenizer specs go first.
-#
-# MEASURED LOCALLY, THEN TRUSTED TOO FAR.  Adding pathname expansion pushed the
-# suite over the ceiling; batch 4 fixed it, and then making the expander stop
-# building words character-by-character fixed it properly, so batch 8 passed
-# HERE and I removed the override.  CI then killed both legs.  A 64 GB
-# workstation is not evidence about a 16 GB runner, and the platform runner's
-# own header says exactly that: "a default that is safe only when the caller
-# remembers a comment is not a guard."
-export X_ALLOC_LIMIT_OBJS="${X_ALLOC_LIMIT_OBJS:-200000000}"
-# 4 -> 2 at 316 specs (arithmetic and here-documents landing).  This is the
-# THIRD time this knob has moved for the same reason, which is the point: with
-# no per-snippet collect the suite's peak grows with every feature, and the
-# only levers on this side are how many files share a process and how high the
-# ceiling is.  Neither is a fix.
-#
-# The fix is x-lang#599 -- a type registered on an isolated tokenizer base does
-# not survive a collect, which is WHY SPEC_SEAM_COLLECT is 0 above.  When that
-# closes, turn the seam collect back on and delete both knobs; the suite will
-# bound itself per snippet instead of per file.
-export SPEC_BATCH="${SPEC_BATCH:-2}"
+# NO KNOBS.  This runner once carried three: SPEC_SEAM_COLLECT=0, an
+# X_ALLOC_LIMIT_OBJS ceiling and a SPEC_BATCH width, all for one cause -- a
+# type registered on an isolated tokenizer base did not survive the collector
+# (x-lang#599), so the per-snippet seam collect killed the tokenizer specs and
+# the suite ran in accumulate-then-exit mode, retuned at every feature landing.
+# The engine fix (x-engine-c#28, v0.2.7) removed the cause; the suite now
+# bounds itself per snippet like every other bundle's, on the platform's
+# defaults.  If a knob wants to come back here, the question is what broke in
+# the engine, not what number to set.
 
 . "$X_ROOT/tests/spec-runner.sh"
