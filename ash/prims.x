@@ -134,16 +134,29 @@
 ; not as a catalog member, and prim-ref answers nil for a member that is not
 ; there -- which reaches the reader as a garbage int rather than an error.
 (def integer->char (prim-ref (lit int) (lit ->char)))
-(def string-length (fn (_ s) (Str8 length s)))
-(def string-ref (fn (_ s i) (Str8 ref i s)))
-; Scheme's substring is [start, end); Str8 sub is (start, LENGTH).
-(def substring (fn (_ s a b) (Str8 sub a (- b a) s)))
+; BYTE DOORS, NOT CLASS DISPATCH.  These four are the whole of the expansion
+; walk's inner loop -- every unquoted word is scanned three times, a byte at a
+; time -- and through (Str8 ref) each call cost ~1,800 heap objects of
+; dispatch scaffolding; (Str8 sub) ~3,100.  The raw primitives cost ~350, which
+; is the interpreter's call floor.  Measured at 1,000 calls each with
+; (heap count), no collect between.  A shell in the C locale is a byte tool,
+; and x-awk made the same move for the same reason (awk/prims.x).
+;
+; Bound to the primitive DIRECTLY where the argument order already agrees, so
+; a call is one C call with no wrapper frame; only substring (Scheme's
+; [start, end) against the primitive's (start, length)) and the variadic
+; string-append keep one.
+(def string-length (prim-ref (lit str) (lit byte-len)))
+(def string-ref (prim-ref (lit str) (lit byte-ref)))
+(def %str-byte-sub (prim-ref (lit str) (lit byte-sub)))
+(def substring (fn (_ s a b) (%str-byte-sub s a (- b a))))
+(def %str-append-2 (prim-ref (lit str) (lit append)))
 (def string-append (fn (_ . ss) (%ash-str-append ss)))
 (def %ash-str-append
   (fn (self ss)
     (if (null? ss)
       ""
-      (if (null? (rest ss)) (first ss) (Str8 append (first ss) (self (rest ss)))))))
+      (if (null? (rest ss)) (first ss) (%str-append-2 (first ss) (self (rest ss)))))))
 (def string=? (fn (_ a b) (str=? a b)))
 (def string? (fn (_ s) (str? s)))
 (def make-string (fn (_ n c) (Str8 make n c)))
