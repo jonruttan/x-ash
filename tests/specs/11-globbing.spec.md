@@ -85,7 +85,7 @@
 ### a pattern that matches answers the path
 
 ```sh
-(write (%sh-glob-field "/de?"))
+(write (%sh-glob-text "/de?"))
 ```
 ---
     ("/dev")
@@ -93,7 +93,7 @@
 ### a literal path is left alone
 
 ```sh
-(write (%sh-glob-field "/dev/null"))
+(write (%sh-glob-text "/dev/null"))
 ```
 ---
     ("/dev/null")
@@ -101,7 +101,7 @@
 ### a pattern that matches nothing stands as written
 
 ```sh
-(write (%sh-glob-field "/nosuchthing-ash*"))
+(write (%sh-glob-text "/nosuchthing-ash*"))
 ```
 ---
     ("/nosuchthing-ash*")
@@ -109,7 +109,7 @@
 ### a star matches within a directory
 
 ```sh
-(write (%sh-glob-field "/de*"))
+(write (%sh-glob-text "/de*"))
 ```
 ---
     ("/dev")
@@ -121,7 +121,7 @@ the SPEC_BATCH note in tests/spec-runner.sh -- so exactly one case listens to a
 big one, and the rest match against `/`.
 
 ```sh
-(write (%sh-glob-field "/dev/nul?"))
+(write (%sh-glob-text "/dev/nul?"))
 ```
 ---
     ("/dev/null")
@@ -199,3 +199,44 @@ big one, and the rest match against `/`.
 ```
 ---
     ok
+
+## sh-eval a backslash in a VALUE is not an escape
+
+A backslash the shell reads in the source escapes what follows it.  A
+backslash that arrives inside a variable's value does not: it is an ordinary
+character, and it survives to the output.  The expander used to lose it,
+because the finished field was scanned for escapes to strip and could not tell
+one it had written from one that came out of a value.  All four checked
+against `/bin/sh`.
+
+### an unquoted expansion keeps a literal backslash
+
+```sh
+(do (sh-eval "x='a\\b'; echo $x") ())
+```
+---
+    a\b
+
+### a quoted expansion keeps it too
+
+```sh
+(do (sh-eval "x='a\\b'; echo \"$x\"") ())
+```
+---
+    a\b
+
+### a backslash in a value does not escape a wildcard beside it
+
+```sh
+(do (sh-eval "w='a\\*b'; echo $w") ())
+```
+---
+    a\*b
+
+### a value that is only a backslash survives
+
+```sh
+(do (sh-eval "v='\\'; echo $v") ())
+```
+---
+    \
