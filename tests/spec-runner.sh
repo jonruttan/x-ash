@@ -63,9 +63,10 @@ SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 # type registered on an isolated tokenizer base did not survive the collector
 # (x-lang#599), so the per-snippet seam collect killed the tokenizer specs and
 # the suite ran in accumulate-then-exit mode, retuned at every feature landing.
-# The engine fix (x-engine-c#28, v0.2.7) removed the cause; the suite now
-# bounds itself per snippet like every other bundle's, on the platform's
-# defaults.  If a knob wants to come back here, the question is what broke in
-# the engine, not what number to set.
+# The engine fix (x-engine-c#28, v0.2.7) removed the cause, and it reaches
+# this bundle through x-lang v0.12.0 -- the release this bundle now declares,
+# which pins engine v0.2.8.  The suite bounds itself per snippet like every
+# other bundle's, on the platform's defaults.  If a knob wants to come back
+# here, the question is what broke in the engine, not what number to set.
 
 . "$X_ROOT/tests/spec-runner.sh"
