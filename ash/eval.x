@@ -1736,6 +1736,22 @@
 ; FD arrives as a string when the script wrote one (`2> log`) and as an int
 ; from %default-fd otherwise; %sh-redir-fd is where that is reconciled, once.
 (def %sh-redir (fn (_ op fd target) (list (lit sh-redir) op fd target)))
+
+; The target of a redirection whose OPERATOR HAS JUST BEEN CONSUMED.  Both
+; places that read redirections come through here -- after a simple command's
+; words, and after a compound -- so "redirect without target" and the
+; unsplit reading of the target are each stated once.
+;
+; NOT SPLIT.  `> $f` with two fields in $f is an ambiguous redirect in POSIX,
+; not two files; taking the unsplit reading keeps the common case right and
+; the pathological one harmless.
+(def %sh-read-redir-target
+  (fn (_ cur rop fd)
+    (if (%cursor-empty? cur)
+      (error "parse error: redirect without target")
+      (let ((target (%sh-expand-tok-1 (%cursor-peek cur))))
+        (%cursor-advance! cur)
+        (%sh-redir rop fd target)))))
 (def %sh-redir-op     (fn (_ r) (first (rest r))))
 (def %sh-redir-target (fn (_ r) (first (rest (rest (rest r))))))
 (def %sh-redir-fd
@@ -2496,13 +2512,11 @@
                     ; ambiguous redirect in POSIX, not two files; taking the
                     ; unsplit reading keeps the common case right and the
                     ; pathological one harmless.
-                    (let ((target (%sh-expand-tok-1 (%cursor-peek cur))))
-                      (%cursor-advance! cur)
-                      (%collect-cmd-tokens
-                        cur
-                        wds
-                        (pair (%sh-redir rop fd target) redirs)
-                        assign?)))))
+                    (%collect-cmd-tokens
+                      cur
+                      wds
+                      (pair (%sh-read-redir-target cur rop fd) redirs)
+                      assign?))))
               (if (%tok-is-word? tok)
                 (let ((val (%tok-word-val tok)))
                   ; A RESERVED WORD IN ARGUMENT POSITION IS AN ARGUMENT.  This
@@ -3371,10 +3385,101 @@
         (set! %sh-fn-depth (- %sh-fn-depth 1))
         %sh-status))))
 
+; --- A compound command's own redirections ----------------------------------
+;
+; `for i in ...; do ...; done > log` redirects the WHOLE loop, and the
+; redirection is written AFTER the construct it applies to.  A parser that
+; evaluates as it reads meets it too late: by the time `done` is consumed,
+; everything the loop printed has already gone somewhere else.
+;
+; So the construct is SKIPPED first -- read past without being evaluated -- to
+; see what follows it.  Any redirections there are collected, the cursor is
+; wound back, and the construct is then evaluated with its descriptors already
+; in place.  Winding a cursor back is what the loop bodies already do to
+; repeat themselves; nothing new is asked of it here.
+;
+; WHAT THIS REPLACES WAS SILENT.  %eval-list ends its list at any token it does
+; not recognise, and `>` was one -- so `( echo a ) > f` wrote to the terminal
+; and every command after it in the SCRIPT was quietly dropped, with no
+; diagnostic and a zero status.  A missing feature is a nuisance; a missing
+; feature that swallows the rest of the file is a trap.
+;
+; The skip counts what the construct is made of, by the same split
+; %eval-compound-body makes: a subshell is punctuation and counts parens,
+; every other compound is words and counts its own keywords.
+(def %sh-compound-delta
+  (fn (_ tok paren?)
+    (if (not paren?)
+      (%sh-nest-delta tok)
+      (if (eq? (first tok) (lit tok-op))
+        (let ((op (first (rest tok))))
+          (if (string=? op "(") 1 (if (string=? op ")") (- 0 1) 0)))
+        0))))
+
+; Read past one whole compound, leaving the cursor on whatever follows it.
+; Entered ON the opening token with depth 0, so the opener takes the depth to
+; 1 and the matching closer brings it back to 0 and stops.
+(def %sh-skip-compound
+  (fn (self cur depth paren?)
+    (unless (%cursor-empty? cur)
+      (let ((d (+ depth (%sh-compound-delta (%cursor-peek cur) paren?))))
+        (%cursor-advance! cur)
+        (when (> d 0) (self cur d paren?))))))
+
+; The redirections written after a construct.  `done 2> log` puts the
+; descriptor in a WORD before the operator, so a digit is taken only when an
+; operator follows it -- and the cursor is wound back when one does not,
+; because `done 2` is a word that belongs to whatever comes next.
+(def %sh-collect-trailing-redirs
+  (fn (self cur redirs)
+    (if (%cursor-empty? cur)
+      (reverse redirs)
+      (let ((tok (%cursor-peek cur)))
+        (let ((rop (%redir-op? tok)))
+          (if rop
+            (do
+              (%cursor-advance! cur)
+              (self cur
+                (pair (%sh-read-redir-target cur rop (%default-fd rop)) redirs)))
+            (if (and (%tok-is-word? tok) (%all-digits? (%tok-word-val tok)))
+              (let ((save (first cur)) (fd (%tok-word-val tok)))
+                (%cursor-advance! cur)
+                (let ((op2 (if (%cursor-empty? cur)
+                             ()
+                             (%redir-op? (%cursor-peek cur)))))
+                  (if (null? op2)
+                    (do (set-first! cur save) (reverse redirs))
+                    (do
+                      (%cursor-advance! cur)
+                      (self cur
+                        (pair (%sh-read-redir-target cur op2 fd) redirs))))))
+              (reverse redirs))))))))
+
+(def %eval-compound-redir
+  (fn (_ cur)
+    (let ((start (first cur))
+          (paren? (eq? (first (%cursor-peek cur)) (lit tok-op))))
+      (%sh-skip-compound cur 0 paren?)
+      (let ((redirs (%sh-collect-trailing-redirs cur ())))
+        (let ((after (first cur)))
+          (set-first! cur start)
+          (if (null? redirs)
+            (%eval-compound cur)
+            (do
+              (%sh-save-fds redirs)
+              (guard (e (do (%sh-restore-fds redirs) (error e)))
+                (%sh-setup-redirs redirs)
+                (let ((status (%eval-compound cur)))
+                  ; The construct stopped at its own end; step over the
+                  ; redirections that were read before it ran.
+                  (set-first! cur after)
+                  (%sh-restore-fds redirs)
+                  status)))))))))
+
 (set! %eval-command
   (fn (_ cur)
     (if (%is-compound-start? cur)
-      (%eval-compound cur)
+      (%eval-compound-redir cur)
       (%eval-simple-cmd cur))))
 ; --- Pipeline stage collection ---
 ; Collect tokens for one stage (until | or end of command)
@@ -3449,8 +3554,13 @@
               ; "unexpected EOF in function body".
               (if (%is-fn-def? cur)
                 (%eval-fn-def cur)
+              ; THROUGH THE REDIRECTION WRAPPER, because this is where a
+              ; top-level compound is actually reached -- %eval-command's
+              ; branch for one is only taken from inside a pipeline stage.
+              ; A `done > log` read here and not there would be a redirection
+              ; that worked in `x | y` and nowhere else.
               (if (%is-compound-start? cur)
-                (%eval-compound cur)
+                (%eval-compound-redir cur)
                 (let ((stages (%collect-stages cur ())))
                   (if (null? (rest stages))
                     (let ((cur (%mk-cursor (first stages))))
