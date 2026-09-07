@@ -380,3 +380,57 @@ shell, and the IFS section above leaves it at `:`.
 ```
 ---
     3 [head][a][b]
+
+## sh-eval "$*" joins on IFS
+
+`$*` puts the first character of IFS between the parameters -- not a space,
+which is only what the default IFS starts with.  An empty IFS puts nothing
+between them at all.  Each expectation was taken from `/bin/sh`.
+
+### the first character of IFS separates them
+
+```sh
+(do (sh-eval "IFS=:; set -- a b c; echo \"$*\"") ())
+```
+---
+    a:b:c
+
+### only the FIRST character, however many IFS holds
+
+```sh
+(do (sh-eval "IFS=':;'; set -- a b c; echo \"$*\"") ())
+```
+---
+    a:b:c
+
+### an empty IFS puts nothing between them
+
+```sh
+(do (sh-eval "IFS=; set -- a b c; echo \"$*\"") ())
+```
+---
+    abc
+
+### an unset IFS is the default, so a space
+
+```sh
+(do (sh-eval "unset IFS; set -- a b c; echo \"$*\"") ())
+```
+---
+    a b c
+
+### the braced form joins the same way
+
+```sh
+(do (sh-eval "IFS=:; set -- a b c; echo \"${*}\"") ())
+```
+---
+    a:b:c
+
+### unquoted, a non-whitespace IFS keeps the parameter boundaries
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2]\"; }; IFS=:; set -- 'a b' c; f $@") ())
+```
+---
+    2 [a b][c]
