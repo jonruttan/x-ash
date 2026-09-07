@@ -2208,6 +2208,37 @@
         wds
         (if (string=? (last wds) "]") (take (- (length wds) 1) wds) wds)))))
 
+; `eval` -- the arguments, joined by a space, read back as shell input.
+;
+; The joining is why `eval echo a b` and `eval "echo a b"` are the same
+; command: eval takes WORDS, and its arguments have already been expanded once
+; by the time they arrive here.  That second pass is the whole point of it --
+;
+;   a=b; b=c; eval "echo \$$a"
+;
+; expands to `echo $b` and then evaluates THAT, which nothing else offers.
+;
+; IN THIS SHELL, never a subshell: `eval "v=1"` sets v for the caller and
+; `eval "exit 3"` exits.
+;
+; THE TEXT IS A FRESH TOP LEVEL, so %sh-compound-depth is reset around it for
+; exactly the reason %sh-call-fn resets it: eval'd from inside an `if`, a bare
+; `echo done` in the text would otherwise be read as that `if`'s terminator.
+; Restored on the way out AND on a raise, the shape the function call uses.
+(def %sh-eval-builtin
+  (fn (_ wds)
+    (let ((src (%sh-join-args wds)))
+      (if (= (string-length src) 0)
+        ; `eval` with nothing to read is a command that did nothing and
+        ; succeeded -- POSIX, and what `eval $unset_var` relies on.
+        0
+        (let ((saved-depth %sh-compound-depth))
+          (set! %sh-compound-depth 0)
+          (guard (e (do (set! %sh-compound-depth saved-depth) (error e)))
+            (sh-eval src)
+            (set! %sh-compound-depth saved-depth)
+            %sh-status))))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; ONE table, not a list of names beside a dispatch that repeats them.  Those
@@ -2228,6 +2259,7 @@
         (pair "read"   %sh-read)
         (pair "return" %sh-return)
         (pair "shift"  %sh-shift)
+        (pair "eval"   %sh-eval-builtin)
         (pair "break"  %sh-break)
         (pair "continue" %sh-continue)
         (pair "set"    %sh-set)
