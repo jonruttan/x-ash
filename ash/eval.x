@@ -1071,13 +1071,70 @@
 (def %sh-run-meta? (fn (_ r) (rest r)))
 
 (def %sh-plain-run
-  (fn (self s i n mode meta?)
+  (fn (self s i n mode meta? tilde?)
     (if (>= i n)
       (%sh-run i meta?)
       (let ((c (string-ref s i)))
-        (if (%sh-plain-char? c mode)
-          (self s (+ i 1) n mode (or meta? (%sh-glob-meta-char? c)))
+        ; TILDE? ENDS A RUN, and only where one could expand.  A `~` is
+        ; ordinary text to this scanner otherwise, so a word with no
+        ; assignment in it pays one short-circuited test per run, not per
+        ; character.
+        (if (and (%sh-plain-char? c mode)
+                 (not (and tilde? (= c #\~))))
+          (self s (+ i 1) n mode (or meta? (%sh-glob-meta-char? c)) tilde?)
           (%sh-run i meta?))))))
+
+; --- Tilde expansion --------------------------------------------------------
+;
+; `~` stands for HOME, but only where a shell says it does: at the START of a
+; word, and -- in an ASSIGNMENT word only -- straight after the `=` and after
+; any `:` beyond it, which is what makes `PATH=~/bin:~/lib` work.  Everywhere
+; else it is an ordinary character, and all three of these keep theirs:
+;
+;   echo a~b        not at the start
+;   echo x~         not at the start
+;   echo a=~/x      an ARGUMENT that looks like an assignment is not one
+;
+; ASSIGNMENT POSITION IS A FACT OF THE COMMAND, not of the word's shape, so it
+; is passed in: `%collect-cmd-tokens` knows which leading words are still
+; assignments and nothing else can.
+;
+; QUOTING SUPPRESSES IT for free -- the walk only stands on a bare `~`, so
+; `"~"`, `'~'` and `\~` never reach here.
+;
+; ONLY A BARE `~` EXPANDS: the next character must be `/`, `:` or the end of
+; the word.  `~user` wants the password database, and until there is a door to
+; it the honest answer is the one a shell gives for a user that does not
+; exist -- leave it as written.  `~+` and `~-` are extensions and are not
+; here either.
+(def %sh-first-eq
+  (fn (self s i n)
+    (if (>= i n)
+      -1
+      (if (= (string-ref s i) #\=) i (self s (+ i 1) n)))))
+
+(def %sh-tilde-pos?
+  (fn (_ s i assign? eq)
+    (if (= i 0)
+      #t
+      (and assign?
+           (let ((p (string-ref s (- i 1))))
+             (or (and (= p #\=) (= (- i 1) eq))
+                 (and (= p #\:) (> (- i 1) eq))))))))
+
+(def %sh-tilde-bare?
+  (fn (_ s i n)
+    (or (= (+ i 1) n)
+        (let ((d (string-ref s (+ i 1))))
+          (or (= d #\/) (= d #\:))))))
+
+; The home directory this `~` stands for, or () if it stands for nothing.
+(def %sh-tilde-home
+  (fn (_ s i n assign? eq)
+    (if (and (%sh-tilde-pos? s i assign? eq) (%sh-tilde-bare? s i n))
+      (let ((home (sh-getenv "HOME")))
+        (if (or (null? home) (= (string-length home) 0)) () home))
+      ())))
 
 ; --- Arithmetic expansion: $(( ... )) ---------------------------------------
 ;
@@ -1244,8 +1301,9 @@
 ; already stripped by the reader, so there is no opening quote left to switch
 ; on, and the field must start open or `cmd ""` passes no argument at all.
 (def %sh-expand-str
-  (fn (_ s mode0 split?)
-    (let ((n (string-length s)))
+  (fn (_ s mode0 split? assign?)
+    (let ((n (string-length s))
+          (eq (if assign? (%sh-first-eq s 0 (string-length s)) -1)))
       (def go
         (fn (self i mode a)
           (if (>= i n)
@@ -1256,7 +1314,7 @@
                 ((= mode %sh-mode-sq)
                   (if (= c #\')
                     (self (+ i 1) %sh-mode-bare a)
-                    (let ((r (%sh-plain-run s i n mode ())))
+                    (let ((r (%sh-plain-run s i n mode () ())))
                       (let ((e (%sh-run-end r)))
                         (self e mode
                           (%sh-acc-add-literal a (substring s i e)
@@ -1289,6 +1347,19 @@
                         (%sh-add-expansion a mode
                           (%sh-cmd-subst (substring s (+ i 1) e)) split?)))))
                 ((= c #\$) (%sh-expand-dollar self s i n mode a split?))
+                ; A tilde where one may expand; an ordinary character where
+                ; not.  It is asked here rather than scanned for beforehand
+                ; because this is the only place that knows the `~` is bare.
+                ((and (= c #\~) (= mode %sh-mode-bare))
+                  (let ((home (%sh-tilde-home s i n assign? eq)))
+                    (if (null? home)
+                      (self (+ i 1) mode (%sh-acc-add a "~" ()))
+                      ; The result is LITERAL: a home directory with a space
+                      ; in it is one field, and one with a `*` is not a
+                      ; pattern.
+                      (self (+ i 1) mode
+                        (%sh-acc-add-literal a home
+                          (%sh-has-glob-meta? home))))))
                 ; ORDINARY TEXT GOES IN A RUN AT A TIME.  One character per
                 ; step meant one substring allocation per character of every
                 ; word; a plain word is now one substring, which is what took
@@ -1299,7 +1370,8 @@
                 ; not -- so the run is escaped or not by the mode it was read
                 ; in, exactly as a single character was.
                 (else
-                  (let ((r (%sh-plain-run s i n mode ())))
+                  (let ((r (%sh-plain-run s i n mode ()
+                             (and assign? (= mode %sh-mode-bare)))))
                     (let ((e (%sh-run-end r)) (meta? (%sh-run-meta? r)))
                       (let ((run (substring s i e)))
                         (self e mode
@@ -1567,20 +1639,22 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-dq)) %sh-mode-dq %sh-mode-bare)))
 
+; ASSIGN? says this word is in assignment position -- a leading NAME=... of
+; the command, which is the only place `PATH=~/bin` expands its tilde.
 (def %sh-expand-tok
-  (fn (_ tok)
+  (fn (_ tok assign?)
     (if (eq? (first tok) (lit tok-sq))
       ; Single quotes suppress everything, globbing included.
       (list (%tok-word-val tok))
       (%sh-glob-fields
-        (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t)))))
+        (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t assign?)))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (%tok-word-val tok)
-      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) ())))
+      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ())))
         ; Not globbed, but the escapes still come off -- a redirection target
         ; and a case subject are literal strings.
         (if (null? fs) "" (%sh-field-plain (first fs)))))))
@@ -1591,7 +1665,7 @@
   (fn (_ word)
     (if (not (string? word))
       word
-      (let ((fs (%sh-expand-str word %sh-mode-bare ())))
+      (let ((fs (%sh-expand-str word %sh-mode-bare () ())))
         ; THE ESCAPES STAY ON.  This feeds pattern operands (`${x#pat}`),
         ; which read them; %sh-field-plain is for the sites that want the
         ; literal text.
@@ -1707,7 +1781,7 @@
 ; parameters and substitutions, but no field splitting and no globbing.
 (def %sh-expand-str-dq
   (fn (_ text)
-    (let ((fs (%sh-expand-str text %sh-mode-dq ())))
+    (let ((fs (%sh-expand-str text %sh-mode-dq () ())))
       (if (null? fs) "" (%sh-field-plain (first fs))))))
 
 (def %sh-setup-redir
@@ -2317,8 +2391,13 @@
 
 (def %collect-cmd-tokens ())
 
+; ASSIGN? IS THE COLLECTOR'S TO KNOW.  A word is in assignment position while
+; every word before it was an assignment -- `a=1 b=2 cmd x=3` assigns the
+; first two and passes the third as an argument -- and that is a fact of where
+; the word sits, not of how it is spelt.  It is decided on the RAW token, the
+; way POSIX decides it: before expansion, and never for a quoted one.
 (set! %collect-cmd-tokens
-  (fn (_ cur wds redirs)
+  (fn (_ cur wds redirs assign?)
     (if (%cursor-empty? cur)
       (%sh-run-cmd (reverse wds) (reverse redirs))
       (let ((tok (%cursor-peek cur)))
@@ -2343,7 +2422,8 @@
                       (%collect-cmd-tokens
                         cur
                         wds
-                        (pair (%sh-redir rop fd target) redirs))))))
+                        (pair (%sh-redir rop fd target) redirs)
+                        assign?)))))
               (if (%tok-is-word? tok)
                 (let ((val (%tok-word-val tok)))
                   ; A RESERVED WORD IN ARGUMENT POSITION IS AN ARGUMENT.  This
@@ -2377,12 +2457,15 @@
                       ; expansion, so a variable holding "then" must not become
                       ; one.
                       (%collect-cmd-tokens
-                        cur (%sh-push-fields (%sh-expand-tok tok) wds)
-                        redirs))))
+                        cur (%sh-push-fields (%sh-expand-tok tok assign?) wds)
+                        redirs
+                        (and assign?
+                             (eq? (first tok) (lit tok-word))
+                             (%is-assignment? val))))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
 (def %eval-simple-cmd
-  (fn (_ cur) (%collect-cmd-tokens cur () ())))
+  (fn (_ cur) (%collect-cmd-tokens cur () () #t)))
 ; --- Compound commands: parse structure, evaluate directly ---
 ; if cond; then body [elif cond; then body]... [else body] fi
 
@@ -2659,7 +2742,7 @@
             (eq? (first (%cursor-peek cur)) (lit tok-op))
             (string=? (first (rest (%cursor-peek cur))) ";")))
       (reverse ws)
-      (let ((fs (%sh-expand-tok (%cursor-peek cur))))
+      (let ((fs (%sh-expand-tok (%cursor-peek cur) ())))
         (%cursor-advance! cur)
         ; SPLICED, which is what makes `for f in $(cat list)` iterate once per
         ; line instead of once over the whole file.
