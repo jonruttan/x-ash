@@ -2236,6 +2236,35 @@
             (set! %sh-compound-depth saved-depth)
             %sh-status))))))
 
+; --- exec -------------------------------------------------------------------
+;
+; Two commands wearing one name, told apart by whether a command follows:
+;
+;   exec CMD [args]   replace this shell with CMD; nothing after it runs
+;   exec [redirs]     apply the redirections TO THIS SHELL and carry on
+;
+; The second is why exec cannot take the save/apply/restore above: `exec > log`
+; means the REST OF THE SCRIPT goes to log, and `exec 3<file` leaves fd 3 open
+; for the commands after it.  With a command, the same non-restoring setup is
+; what the replacement image inherits -- there is nothing to restore to,
+; because on success this process stops existing.
+;
+; A FAILED EXEC ENDS A SCRIPT: POSIX has a non-interactive shell exit, and
+; `sh -c "exec nosuchcmd; echo after"` prints nothing and exits 127.  At a
+; PROMPT that would close the session over a typo, so there the status is
+; reported and the shell stays -- the same split POSIX draws.
+(def %sh-exec-builtin
+  (fn (_ wds)
+    (if (null? wds)
+      ; Redirections only.  They are already applied, and not putting them
+      ; back is the point.
+      0
+      (do
+        (sh-exec (first wds) (rest wds))
+        ; Only reached when the exec FAILED -- on success there is no return.
+        (%stderr "ash: exec: " (first wds) ": not found\n")
+        (if %batch? (sh-exit 127) 127)))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; ONE table, not a list of names beside a dispatch that repeats them.  Those
@@ -2257,6 +2286,7 @@
         (pair "return" %sh-return)
         (pair "shift"  %sh-shift)
         (pair "eval"   %sh-eval-builtin)
+        (pair "exec"   %sh-exec-builtin)
         (pair "break"  %sh-break)
         (pair "continue" %sh-continue)
         (pair "set"    %sh-set)
@@ -2283,17 +2313,27 @@
 ; guard is not decoration -- a builtin that raises with fd 1 still pointing at
 ; a file would leave the SHELL writing there, and the prompt would vanish into
 ; out.txt.  Restore, then re-raise, the way lib/x/sys/stream.x does it.
+; THE BUILTINS WHOSE REDIRECTIONS OUTLIVE THEM.  There is one, and it is named
+; here rather than tested for inline so the fact sits with the other facts
+; about builtins -- and so a second one is a list entry, not another branch.
+(def %sh-keeps-redirs (list "exec"))
+
 (def %sh-run-builtin-redir
   (fn (_ name wds redirs)
     (if (null? redirs)
       (%sh-run-builtin name wds)
-      (do
-        (%sh-save-fds redirs)
-        (guard (e (do (%sh-restore-fds redirs) (error e)))
-          (%sh-setup-redirs redirs)
-          (let ((status (%sh-run-builtin name wds)))
-            (%sh-restore-fds redirs)
-            status))))))
+      (if (%sh-word-in? name %sh-keeps-redirs)
+        ; Set up and never put back: that is the whole of what `exec > log`
+        ; means.  See %sh-exec-builtin.
+        (do (%sh-setup-redirs redirs) (%sh-run-builtin name wds))
+        (do
+          (%sh-save-fds redirs)
+          (guard (e (do (%sh-restore-fds redirs) (error e)))
+            (%sh-setup-redirs redirs)
+            (let ((status (%sh-run-builtin name wds)))
+              (%sh-restore-fds redirs)
+              status)))))))
+
 
 ; --- External command execution ---
 
