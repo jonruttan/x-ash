@@ -1892,10 +1892,7 @@
       (let ((result (sh-chdir dir)))
         (if (= result -1)
           (do
-            (display "ash: cd: ")
-            (display dir)
-            (display ": No such file or directory")
-            (newline)
+            (%stderr "ash: cd: " dir ": No such file or directory\n")
             1)
           0)))))
 
@@ -2307,10 +2304,12 @@
         (do
           (%sh-setup-redirs redirs)
           (sh-exec name wds)
-          (display "ash: ")
-          (display name)
-          (display ": command not found")
-          (newline)
+          ; A DIAGNOSTIC GOES TO STDERR, and this one is the reason the rule
+          ; exists: on stdout it was captured by `x=$(nosuchcmd)` as if it
+          ; were the command's output, and `nosuchcmd 2>/dev/null` could not
+          ; silence it.  The redirections are already applied above, so a
+          ; script that asked for 2>/dev/null gets it.
+          (%stderr "ash: " name ": command not found\n")
           (sh-exit 127))
         (sh-wait pid)))))
 ; --- Assignment handling ---
