@@ -668,6 +668,12 @@
         #t)
       (%sh-acc-add a text (%sh-has-active-glob? text)))))
 
+; Take the mark back off: the field in hand is not a field after all.  Only
+; "$@" with no positional parameters needs this -- see %sh-add-args.
+(def %sh-acc-unstart
+  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-pieces a) ()
+                     (%sh-acc-glob? a) (%sh-acc-esc? a))))
+
 ; Mark the field open without adding to it -- what a quote mark does.
 (def %sh-acc-open
   (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-pieces a) #t
@@ -804,6 +810,35 @@
                             (%sh-acc-add-value opened (first pieces))
                             (rest pieces))))
               (if (%sh-trail-ws? text) (%sh-acc-break filled) filled))))))))
+
+; "$@" -- ONE FIELD PER POSITIONAL PARAMETER.
+;
+; Every other special answers a string, and inside quotes a string is one
+; field.  `"$@"` is the exception the whole idiom rests on: `cmd "$@"` has to
+; forward three arguments as three, with the spaces inside any of them intact.
+; Joining them -- which is what `$*` means and what this used to do for both --
+; turns `wrapper "$@"` into a single argument and silently mangles every
+; script that forwards what it was given.
+;
+; The parameters splice like any other pieces: the first JOINS the field in
+; hand, so `"x$@"` starts `x` on the first; each later one begins its own; and
+; the last is left OPEN so `"$@y"` closes onto the last.  They go in as
+; literal text -- quoted parameters are not split again and do not glob.
+;
+; NO PARAMETERS AT ALL is the case that is not obvious: `"$@"` then contributes
+; nothing AND the quotes around it produce no empty argument, so `cmd "$@"`
+; with none passes none -- where `cmd ""` passes one empty string.  The field
+; the opening quote started is un-started here, and only when nothing else has
+; gone into it: `"x$@"` with no parameters is still the one field `x`.
+(def %sh-add-args
+  (fn (self a args)
+    (if (null? args)
+      (if (null? (%sh-acc-pieces a)) (%sh-acc-unstart a) a)
+      (let ((filled (%sh-acc-add-literal a (first args)
+                      (%sh-has-glob-meta? (first args)))))
+        (if (null? (rest args))
+          filled
+          (self (%sh-acc-break filled) (rest args)))))))
 
 ; One expansion's worth of text.  Split only when splitting is on AND we are
 ; outside quotes -- inside `"..."` a value keeps its spaces, which is the
@@ -1287,8 +1322,17 @@
             (let ((e (%sh-brace-end s (+ i 2) n 0)))
               (if (< e 0)
                 (literal-dollar)
-                (substitute (+ e 1)
-                  (%sh-brace-expand (substring s (+ i 2) e))))))
+                (let ((inner (substring s (+ i 2) e)))
+                  ; `"${@}"` asks exactly what `"$@"` asks, so it is answered
+                  ; in the same place rather than joined into one field here.
+                  (if (and (= mode %sh-mode-dq) (string=? inner "@"))
+                    (cont (+ e 1) mode (%sh-add-args a %sh-args))
+                    (substitute (+ e 1) (%sh-brace-expand inner)))))))
+          ; "$@" is the one special that is not a string -- see %sh-add-args.
+          ; Unquoted it is not special at all: `$@` splits on IFS the way any
+          ; unquoted expansion does, which %sh-add-expansion already handles.
+          ((and (= d #\@) (= mode %sh-mode-dq))
+            (cont (+ i 2) mode (%sh-add-args a %sh-args)))
           ; The one-character specials: $? $$ $# $@ $* and $1..$9.
           ;
           ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
