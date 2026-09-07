@@ -290,3 +290,93 @@ since 2024 and invisible whenever nothing followed on the same line.
 ```
 ---
     yes:after
+
+## sh-eval "$@" forwards the parameters as parameters
+
+`"$@"` is the idiom every wrapper rests on: it has to hand three arguments on
+as three, with the spaces inside any of them intact.  It used to answer the
+same joined string as `$*`, which turned `wrapper "$@"` into one argument.
+Each expectation below was taken from `/bin/sh` before it was written here.
+
+### each parameter arrives as its own field, spaces intact
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2][$3]\"; }; set -- a 'b c' d; f \"$@\"") ())
+```
+---
+    3 [a][b c][d]
+
+### unquoted, it splits on IFS like any other expansion
+
+IFS is set here rather than inherited: every case in this file shares one
+shell, and the IFS section above leaves it at `:`.
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2][$3]\"; }; IFS=' '; set -- a 'b c'; f $@") ())
+```
+---
+    3 [a][b][c]
+
+### "$*" is still one field
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1]\"; }; IFS=' '; set -- a 'b c'; f \"$*\"") ())
+```
+---
+    1 [a b c]
+
+### with no parameters it passes none
+
+```sh
+(do (sh-eval "f() { echo n=$#; }; set --; f \"$@\"") ())
+```
+---
+    n=0
+
+### an empty string still passes one
+
+```sh
+(do (sh-eval "f() { echo n=$#; }; set --; f \"\"") ())
+```
+---
+    n=1
+
+### text before joins the first and text after joins the last
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2][$3]\"; }; set -- a b c; f \"x$@y\"") ())
+```
+---
+    3 [xa][b][cy]
+
+### with no parameters the text around it is still one field
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1]\"; }; set --; f \"x$@\"") ())
+```
+---
+    1 [x]
+
+### the braced form asks the same question
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2]\"; }; set -- a 'b c'; f \"${@}\"") ())
+```
+---
+    2 [a][b c]
+
+### a parameter that looks like a pattern is not globbed
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1]\"; }; set -- '*'; f \"$@\"") ())
+```
+---
+    1 [*]
+
+### it sits beside ordinary arguments
+
+```sh
+(do (sh-eval "f() { echo \"$# [$1][$2][$3]\"; }; set -- a b; f head \"$@\"") ())
+```
+---
+    3 [head][a][b]
