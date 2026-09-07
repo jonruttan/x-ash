@@ -3486,38 +3486,61 @@
 
 (def %collect-stage ())
 
+; What ends a stage -- AT DEPTH ZERO.  The same tokens inside a construct
+; belong to the construct: `for i in 1; do echo x; done | wc` has two `;` and
+; a stop word in its first stage, and none of them end it.
+(def %sh-stage-end?
+  (fn (_ cur tok)
+    (or
+      (%tok-is-newline? tok)
+      (%tok-is-op? tok "|")
+      (%tok-is-op? tok ";")
+      ; `;;` ENDS A COMMAND, and it was missing here.  It is a distinct
+      ; token from `;`, so the test above does not catch it, and a stage
+      ; therefore swallowed the clause terminator and everything after it --
+      ; which is why a `case` whose FIRST clause matched ran the remaining
+      ; clauses' patterns as commands the moment a newline followed the `;;`.
+      (%tok-is-op? tok ";;")
+      (%tok-is-op? tok "&")
+      (%tok-is-op? tok "&&")
+      (%tok-is-op? tok "||")
+      (and (%tok-is-word? tok) (%at-stop-word? cur)))))
+
+; A CLOSING PAREN CLOSES ONLY WHEN THERE IS AN OPEN ONE.  `case x in x) ...`
+; ends its pattern with a `)` that opens nothing, so counting every `)` would
+; take the depth negative and cut the stage in the middle of the case.
+(def %sh-paren-depth
+  (fn (_ d tok)
+    (if (%tok-is-op? tok "(")
+      (+ d 1)
+      (if (and (%tok-is-op? tok ")") (> d 0)) (- d 1) d))))
+
+; Word nesting, floored: a stray `fi` in malformed input must not drive the
+; count below zero and swallow the rest of the line.
+(def %sh-stage-wdepth
+  (fn (_ d tok)
+    (let ((n (+ d (%sh-nest-delta tok))))
+      (if (< n 0) 0 n))))
+
 (set! %collect-stage
-  (fn (_ cur toks)
+  (fn (self cur toks wdepth pdepth)
     (if (%cursor-empty? cur)
       (reverse toks)
       (let ((tok (%cursor-peek cur)))
-        (if (or
-              (%tok-is-newline? tok)
-              (%tok-is-op? tok "|")
-              (%tok-is-op? tok ";")
-              ; `;;` ENDS A COMMAND, and it was missing here.  It is a distinct
-              ; token from `;`, so the test above does not catch it, and a
-              ; stage therefore swallowed the clause terminator and everything
-              ; after it -- which is why a `case` whose FIRST clause matched
-              ; ran the remaining clauses' patterns as commands the moment a
-              ; newline followed the `;;`.
-              (%tok-is-op? tok ";;")
-              (%tok-is-op? tok "&")
-              (%tok-is-op? tok "&&")
-              (%tok-is-op? tok "||"))
+        (if (and (= wdepth 0) (= pdepth 0) (%sh-stage-end? cur tok))
           (reverse toks)
-          (if (and (%tok-is-word? tok) (%at-stop-word? cur))
-            (reverse toks)
-            (do
-              (%cursor-advance! cur)
-              (%collect-stage cur (pair tok toks)))))))))
+          (do
+            (%cursor-advance! cur)
+            (self cur (pair tok toks)
+              (%sh-stage-wdepth wdepth tok)
+              (%sh-paren-depth pdepth tok))))))))
 ; Collect all pipeline stages
 
 (def %collect-stages ())
 
 (set! %collect-stages
   (fn (_ cur stages)
-    (let ((stage (%collect-stage cur ())))
+    (let ((stage (%collect-stage cur () 0 0)))
       (if (%match-op cur "|")
         (do
           (%skip-newlines cur)
@@ -3554,18 +3577,21 @@
               ; "unexpected EOF in function body".
               (if (%is-fn-def? cur)
                 (%eval-fn-def cur)
-              ; THROUGH THE REDIRECTION WRAPPER, because this is where a
-              ; top-level compound is actually reached -- %eval-command's
-              ; branch for one is only taken from inside a pipeline stage.
-              ; A `done > log` read here and not there would be a redirection
-              ; that worked in `x | y` and nowhere else.
-              (if (%is-compound-start? cur)
-                (%eval-compound-redir cur)
-                (let ((stages (%collect-stages cur ())))
-                  (if (null? (rest stages))
-                    (let ((cur (%mk-cursor (first stages))))
-                      (%eval-command cur))
-                    (%sh-run-pipeline stages)))))))
+              ; A COMPOUND IS A STAGE LIKE ANY OTHER, now that %collect-stage
+              ; counts nesting: `( echo p ) | tr p P` and
+              ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|` and
+              ; not at the `;` inside them.  This used to evaluate a compound
+              ; HERE, before any stage was collected, so a `|` after one was
+              ; never looked for -- the pipe was left unread, %eval-list ended
+              ; its list at it, and the rest of the script was dropped.
+              ;
+              ; A single stage still reaches %eval-command, whose own compound
+              ; branch applies the construct's redirections.
+              (let ((stages (%collect-stages cur ())))
+                (if (null? (rest stages))
+                  (let ((cur (%mk-cursor (first stages))))
+                    (%eval-command cur))
+                  (%sh-run-pipeline stages))))))
         (if negate
           (let ((neg-result (if (= result 0) 1 0)))
             (set! %sh-status neg-result)
