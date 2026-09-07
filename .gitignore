@@ -1,1 +1,5 @@
 tests/lib/
+
+# The boot image: `x --image -l ash` (the install above) writes it beside the
+# bundle, and `x -l ash` boots from it while its key still matches.
+.images/

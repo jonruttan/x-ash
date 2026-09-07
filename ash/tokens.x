@@ -13,7 +13,27 @@
 ;   ; -> ((tok-word "echo") (tok-word "hello") (tok-op "|") (tok-word "grep") (tok-word "h"))
 ; --- Create shell tokenizer base (bare, no sexp types) ---
 
-(def %sh-base (make-token-base))
+; THE TOKENIZER BASE IS PROCESS STATE.  (Base make-tok) puts it on a chain of
+; its own, and nothing in the ambient heap can name what lives there, so a
+; state image cannot carry it -- the writer refused this bundle with one
+; unplaced reference until it was named a transient.  Each type RECORDS itself
+; in this table as its handlers are defined, and %sh-base-make builds a base
+; from the table: the one registration list, read when this file loads and
+; again after an image load.
+(def %sh-tok-types (pair () ()))    ; ((name . handlers) ...), newest first
+(def %sh-tok-type!
+  (fn (_ nm hs)
+    (%set-first! %sh-tok-types (pair (pair nm hs) (first %sh-tok-types)))))
+(def %sh-base-make
+  (fn (_)
+    (let ((b (make-token-base)))
+      ((fn (self l)
+         (if (null? l) ()
+           (do (self (rest l))
+               (base-make-type b (first (first l)) (rest (first l))))))
+       (first %sh-tok-types))
+      b)))
+(def %sh-base ())
 ; --- Intrinsic scoring helpers ---
 ;
 ; These wrap the generic integer accessor/mutator primitives for
@@ -109,8 +129,7 @@
         (buffer-unread buffer)
         (score-set score (- 0 1) buffer)))))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-WS"
   (list
     (pair
@@ -123,8 +142,7 @@
 
 (def %sh-nl-read (fn (_ . args) (mk-tok-newline)))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-NL"
   (list
     (pair
@@ -146,8 +164,7 @@
         (score-set score (- 0 1) buffer))
       %sh-comment-body)))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-COMMENT"
   (list
     (pair
@@ -215,8 +232,7 @@
 
         (#t (do (buffer-unread buffer) (score-set score 1 buffer)))))))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-OP"
   (list
     (pair
@@ -305,8 +321,7 @@
         %sh-qword-body)
       %sh-sq-body)))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-SQ"
   (list
     (pair
@@ -378,8 +393,7 @@
         (mk-tok-dq (%sh-unquote text))
         (mk-tok-word text)))))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-DQ"
   (list
     (pair
@@ -613,8 +627,7 @@
         (let ((q (char->integer (string-ref text 0))))
           (= (%sh-quote-close text q 1 n) (- n 1)))))))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "SH-WORD"
   (list
     (pair
@@ -679,8 +692,7 @@
       ; %sh-word-body does.
       (#t %sh-int-word-body))))
 
-(base-make-type
-  %sh-base
+(%sh-tok-type!
   "INTEGER"
   (list
     (pair
@@ -709,3 +721,12 @@
 
 (def sh-tokenize
   (fn (_ input) (%sh-normalize-tokens (token-read-string %sh-base input))))
+
+; --- The base itself: made here, and made again after an image load --------
+; One door, called by the load and by the image's recache hook.  The transient
+; nils it in the writer's child so the walk never meets a word it cannot
+; place.
+(def %sh-base-reset! (fn (_) (set! %sh-base (%sh-base-make))))
+(%sh-base-reset!)
+(set! %image-transients (pair (lit %sh-base) %image-transients))
+(set! %image-recache-hooks (pair (fn (_) (%sh-base-reset!)) %image-recache-hooks))

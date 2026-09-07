@@ -49,6 +49,17 @@
 ; swap would discard it unread.  %batch? comes from the seam and means "a file
 ; was supplied".  This line is LAST and nothing structural may follow it --
 ; neither branch returns.
-(if %batch?
-  (%ash-batch)
-  (do (%ash-banner) (%ash-repl)))
+; NOT WHILE THIS BUNDLE IS BEING IMAGED.  The image writer loads this entry in
+; a child base to capture the booted lang, and there %batch? is true and the
+; child's stdin is the writer's own script -- %ash-batch would read that
+; script as a shell program and then (Sys exit) out of the writer, which is
+; exactly what "ended the writer while loading" meant.  The writer binds
+; %image-writing in the child before it loads this, and takes it back before
+; it walks the heap, so an image never carries a true one.  Through a guard
+; because the name is bound in the child ALONE and there is no bound?
+; predicate to ask with; a real boot raises Unbound and answers #f.
+(if (guard (_ #f) %image-writing)
+  ()
+  (if %batch?
+    (%ash-batch)
+    (do (%ash-banner) (%ash-repl))))
