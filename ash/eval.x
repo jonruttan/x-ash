@@ -589,38 +589,106 @@
 ;
 ; Pieces are pushed in reverse and joined ONCE, when the field closes.  Per
 ; character that is one cons; the copying happens exactly once per field.
-(def %sh-acc (fn (_ fields pieces started) (list fields pieces started)))
+; --- A finished field -------------------------------------------------------
+;
+; A field is its TEXT and the two things pathname expansion would otherwise
+; re-derive by scanning it: whether it holds a live wildcard (so it is a
+; pattern) and whether it holds an escape this walk wrote (so the text the
+; user meant is not the text in hand).  The walk knows both AS IT WRITES; the
+; scans that asked again were two more passes over every word the shell runs.
+; first/rest CHAINS, NOT (nth n): nth is (List ref), and a class dispatch
+; costs about 1,800 heap objects where the raw pair walk costs a handful --
+; measured, after the version of this that used nth made every word DEARER
+; than the two scans it removed.
+(def %sh-field (fn (_ text glob? esc?) (list text glob? esc?)))
+(def %sh-field-text  (fn (_ f) (first f)))
+(def %sh-field-glob? (fn (_ f) (first (rest f))))
+(def %sh-field-esc?  (fn (_ f) (first (rest (rest f)))))
+
+; The field as the user wrote it: escapes off, and only if this walk put any
+; there.  A backslash that ARRIVED in the text -- out of a variable's value --
+; is not an escape and is not touched, which is the difference `x='a\*b'`
+; showed: unescaping unconditionally ate it.
+(def %sh-field-plain
+  (fn (_ f)
+    (if (%sh-field-esc? f)
+      (%sh-glob-unescape (%sh-field-text f))
+      (%sh-field-text f))))
+
+(def %sh-acc (fn (_ fields pieces started glob? esc?)
+               (list fields pieces started glob? esc?)))
 (def %sh-acc-fields  (fn (_ a) (first a)))
 (def %sh-acc-pieces  (fn (_ a) (first (rest a))))
 (def %sh-acc-started (fn (_ a) (first (rest (rest a)))))
+(def %sh-acc-glob?   (fn (_ a) (first (rest (rest (rest a))))))
+(def %sh-acc-esc?    (fn (_ a) (first (rest (rest (rest (rest a)))))))
 
-(def %sh-acc-empty (%sh-acc () () ()))
+(def %sh-acc-empty (%sh-acc () () () () ()))
 
 ; The field in hand, materialized.  Only the two closers below need it.
 (def %sh-acc-cur
   (fn (_ a) (Str8 join "" (List reverse (%sh-acc-pieces a)))))
 
-; Anything literal starts a field, which is what makes `cmd ""` an empty
-; argument.
+; One piece, and what it contributes to the field in hand.  Anything literal
+; starts a field, which is what makes `cmd ""` an empty argument.  Both flags
+; are sticky: one wildcard anywhere makes the whole field a pattern.
+(def %sh-acc-add-piece
+  (fn (_ a text glob? esc?)
+    (%sh-acc (%sh-acc-fields a)
+             (pair text (%sh-acc-pieces a))
+             #t
+             (or (%sh-acc-glob? a) glob?)
+             (or (%sh-acc-esc? a) esc?))))
+
+; Bare text: its metacharacters are live, so META? is what makes the field a
+; pattern, and nothing here is escaped.
 (def %sh-acc-add
+  (fn (_ a text meta?) (%sh-acc-add-piece a text meta? ())))
+
+; Quoted or escaped text: its metacharacters go in ESCAPED, so they make no
+; pattern -- and the escape is what the field will have to walk back off.
+(def %sh-acc-add-literal
+  (fn (_ a text meta?)
+    (%sh-acc-add-piece a
+      (if meta? (%sh-glob-escape-all text) text)
+      ()
+      meta?)))
+
+; AN UNQUOTED EXPANSION'S RESULT, which is neither of the two above.  Its
+; wildcards are live -- `X='*'; echo $X` globs -- but a BACKSLASH in a value
+; is an ordinary character rather than an escape: `x='a\*b'` matches a
+; backslash, any run, a b.  The glob machinery reads a backslash AS an escape,
+; so a literal one goes in doubled and %sh-field-plain takes it back off.
+(def %sh-acc-add-value
   (fn (_ a text)
-    (%sh-acc (%sh-acc-fields a) (pair text (%sh-acc-pieces a)) #t)))
+    (if (%sh-has-glob-inert? text)
+      (%sh-acc-add-piece a
+        (%sh-escape-chars text %sh-glob-inert)
+        (%sh-has-active-glob? text)
+        #t)
+      (%sh-acc-add a text (%sh-has-active-glob? text)))))
 
 ; Mark the field open without adding to it -- what a quote mark does.
 (def %sh-acc-open
-  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-pieces a) #t)))
+  (fn (_ a) (%sh-acc (%sh-acc-fields a) (%sh-acc-pieces a) #t
+                     (%sh-acc-glob? a) (%sh-acc-esc? a))))
 
-; Close the field in hand and begin the next one.
+; The field in hand, as a field.
+(def %sh-acc-field
+  (fn (_ a) (%sh-field (%sh-acc-cur a) (%sh-acc-glob? a) (%sh-acc-esc? a))))
+
+; Close the field in hand and begin the next one -- which starts clean, so the
+; flags do not leak from one field of a word into the next.
 (def %sh-acc-break
   (fn (_ a)
-    (%sh-acc (pair (%sh-acc-cur a) (%sh-acc-fields a)) () ())))
+    (%sh-acc (pair (%sh-acc-field a) (%sh-acc-fields a)) () () () ())))
 
 ; Close the word: the field in hand becomes one iff anything started it.
 (def %sh-acc-finish
   (fn (_ a)
     (reverse
       (if (%sh-acc-started a)
-        (pair (%sh-acc-cur a) (%sh-acc-fields a))
+        (pair (%sh-acc-field a) (%sh-acc-fields a))
         (%sh-acc-fields a)))))
 
 ; --- Keeping quoted glob characters literal ---------------------------------
@@ -634,7 +702,13 @@
 ; A backslash is escaped too, so the unescape is exact: every backslash in a
 ; finished field is one this put there (an unquoted one was consumed by the
 ; walk as an escape and never reached here).
+; TWO SETS, ONE OF THEM DERIVED.  A metacharacter is one that has to be
+; escaped to survive as itself; an ACTIVE one is a wildcard.  Every character
+; in the first set is in the second but the backslash, which escapes and does
+; not match -- so the second is written as that subtraction rather than as a
+; second list somebody has to remember to keep in step.
 (def %sh-glob-meta (list #\* #\? #\[ #\\))
+(def %sh-glob-active (filter (fn (_ c) (not (= c #\\))) %sh-glob-meta))
 
 (def %sh-char-in?
   (fn (self c chars)
@@ -642,40 +716,59 @@
       ()
       (if (= c (first chars)) #t (self c (rest chars))))))
 
-; SCAN FIRST, BUILD ONLY IF NEEDED.  This runs on every literal character of
-; every word; almost none is a metacharacter, so the almost-always path
-; allocates nothing.
-(def %sh-has-glob-meta?
-  (fn (_ text)
+; The rest of that set: metacharacters that are not wildcards -- the backslash,
+; and anything that ever joins it.  BELOW %sh-char-in? ON PURPOSE: these three
+; are values computed as this file loads, not function bodies resolved when
+; called, so a name they use has to already exist.
+(def %sh-glob-inert
+  (filter (fn (_ c) (not (%sh-char-in? c %sh-glob-active))) %sh-glob-meta))
+
+; One character against one set.  The expansion walk asks this per character
+; of a plain run (see %sh-plain-run), which is how a finished field can say
+; whether it holds a metacharacter without being scanned again to find out.
+(def %sh-glob-meta-char?
+  (fn (_ c) (%sh-char-in? c %sh-glob-meta)))
+
+; SCAN FIRST, BUILD ONLY IF NEEDED.  One scanner, either set: text that came
+; out of an expansion has not been through the walk, so it is the one thing
+; still worth scanning -- and which question to ask depends on whether it is
+; going in quoted (does it need escaping) or bare (is it a pattern).
+(def %sh-has-char-in?
+  (fn (_ text chars)
     (let ((n (string-length text)))
       (def go
         (fn (self i)
           (if (>= i n)
             ()
-            (if (%sh-char-in? (string-ref text i) %sh-glob-meta)
+            (if (%sh-char-in? (string-ref text i) chars)
               #t
               (self (+ i 1))))))
       (go 0))))
 
-(def %sh-glob-escape
-  (fn (_ text)
-    (if (not (%sh-has-glob-meta? text))
-      text
-      (let ((n (string-length text)))
-        (def go
-          (fn (self i out)
-            (if (>= i n)
-              (Str8 join "" (List reverse out))
-              (let ((here (substring text i (+ i 1))))
-                (self (+ i 1)
-                  (pair (if (%sh-char-in? (string-ref text i) %sh-glob-meta)
-                          (string-append "\\" here)
-                          here)
-                        out))))))
-        (go 0 ())))))
+(def %sh-has-glob-meta? (fn (_ text) (%sh-has-char-in? text %sh-glob-meta)))
+(def %sh-has-active-glob? (fn (_ text) (%sh-has-char-in? text %sh-glob-active)))
+(def %sh-has-glob-inert? (fn (_ text) (%sh-has-char-in? text %sh-glob-inert)))
 
-(def %sh-acc-add-literal
-  (fn (_ a text) (%sh-acc-add a (%sh-glob-escape text))))
+; Build with every character of CHARS escaped.  NO SCAN to decide whether to:
+; every caller already knows there is one, either from the run scan that found
+; the end of this text or from %sh-has-char-in? on an expansion's result.
+(def %sh-escape-chars
+  (fn (_ text chars)
+    (let ((n (string-length text)))
+      (def go
+        (fn (self i out)
+          (if (>= i n)
+            (Str8 join "" (List reverse out))
+            (let ((here (substring text i (+ i 1))))
+              (self (+ i 1)
+                (pair (if (%sh-char-in? (string-ref text i) chars)
+                        (string-append "\\" here)
+                        here)
+                      out))))))
+      (go 0 ()))))
+
+; Quoted text: nothing in it may match, so every metacharacter goes in escaped.
+(def %sh-glob-escape-all (fn (_ text) (%sh-escape-chars text %sh-glob-meta)))
 
 ; --- Splicing expanded text in --------------------------------------------
 ;
@@ -685,7 +778,8 @@
   (fn (self a pieces)
     (if (null? pieces)
       a
-      (self (%sh-acc-add (%sh-acc-break a) (first pieces)) (rest pieces)))))
+      (self (%sh-acc-add-value (%sh-acc-break a) (first pieces))
+            (rest pieces)))))
 
 ; Splice expanded TEXT into the accumulator, splitting it on IFS whitespace.
 ;
@@ -707,7 +801,7 @@
                           (%sh-acc-break a)
                           a)))
             (let ((filled (%sh-add-pieces
-                            (%sh-acc-add opened (first pieces))
+                            (%sh-acc-add-value opened (first pieces))
                             (rest pieces))))
               (if (%sh-trail-ws? text) (%sh-acc-break filled) filled))))))))
 
@@ -719,8 +813,10 @@
     (if (= mode %sh-mode-bare)
       ; An unquoted expansion's RESULT is subject to both splitting and
       ; globbing -- `X='*'; echo $X` globs, `echo "$X"` does not.
-      (if split? (%sh-add-split a text) (%sh-acc-add a text))
-      (%sh-acc-add-literal a text))))
+      (if split?
+        (%sh-add-split a text)
+        (%sh-acc-add-value a text))
+      (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
 
 ; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
 ; build their word list backwards and reverse at the end.
@@ -908,13 +1004,26 @@
       (not (= c #\'))
       (not (or (= c #\') (= c #\") (= c #\\) (= c #\`) (= c #\$))))))
 
-(def %sh-plain-run-end
-  (fn (self s i n mode)
+; A PLAIN RUN, AND WHETHER IT HOLDS A METACHARACTER -- one pass for both.
+; Finding where the run ends means looking at every character in it, and the
+; only other thing anyone asks of a run is whether it contains `*`, `?`, `[`
+; or `\`.  Asking here costs one comparison per character and saves the two
+; whole-field scans that used to ask afterwards.
+;
+; The flag rides in rather than out of the recursion so it accumulates; `or`
+; short-circuits, so once a run is known to hold one the test is not repeated.
+(def %sh-run (fn (_ end meta?) (pair end meta?)))
+(def %sh-run-end (fn (_ r) (first r)))
+(def %sh-run-meta? (fn (_ r) (rest r)))
+
+(def %sh-plain-run
+  (fn (self s i n mode meta?)
     (if (>= i n)
-      i
-      (if (%sh-plain-char? (string-ref s i) mode)
-        (self s (+ i 1) n mode)
-        i))))
+      (%sh-run i meta?)
+      (let ((c (string-ref s i)))
+        (if (%sh-plain-char? c mode)
+          (self s (+ i 1) n mode (or meta? (%sh-glob-meta-char? c)))
+          (%sh-run i meta?))))))
 
 ; --- Arithmetic expansion: $(( ... )) ---------------------------------------
 ;
@@ -1093,9 +1202,11 @@
                 ((= mode %sh-mode-sq)
                   (if (= c #\')
                     (self (+ i 1) %sh-mode-bare a)
-                    (let ((e (%sh-plain-run-end s i n mode)))
-                      (self e mode
-                        (%sh-acc-add-literal a (substring s i e))))))
+                    (let ((r (%sh-plain-run s i n mode ())))
+                      (let ((e (%sh-run-end r)))
+                        (self e mode
+                          (%sh-acc-add-literal a (substring s i e)
+                            (%sh-run-meta? r)))))))
                 ; A quote mark switches region and starts a field.
                 ((and (= mode %sh-mode-bare) (= c #\'))
                   (self (+ i 1) %sh-mode-sq (%sh-acc-open a)))
@@ -1107,16 +1218,19 @@
                 ; `$` it protected stays a `$`.
                 ((and (= c #\\) (< (+ i 1) n))
                   (let ((d (string-ref s (+ i 1))))
-                    (self (+ i 2) mode
-                      (%sh-acc-add-literal a
-                        (if (or (= mode %sh-mode-bare) (%sh-dq-escapable? d))
-                          (substring s (+ i 1) (+ i 2))
-                          (substring s i (+ i 2)))))))
+                    (let ((text (if (or (= mode %sh-mode-bare)
+                                        (%sh-dq-escapable? d))
+                                  (substring s (+ i 1) (+ i 2))
+                                  (substring s i (+ i 2)))))
+                      (self (+ i 2) mode
+                        (%sh-acc-add-literal a text
+                          (%sh-has-glob-meta? text))))))
                 ; The older backtick substitution.
                 ((= c #\`)
                   (let ((e (%sh-bt-end s (+ i 1) n)))
                     (if (< e 0)
-                      (self (+ i 1) mode (%sh-acc-add a (substring s i (+ i 1))))
+                      (self (+ i 1) mode
+                        (%sh-acc-add a (substring s i (+ i 1)) ()))
                       (self (+ e 1) mode
                         (%sh-add-expansion a mode
                           (%sh-cmd-subst (substring s (+ i 1) e)) split?)))))
@@ -1131,12 +1245,13 @@
                 ; not -- so the run is escaped or not by the mode it was read
                 ; in, exactly as a single character was.
                 (else
-                  (let ((e (%sh-plain-run-end s i n mode)))
-                    (let ((run (substring s i e)))
-                      (self e mode
-                        (if (= mode %sh-mode-bare)
-                          (%sh-acc-add a run)
-                          (%sh-acc-add-literal a run)))))))))))
+                  (let ((r (%sh-plain-run s i n mode ())))
+                    (let ((e (%sh-run-end r)) (meta? (%sh-run-meta? r)))
+                      (let ((run (substring s i e)))
+                        (self e mode
+                          (if (= mode %sh-mode-bare)
+                            (%sh-acc-add a run meta?)
+                            (%sh-acc-add-literal a run meta?))))))))))))
       (go 0 mode0
         (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))))
 
@@ -1148,13 +1263,13 @@
     ; more module-level %-names than it needs, and neither is meaningful
     ; outside these fifteen lines.
     (let ((literal-dollar
-            (fn (_) (cont (+ i 1) mode (%sh-acc-add a "$"))))
+            (fn (_) (cont (+ i 1) mode (%sh-acc-add a "$" ()))))
           (substitute
             (fn (_ next text)
               (cont next mode (%sh-add-expansion a mode text split?)))))
     ; A `$` at the very end is a literal `$`.
     (if (>= (+ i 1) n)
-      (%sh-acc-finish (%sh-acc-add a "$"))
+      (%sh-acc-finish (%sh-acc-add a "$" ()))
       (let ((d (string-ref s (+ i 1))))
         (cond
           ; $( ... ) -- a command substitution.
@@ -1346,12 +1461,16 @@
     (and (not (null? segments))
          (= (string-length (last segments)) 0))))
 
+; NO SCAN TO DECIDE.  The field already knows whether it is a pattern and
+; whether it carries escapes; this used to ask %sh-glob-pattern? and then
+; %sh-glob-unescape, two more walks of text the expander had just walked.
 (def %sh-glob-field
-  (fn (_ field)
-    (if (not (%sh-glob-pattern? field))
-      (list (%sh-glob-unescape field))
-      (let ((absolute? (= (string-ref field 0) #\/))
-            (segments (%sh-glob-split field)))
+  (fn (_ f)
+    (if (not (%sh-field-glob? f))
+      (list (%sh-field-plain f))
+      (let ((field (%sh-field-text f))
+            (absolute? (= (string-ref (%sh-field-text f) 0) #\/))
+            (segments (%sh-glob-split (%sh-field-text f))))
         (let ((hits (%sh-glob-walk
                       (if absolute? (rest segments) segments)
                       (list (if absolute? "/" "")))))
@@ -1359,7 +1478,17 @@
                          (%sh-dirs-only hits)
                          hits)))
             ; No match: the pattern stands, with its escapes removed.
-            (if (null? final) (list (%sh-glob-unescape field)) final)))))))
+            ; No match: the pattern stands, as the user wrote it.
+            (if (null? final) (list (%sh-field-plain f)) final)))))))
+
+; GLOB TEXT THAT DID NOT COME THROUGH THE WALK -- a bare string, held by a
+; caller with no field around it.  The two flags have to be derived by
+; scanning here, which is precisely the work the walk exists to have done
+; already; anything on the expansion path passes a field instead.
+(def %sh-glob-text
+  (fn (_ text)
+    (%sh-glob-field
+      (%sh-field text (%sh-glob-pattern? text) (%sh-has-backslash? text)))))
 
 (def %sh-glob-fields
   (fn (self fields)
@@ -1391,7 +1520,7 @@
       (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) ())))
         ; Not globbed, but the escapes still come off -- a redirection target
         ; and a case subject are literal strings.
-        (if (null? fs) "" (%sh-glob-unescape (first fs)))))))
+        (if (null? fs) "" (%sh-field-plain (first fs)))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
 ; token.  Unsplit by construction.
@@ -1400,7 +1529,10 @@
     (if (not (string? word))
       word
       (let ((fs (%sh-expand-str word %sh-mode-bare ())))
-        (if (null? fs) "" (first fs))))))
+        ; THE ESCAPES STAY ON.  This feeds pattern operands (`${x#pat}`),
+        ; which read them; %sh-field-plain is for the sites that want the
+        ; literal text.
+        (if (null? fs) "" (%sh-field-text (first fs)))))))
 
 (def %sh-expand-words
   (fn (_ wds)
@@ -1513,7 +1645,7 @@
 (def %sh-expand-str-dq
   (fn (_ text)
     (let ((fs (%sh-expand-str text %sh-mode-dq ())))
-      (if (null? fs) "" (%sh-glob-unescape (first fs))))))
+      (if (null? fs) "" (%sh-field-plain (first fs))))))
 
 (def %sh-setup-redir
   (fn (_ redir)
