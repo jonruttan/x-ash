@@ -273,14 +273,29 @@
 (def %sh-fn-depth 0)
 (def %sh-return-status 0)
 
-(def %sh-join-args
-  (fn (self args)
+(def %sh-join-with
+  (fn (self args sep)
     (if (null? args)
       ""
       (if (null? (rest args))
         (first args)
         (string-append (first args)
-          (string-append " " (self (rest args))))))))
+          (string-append sep (self (rest args) sep)))))))
+
+; `set -x` echoes the command as a person would have typed it, so it joins
+; with a space whatever IFS happens to be.
+(def %sh-join-args (fn (_ args) (%sh-join-with args " ")))
+
+; WHAT GOES BETWEEN THE PARAMETERS in `$*`: the first character of IFS, and
+; nothing at all when IFS is empty -- `IFS=:` makes `"$*"` `a:b:c`, `IFS=`
+; makes it `abc`.  An unset IFS is a space because %sh-ifs answers the
+; default.  Only the first character is used, however many IFS holds.
+(def %sh-ifs-join-char
+  (fn (_)
+    (let ((ifs (%sh-ifs)))
+      (if (= (string-length ifs) 0) "" (substring ifs 0 1)))))
+
+(def %sh-join-params (fn (_ args) (%sh-join-with args (%sh-ifs-join-char))))
 
 ; $0 is the shell itself; $1 upward index into %sh-args.  Out of range is the
 ; empty string, which is POSIX and is what `test -z "$1"` relies on.
@@ -298,10 +313,14 @@
   (list (pair "?" (fn (_) (convert %sh-status %string)))
         (pair "$" (fn (_) (convert %sh-pid %string)))
         (pair "#" (fn (_) (convert (length %sh-args) %string)))
-        ; $@ and $* differ only under field splitting of the RESULT, which
-        ; ash does not do -- so they are the same string here.
-        (pair "@" (fn (_) (%sh-join-args %sh-args)))
-        (pair "*" (fn (_) (%sh-join-args %sh-args)))))
+        ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
+        ; same thing at all: `"$@"` is one field per parameter and never
+        ; reaches this table -- %sh-expand-dollar answers it directly, because
+        ; a table of strings cannot say "several fields".  What is left for
+        ; both to share is the unquoted reading, where the string is built
+        ; and then split again, and the JOIN is on IFS either way.
+        (pair "@" (fn (_) (%sh-join-params %sh-args)))
+        (pair "*" (fn (_) (%sh-join-params %sh-args)))))
 
 (def %sh-var-value
   (fn (_ name)
