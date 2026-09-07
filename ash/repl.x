@@ -369,6 +369,16 @@
     (%stderr "\n")))
 
 ; --- the loop ----------------------------------------------------------------
+;
+; THE TURN SWEEP IS THIS LOOP'S DUTY.  x collects only when asked, and the
+; platform loop this one replaces asks at the top of every turn -- the seat is
+; quiet there: the previous command has finished, its output is written, no
+; reader is mid-flight, so everything unreachable is turn garbage.  A lang
+; that swaps the loop out inherits the sweep (crafting-a-lang.md §6/§7); this
+; one could not take it until x-engine-c v0.2.7, because a type registered on
+; the bundle's own tokenizer base did not survive a collect (x-lang#599).
+(def %ash-collect (prim-ref 'heap 'collect))
+
 (def %ash-repl ())
 (set! %ash-repl
   (fn (_)
@@ -384,6 +394,7 @@
 (def %ash-repl-loop ())
 (set! %ash-repl-loop
   (fn (_)
+    (%ash-collect)
     (display %repl-prompt)
     (let ((line (sh-read-line)))
       (if (null? line)
