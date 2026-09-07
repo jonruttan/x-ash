@@ -15,7 +15,15 @@
 
 (def %sh-status 0)
 
+; $$ IS THIS PROCESS'S, and it is read once because it cannot change for the
+; life of a shell.  That makes it exactly the kind of value a state image must
+; not carry: the image is written by another process, and a shell booted from
+; it would report the WRITER's pid for $$ forever.  Re-read after a load, the
+; same way it is read here.
 (def %sh-pid (sh-getpid))
+(set! %image-transients (pair (lit %sh-pid) %image-transients))
+(set! %image-recache-hooks
+  (pair (fn (_) (set! %sh-pid (sh-getpid))) %image-recache-hooks))
 ; --- Cursor: mutable box holding remaining token list ---
 
 (def %mk-cursor (fn (_ tokens) (pair tokens ())))

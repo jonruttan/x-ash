@@ -47,6 +47,8 @@ install: ## Install into <share>/langs/ash
 	cp -R $(PAYLOAD) "$(DEST)/"
 	printf '%s\n' '$(LANG_VERSION)' > "$(DEST)/version"
 	@echo "x-ash: installed to $(DEST)"
+	@echo "x-ash: writing the boot image"
+	"$(X)" --image -l ash || true
 	@echo "x-ash: try  x -l ash"
 
 .PHONY: uninstall

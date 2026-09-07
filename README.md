@@ -172,6 +172,17 @@ PREFIX=$HOME/.local make install  # or a particular prefix
 `<share>/langs/*/lang.xon`, so a lang is installed when its files are there —
 no registry, no database.
 
+**Installing writes a boot image.** `make install` ends with `x --image -l ash`,
+which saves the booted shell to `.images/` beside the bundle; `x -l ash` loads
+that instead of re-reading the sources — 0.9s against 3.5s here — for as long
+as the image's key still matches the library and the engine. Three things in
+this bundle belong to the running process rather than to the heap, and are
+remade after an image loads: the tokenizer base, which `(Base make-tok)` puts
+on a chain of its own, and `$$`, which would otherwise report the pid of the
+process that wrote the image. The entry stands aside entirely while an image
+is being written, since `%ash-batch` would read the writer's own script as a
+shell program and exit out of it. `x --no-image -l ash` boots from source.
+
 **One trap, and it is the one you will hit.** `x` decides where to look for
 langs from the directory you run it *in*. Inside an **x-lang checkout** it
 searches `deps/langs/` and an installed lang is invisible, however correctly it
