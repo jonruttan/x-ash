@@ -1649,15 +1649,31 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-dq)) %sh-mode-dq %sh-mode-bare)))
 
-; ASSIGN? says this word is in assignment position -- a leading NAME=... of
-; the command, which is the only place `PATH=~/bin` expands its tilde.
+; ASSIGN? says this word IS AN ASSIGNMENT: a leading NAME=... of the command,
+; or an argument to a utility whose arguments are assignments.  Two rules turn
+; on it, and both are POSIX.
+;
+; ITS VALUE IS NOT SPLIT AND NOT GLOBBED.  `v=$(echo a b)` is one field, and
+; `g=$(echo "*")` is a star rather than the directory:
+;
+;   "the word shall be expanded ... without field splitting or pathname
+;    expansion" -- and without them, `v=$(date)` is a date rather than the
+;   first word of one, which is what this was doing.
+;
+; ITS TILDE EXPANDS AFTER THE `=` (and after any `:` beyond it), which is
+; %sh-tilde-pos? and is why the flag existed before this.
 (def %sh-expand-tok
   (fn (_ tok assign?)
     (if (eq? (first tok) (lit tok-sq))
       ; Single quotes suppress everything, globbing included.
       (list (%tok-word-val tok))
-      (%sh-glob-fields
-        (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t assign?)))))
+      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
+                  (not assign?) assign?)))
+        (if (not assign?)
+          (%sh-glob-fields fs)
+          ; Unsplit by construction above, so there is one field or none; the
+          ; escapes still come off, because nothing here is a pattern.
+          (list (if (null? fs) "" (%sh-field-plain (first fs)))))))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
@@ -2534,6 +2550,14 @@
         (sh-wait pid)))))
 ; --- Assignment handling ---
 
+; THE UTILITIES WHOSE ARGUMENTS ARE ASSIGNMENTS, so `export V=$(cmd)` reads
+; the way `V=$(cmd)` does.  A list rather than a test for one name, because
+; `readonly` and `local` belong here the day they arrive.
+(def %sh-declaration-utilities (list "export"))
+
+(def %sh-declaration?
+  (fn (_ word) (%sh-word-in? word %sh-declaration-utilities)))
+
 (def %is-assignment?
   (fn (_ word)
     (def %has-eq ())
@@ -2714,11 +2738,18 @@
                       ; expansion, so a variable holding "then" must not become
                       ; one.
                       (%collect-cmd-tokens
-                        cur (%sh-push-fields (%sh-expand-tok tok assign?) wds)
+                        cur
+                        (%sh-push-fields
+                          (%sh-expand-tok tok
+                            (and assign?
+                                 (eq? (first tok) (lit tok-word))
+                                 (%is-assignment? val)))
+                          wds)
                         redirs
                         (and assign?
                              (eq? (first tok) (lit tok-word))
-                             (%is-assignment? val))))))
+                             (or (%is-assignment? val)
+                                 (%sh-declaration? val)))))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
 (def %eval-simple-cmd
