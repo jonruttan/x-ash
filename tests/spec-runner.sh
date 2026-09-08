@@ -58,6 +58,44 @@ LANG_LIB="$BUNDLE/tests/lib/harness.gen.x"
 # while diagnosing, without moving anything into the suite.
 SPEC_PATH="${SPEC_PATH:-$BUNDLE/tests/specs}"
 
+# THE SUITE BOOTS FROM A STATE IMAGE OF THE HARNESS, when the platform can
+# write one.  tools/dev/image-build.sh images a child that loaded the harness
+# and keys that image on everything it depends on -- the harness, the
+# platform's lib/, its engine, and ash/ (the KEY-PATH) -- so an edit to any of
+# them rewrites it, and a current one is skipped.  Each spec file then loads
+# the image instead of booting the platform from source.
+#  THE WRITER IS A CHECKOUT TOOL.  An installed tree has no image-build.sh,
+# and a library holding words no image can carry is refused; both say so on
+# stderr and the suite boots from source exactly as it did before.
+#  AND A PROBE FOR THE FIX, NOT FOR A VERSION.  A platform whose Ansi.install
+# moves a REPL printer it does not own takes this bundle's %repl-print away
+# when the image loads (x-lang#655) -- a few specs then differ in how a value
+# prints, or, worse, none do and the suite passes on the platform's printer.
+# The fix carries `Ansi repl-own`; ask the platform for it rather than for a
+# version, and boot from source on one that answers no.
+#  IMG=0 IS THE CONTROL -- the same suite from source, for when the image is
+# the suspect.  One file per process there too, so the boot is the only thing
+# that differs between the two runs.
+if [ "${IMG:-1}" = 0 ]; then
+	SPEC_BATCH="${SPEC_BATCH:-1}"; export SPEC_BATCH
+else
+	_builder="$X_ROOT/tools/dev/image-build.sh"
+	_probe="${TMPDIR:-/tmp}/x-imgprobe.$$.x"
+	printf '(Ansi repl-own)\n' > "$_probe"
+	_keeps_printer=0
+	"$X" -f "$_probe" >/dev/null 2>&1 && _keeps_printer=1
+	rm -f "$_probe"
+	if [ ! -f "$_builder" ]; then
+		echo "x-ash: no image writer at $_builder (not a checkout) -- the suite boots from source" >&2
+	elif [ "$_keeps_printer" = 0 ]; then
+		echo "x-ash: the platform moves a REPL printer it does not own (x-lang#655) -- the suite boots from source" >&2
+	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/ash"; then
+		X_IMG_DIR="$BUNDLE/tests/lib/.images"; export X_IMG_DIR
+	else
+		echo "x-ash: no state image -- the suite boots from source" >&2
+	fi
+fi
+
 # NO KNOBS.  This runner once carried three: SPEC_SEAM_COLLECT=0, an
 # X_ALLOC_LIMIT_OBJS ceiling and a SPEC_BATCH width, all for one cause -- a
 # type registered on an isolated tokenizer base did not survive the collector
