@@ -399,8 +399,9 @@
     (let ((line (sh-read-line)))
       (if (null? line)
         ; ctrl-d leaves, with the last command's status -- `x -l ash -f x.sh`
-        ; and an interactive session both answer $? to the caller.
-        (do (newline) (Sys exit %sh-status))
+        ; and an interactive session both answer $? to the caller.  Through
+        ; %sh-exit-shell, so an EXIT trap set at the prompt still fires.
+        (do (newline) (%sh-exit-shell %sh-status))
         (do
           (guard (err (%ash-report err))
             (let ((entry (%ash-read-entry line)))
@@ -426,10 +427,13 @@
         (let ((line (sh-read-line)))
           (if (null? line) (List reverse acc) (self (pair line acc))))))
     (let ((src (Str8 join "\n" (slurp ()))))
+      ; THE END OF THE SCRIPT IS AN EXIT, and it is the one an EXIT trap is
+      ; almost always set for: `trap "rm -f $tmp" EXIT` has to fire when the
+      ; script simply runs out, not only when it calls `exit`.
       (guard (err
           (%ash-report err)
-          (Sys exit 1))
+          (%sh-exit-shell 1))
         (unless (= (Str8 length src) 0) (sh-eval src))
-        (Sys exit %sh-status)))))
+        (%sh-exit-shell %sh-status)))))
 
 (provide ash/repl %ash-repl %ash-batch %ash-banner %ash-complete?)
