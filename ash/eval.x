@@ -1338,6 +1338,15 @@
                   (self (+ i 1) %sh-mode-bare (%sh-acc-open a)))
                 ; A backslash emits what it protects and resumes PAST it, so a
                 ; `$` it protected stays a `$`.
+                ; A TRAILING BACKSLASH PROTECTS NOTHING, so it stands for
+                ; itself.  It must be claimed HERE: the arm below needs a
+                ; character to protect, and the plain-run scanner cannot
+                ; consume a backslash at all -- so this used to fall through
+                ; to a run of length zero and the walk recursed on the same
+                ; index forever, allocating until the process was killed.
+                ((and (= c #\\) (>= (+ i 1) n))
+                  (self (+ i 1) mode
+                    (%sh-acc-add-literal a (substring s i (+ i 1)) #t)))
                 ((and (= c #\\) (< (+ i 1) n))
                   (let ((d (string-ref s (+ i 1))))
                     (let ((text (if (or (= mode %sh-mode-bare)
@@ -1383,6 +1392,13 @@
                   (let ((r (%sh-plain-run s i n mode ()
                              (and assign? (= mode %sh-mode-bare)))))
                     (let ((e (%sh-run-end r)) (meta? (%sh-run-meta? r)))
+                      ; A RUN OF NOTHING WOULD NOT ADVANCE, and a walk that
+                      ; does not advance is the hang described above rather
+                      ; than a wrong answer.  Every character that is not
+                      ; plain is claimed by an arm before this one, so this
+                      ; is unreachable -- and says so out loud if it ever is.
+                      (when (= e i)
+                        (error "internal: expansion made no progress"))
                       (let ((run (substring s i e)))
                         (self e mode
                           (if (= mode %sh-mode-bare)

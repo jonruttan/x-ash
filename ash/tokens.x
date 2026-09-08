@@ -520,6 +520,8 @@
 (def %sh-word-in-sq ())
 (def %sh-word-in-dq ())
 (def %sh-word-dq-esc ())
+(def %sh-word-esc ())
+(def %sh-qword-esc ())
 
 ; A WORD ABSORBS QUOTES THAT START INSIDE IT, which is what makes
 ;
@@ -559,6 +561,17 @@
 ; One character consumed unconditionally, so `\"` cannot close the region.
 (set! %sh-word-dq-esc (fn (_ buffer score chr) %sh-word-in-dq))
 
+; THE SAME, OUTSIDE QUOTES, and it was missing.  A backslash was an ordinary
+; character to the bare-word scanner, so the space in `a\ b` was still a word
+; BREAK: the input tokenized as `a\` and `b` -- two words, the first ending in
+; a backslash that protects nothing.  `echo a\ b` printed two arguments, and
+; the expander then hung on that trailing backslash (see %sh-expand-str).
+;
+; A backslash outside quotes protects ANY character, the word delimiters
+; included, which is the whole of what it is for.
+(set! %sh-word-esc (fn (_ buffer score chr) %sh-word-body))
+(set! %sh-qword-esc (fn (_ buffer score chr) %sh-qword-body))
+
 (set! %sh-word-in-dq
   (fn (_ buffer score chr)
     (match
@@ -583,6 +596,7 @@
       ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
+      ((= chr (char->integer #\\)) %sh-qword-esc)
       ((%sh-word-break? chr)
         (do (buffer-unread buffer) (score-set score 1 buffer)))
       (#t %sh-qword-body))))
@@ -594,6 +608,7 @@
       ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
       ((= chr (char->integer #\')) %sh-word-in-sq)
       ((= chr (char->integer #\")) %sh-word-in-dq)
+      ((= chr (char->integer #\\)) %sh-word-esc)
       ((%sh-word-break? chr)
         (do
           (buffer-unread buffer)
