@@ -2473,6 +2473,171 @@
     (%sh-run-exit-trap)
     (sh-exit status)))
 
+; --- getopts ------------------------------------------------------------------
+;
+; `getopts OPTSTRING NAME [ARG...]` reads ONE option per call, and is meant to
+; be driven by a loop:
+;
+;   while getopts "ab:c" opt; do
+;     case $opt in a) ...;; b) use "$OPTARG";; esac
+;   done
+;   shift $((OPTIND - 1))
+;
+; TWO THINGS CARRY BETWEEN CALLS.  OPTIND is the index of the next ARGUMENT and
+; is a shell variable, so a script may reset it to 1 and parse again.  The
+; other is an offset INSIDE the current argument, because `-abc` is three
+; options in one word; that one is private, and is reset whenever OPTIND is
+; not the value this builtin last wrote -- which is how a script's reset is
+; noticed without the script having to know the offset exists.
+;
+; ERRORS COME IN TWO FLAVOURS and the caller picks by writing a leading `:` in
+; the optstring:
+;
+;                 unknown option          option missing its argument
+;   normal        NAME=?, diagnostic      NAME=?, diagnostic
+;   silent  `:`   NAME=? OPTARG=letter    NAME=: OPTARG=letter
+;
+; The silent form is the one a script can report on in its own words, which is
+; why POSIX offers it; the normal form is what a script gets if it says
+; nothing.
+(def %sh-optchar 1)
+(def %sh-optind-seen 0)
+
+(def %sh-str-index
+  (fn (self text c i)
+    (if (>= i (string-length text))
+      (- 0 1)
+      (if (= (string-ref text i) c) i (self text c (+ i 1))))))
+
+(def %sh-optstring-silent?
+  (fn (_ optstring)
+    (and (> (string-length optstring) 0)
+         (= (string-ref optstring 0) #\:))))
+
+; () when the letter is not in the optstring; 1 when it takes an argument and
+; 0 when it does not.  A `:` is never a letter -- leading it is the silent
+; flag, and after a letter it is that letter's "takes an argument" mark.
+(def %sh-optstring-kind
+  (fn (_ optstring c)
+    (if (= c #\:)
+      ()
+      (let ((i (%sh-str-index optstring c 0)))
+        (if (< i 0)
+          ()
+          (if (and (< (+ i 1) (string-length optstring))
+                   (= (string-ref optstring (+ i 1)) #\:))
+            1
+            0))))))
+
+; OPTIND as an integer, defaulting to 1 -- and the private offset reset when
+; the script has moved OPTIND itself.
+(def %sh-getopts-optind
+  (fn (_)
+    (let ((v (sh-getenv "OPTIND")))
+      (let ((n (if (null? v) 1 (convert v %int))))
+        (unless (= n %sh-optind-seen) (set! %sh-optchar 1))
+        n))))
+
+(def %sh-getopts-save
+  (fn (_ optind)
+    (set! %sh-optind-seen optind)
+    (sh-setenv "OPTIND" (convert optind %string))))
+
+; Finish one call: park OPTIND, set NAME and OPTARG, answer the status.
+(def %sh-getopts-yield
+  (fn (_ name value optarg optind status)
+    (%sh-getopts-save optind)
+    (sh-setenv "OPTARG" optarg)
+    (sh-setenv name value)
+    status))
+
+(def %sh-getopts-done
+  (fn (_ optind)
+    (%sh-getopts-save optind)
+    (set! %sh-optchar 1)
+    1))
+
+; The letter needs an argument.  It is the rest of THIS word when there is
+; one -- `-bval` -- and otherwise the next word entirely.
+(def %sh-getopts-argument
+  (fn (_ optstring name args c word optind silent?)
+    (let ((n (string-length word)))
+      (if (<= %sh-optchar n)
+        (let ((rest-of-word (substring word (- %sh-optchar 1) n)))
+          (set! %sh-optchar 1)
+          (%sh-getopts-yield name (%sh-char-str c) rest-of-word (+ optind 1) 0))
+        (do
+          (set! %sh-optchar 1)
+          (if (> (+ optind 1) (length args))
+            ; Nothing left to take.
+            (if silent?
+              (%sh-getopts-yield name ":" (%sh-char-str c) (+ optind 1) 0)
+              (do
+                (%stderr "ash: getopts: option requires an argument -- "
+                         (%sh-char-str c) "\n")
+                (%sh-getopts-yield name "?" "" (+ optind 1) 0)))
+            (%sh-getopts-yield name (%sh-char-str c)
+              (nth optind args) (+ optind 2) 0)))))))
+
+(def %sh-char-str (fn (_ c) (bytes->str (list c))))
+
+; One option, from the word at OPTIND and the offset within it.
+(def %sh-getopts-letter
+  (fn (_ optstring name args word optind silent?)
+    (let ((c (string-ref word (- %sh-optchar 1))))
+      (set! %sh-optchar (+ %sh-optchar 1))
+      (let ((kind (%sh-optstring-kind optstring c)))
+        (if (null? kind)
+          ; Not an option this caller knows.
+          (let ((consumed (if (> %sh-optchar (string-length word))
+                            (do (set! %sh-optchar 1) (+ optind 1))
+                            optind)))
+            (if silent?
+              (%sh-getopts-yield name "?" (%sh-char-str c) consumed 0)
+              (do
+                (%stderr "ash: getopts: illegal option -- "
+                         (%sh-char-str c) "\n")
+                (%sh-getopts-yield name "?" "" consumed 0))))
+          (if (= kind 1)
+            (%sh-getopts-argument optstring name args c word optind silent?)
+            (let ((consumed (if (> %sh-optchar (string-length word))
+                              (do (set! %sh-optchar 1) (+ optind 1))
+                              optind)))
+              (%sh-getopts-yield name (%sh-char-str c) "" consumed 0))))))))
+
+(def %sh-getopts-run
+  (fn (_ optstring name args optind silent?)
+    (if (> optind (length args))
+      (%sh-getopts-done optind)
+      (let ((word (nth (- optind 1) args)))
+        (if (> %sh-optchar 1)
+          ; Mid-cluster: keep reading letters out of this same word.
+          (%sh-getopts-letter optstring name args word optind silent?)
+          ; At a fresh word: it is an option only if it looks like one.  A
+          ; lone `-` is an argument by convention, and `--` ends the options
+          ; and is stepped over.
+          (if (or (not (%sh-str-starts? word "-"))
+                  (string=? word "-"))
+            (%sh-getopts-done optind)
+            (if (string=? word "--")
+              (%sh-getopts-done (+ optind 1))
+              (do
+                (set! %sh-optchar 2)
+                (%sh-getopts-letter optstring name args word optind
+                                    silent?)))))))))
+
+(def %sh-getopts-builtin
+  (fn (_ wds)
+    (if (or (null? wds) (null? (rest wds)))
+      (do (%stderr "ash: getopts: usage: getopts optstring name [arg ...]\n") 2)
+      (let ((optstring (first wds))
+            (name (first (rest wds)))
+            (given (rest (rest wds))))
+        (%sh-getopts-run optstring name
+          (if (null? given) %sh-args given)
+          (%sh-getopts-optind)
+          (%sh-optstring-silent? optstring))))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; ONE table, not a list of names beside a dispatch that repeats them.  Those
@@ -2496,6 +2661,7 @@
         (pair "eval"   %sh-eval-builtin)
         (pair "exec"   %sh-exec-builtin)
         (pair "trap"   %sh-trap-builtin)
+        (pair "getopts" %sh-getopts-builtin)
         (pair "break"  %sh-break)
         (pair "continue" %sh-continue)
         (pair "set"    %sh-set)
