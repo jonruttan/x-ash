@@ -141,8 +141,12 @@
 ; of both lists -- three copies that had drifted: %skip-to-fi's openers were
 ; missing `until` and `case` and its closers were missing `esac`, so an
 ; `until` loop inside a skipped if-branch put the parser out by one.
-(def %sh-block-openers (list "if" "while" "until" "for" "case"))
-(def %sh-block-closers (list "fi" "done" "esac"))
+; The words that open and close a construct, which is how deep the parser is
+; inside one.  `{` and `}` are here for the same reason the rest are: a `;`
+; inside a brace group belongs to the group, so a pipeline stage must not be
+; cut at it -- and a function's `f() { ...; }` balances the pair the same way.
+(def %sh-block-openers (list "if" "while" "until" "for" "case" "{"))
+(def %sh-block-closers (list "fi" "done" "esac" "}"))
 
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
@@ -3544,6 +3548,31 @@
 ; and a counter that has to be decremented on all of them would be wrong within
 ; a week.  One place, with the guard/re-raise shape used for the descriptor
 ; saves, cannot drift.
+; --- { ...; } -- the group that does NOT fork -------------------------------
+;
+; `{ ...; }` and `( ... )` group commands for the same reasons -- one
+; redirection over several of them, one stage of a pipeline, one operand of
+; `&&` -- and differ in exactly one way: the braces run in THIS shell.
+;
+;   v=1; { v=2; }; echo $v      prints 2
+;   v=1; ( v=2 );  echo $v      prints 1
+;
+; so the braces are what a script wants unless it is after the isolation, and
+; `cmd | { read x; ...; }` is the idiom that needs them: a `read` in a
+; subshell sets a variable nobody will see again.
+;
+; `{` and `}` are RESERVED WORDS rather than punctuation, which is why the `;`
+; before `}` is required rather than decorative, and why `echo {` still prints
+; a brace -- a reserved word is only reserved where a command could start.
+(def %eval-brace-group
+  (fn (_ cur)
+    (%cursor-advance! cur)
+    (%skip-newlines cur)
+    (let ((result (%eval-list cur)))
+      (%skip-newlines cur)
+      (%expect-word cur "}")
+      result)))
+
 (def %eval-compound
   (fn (_ cur)
     (set! %sh-compound-depth (+ %sh-compound-depth 1))
@@ -3558,7 +3587,8 @@
 ; two lists of the same five words, one written as a predicate and one as a
 ; dispatch -- the same duplication the builtin table removed.
 (def %sh-compound-table
-  (list (pair "if"    %eval-if)
+  (list (pair "{"     %eval-brace-group)
+        (pair "if"    %eval-if)
         (pair "while" %eval-while)
         (pair "until" %eval-until)
         (pair "for"   %eval-for)
