@@ -461,12 +461,14 @@
               (sh-dup2 write-fd 1)
               (sh-close write-fd)
               ; The substituted text is its own script, so it starts at the
-              ; top level however deep the expansion was reached from.
+              ; top level however deep the expansion was reached from -- and
+              ; with no traps, which a subshell does not inherit.
               (set! %sh-compound-depth 0)
+              (set! %sh-traps ())
               ; A failing substitution answers what it managed to print, the
               ; way a shell does -- the error has already gone to stderr.
               (guard (e ()) (sh-eval-extracted src))
-              (sh-exit %sh-status))
+              (%sh-exit-shell %sh-status))
             ; READ BEFORE WAIT.  A child whose output exceeds the pipe buffer
             ; blocks in write() until someone drains it, so waiting first would
             ; deadlock on any substitution bigger than a pipe.
@@ -2211,7 +2213,8 @@
 
 (def %sh-exit
   (fn (_ wds)
-    (sh-exit (if (null? wds) %sh-status (convert (first wds) %int)))))
+    (%sh-exit-shell
+      (if (null? wds) %sh-status (convert (first wds) %int)))))
 
 ; `[ ... ]` is `test` with the closing bracket dropped.
 (def %sh-bracket
@@ -2281,6 +2284,163 @@
         (%stderr "ash: exec: " (first wds) ": not found\n")
         (if %batch? (sh-exit 127) 127)))))
 
+; --- trap --------------------------------------------------------------------
+;
+; `trap ACTION CONDITION...` says what to do when a condition arrives, and the
+; two kinds of condition are not equally answerable here.
+;
+;   EXIT (or 0)  when the shell exits.  Implemented, and it is what scripts
+;                overwhelmingly reach for trap to do: remove the temp file
+;                however the script ends.
+;
+;   a SIGNAL     an ACTION CANNOT BE RUN.  The platform says so in its own
+;                contract -- lib/x/sys/posix.x on (Sys signal): "(Sys sig-ign)
+;                or (Sys sig-dfl) ONLY -- an x-lang closure cannot be a C
+;                signal handler".  What a signal can still be told is to be
+;                IGNORED or restored to its default, so `trap "" INT` and
+;                `trap - INT` are real.  An action on a signal is refused with
+;                a diagnostic; accepting it and never running it would be the
+;                worse answer, because the script would look protected.
+;
+; A SUBSHELL DOES NOT INHERIT THEM, which is POSIX and is checked: `trap "echo
+; T" EXIT; ( echo sub )` prints T once, at the end, not twice.  Every fork in
+; this file clears the table in the child for that reason.
+(def %sh-traps ())
+(def %sh-exit-trap-ran ())
+
+; The signals this shell will name.  These numbers are the ones POSIX fixes on
+; every system; USR1 and USR2 are deliberately absent, because they differ
+; between Linux and the BSDs and nothing here can ask which one it is on.
+(def %sh-signal-numbers
+  (list (pair "HUP" 1) (pair "INT" 2) (pair "QUIT" 3) (pair "PIPE" 13)
+        (pair "ALRM" 14) (pair "TERM" 15)))
+
+; `INT`, `SIGINT` and `2` all name the same condition; `EXIT` and `0` name the
+; other one.  Answers the canonical name, or () for something unrecognised.
+(def %sh-trap-cond
+  (fn (_ name)
+    (let ((bare (if (%sh-str-starts? name "SIG") (substring name 3 (string-length name)) name)))
+      (if (or (string=? bare "EXIT") (string=? bare "0"))
+        "EXIT"
+        (if (not (null? (%sh-table-get bare %sh-signal-numbers)))
+          bare
+          (%sh-signal-named-by-number bare))))))
+
+(def %sh-signal-named-by-number
+  (fn (self text) (%sh-signal-scan text %sh-signal-numbers)))
+
+(def %sh-signal-scan
+  (fn (self text rows)
+    (if (null? rows)
+      ()
+      (if (string=? text (convert (rest (first rows)) %string))
+        (first (first rows))
+        (self text (rest rows))))))
+
+; `trap` with nothing to say prints what is set, in the form that would set it
+; again -- which is what makes `trap` useful inside a script that means to
+; restore what it found.
+(def %sh-trap-list
+  (fn (self rows)
+    (unless (null? rows)
+      (display "trap -- ")
+      (display (%sh-single-quote (rest (first rows))))
+      (display " ")
+      (display (first (first rows)))
+      (newline)
+      (self (rest rows)))))
+
+; The action as the shell would have to be given it back: inside single
+; quotes, with any single quote in it spliced out and back in the only way
+; single quotes allow -- `'\''`.
+(def %sh-single-quote
+  (fn (_ text)
+    (string-append "'"
+      (string-append (%sh-escape-quotes text 0 (string-length text) ()) "'"))))
+
+(def %sh-escape-quotes
+  (fn (self text i n out)
+    (if (>= i n)
+      (Str8 join "" (List reverse out))
+      (self text (+ i 1) n
+        (pair (if (= (string-ref text i) #\')
+                "'\\''"
+                (substring text i (+ i 1)))
+              out)))))
+
+(def %sh-trap-remove
+  (fn (self cond rows)
+    (if (null? rows)
+      ()
+      (if (string=? (first (first rows)) cond)
+        (self cond (rest rows))
+        (pair (first rows) (self cond (rest rows)))))))
+
+(def %sh-trap-put
+  (fn (_ cond action)
+    (set! %sh-traps (pair (pair cond action) (%sh-trap-remove cond %sh-traps)))))
+
+(def %sh-trap-one
+  (fn (_ action cond-name)
+    (let ((cond (%sh-trap-cond cond-name)))
+      (if (null? cond)
+        (do (%stderr "ash: trap: " cond-name ": bad condition\n") 1)
+        (if (string=? cond "EXIT")
+          (do
+            (if (string=? action "-")
+              (set! %sh-traps (%sh-trap-remove cond %sh-traps))
+              (%sh-trap-put cond action))
+            0)
+          ; A signal.  Only the two dispositions the platform can install.
+          (let ((n (%sh-table-get cond %sh-signal-numbers)))
+            (if (string=? action "-")
+              (do (Sys signal n (Sys sig-dfl))
+                  (set! %sh-traps (%sh-trap-remove cond %sh-traps))
+                  0)
+              (if (= (string-length action) 0)
+                (do (Sys signal n (Sys sig-ign)) (%sh-trap-put cond action) 0)
+                (do
+                  (%stderr "ash: trap: " cond
+                           ": an action on a signal is not supported;"
+                           " only the empty action (ignore) and - (default)\n")
+                  1)))))))))
+
+(def %sh-trap-set
+  (fn (self action conds worst)
+    (if (null? conds)
+      worst
+      (let ((st (%sh-trap-one action (first conds))))
+        (self action (rest conds) (if (> st worst) st worst))))))
+
+(def %sh-trap-builtin
+  (fn (_ wds)
+    (if (null? wds)
+      (do (%sh-trap-list %sh-traps) 0)
+      (let ((action (first wds))
+            (conds (rest wds)))
+        (if (null? conds)
+          (do (%stderr "ash: trap: usage: trap [action] condition ...\n") 2)
+          (%sh-trap-set action conds 0))))))
+
+; THE EXIT TRAP, RUN ONCE.  An action that itself exits must not re-enter this
+; -- `trap "echo n; exit 9" EXIT; exit 1` prints n once and leaves with 9,
+; which is the status the ACTION chose, not the one the exit asked for.
+(def %sh-run-exit-trap
+  (fn (_)
+    (unless %sh-exit-trap-ran
+      (set! %sh-exit-trap-ran #t)
+      (let ((action (%sh-table-get "EXIT" %sh-traps)))
+        (unless (or (null? action) (= (string-length action) 0))
+          (guard (e ()) (sh-eval action)))))))
+
+; Every way the shell or a subshell finishes comes through here.  The forks
+; that exist to become another program or to move bytes do not: they clear the
+; table instead, so a trap set by the script cannot fire in them.
+(def %sh-exit-shell
+  (fn (_ status)
+    (%sh-run-exit-trap)
+    (sh-exit status)))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; ONE table, not a list of names beside a dispatch that repeats them.  Those
@@ -2303,6 +2463,7 @@
         (pair "shift"  %sh-shift)
         (pair "eval"   %sh-eval-builtin)
         (pair "exec"   %sh-exec-builtin)
+        (pair "trap"   %sh-trap-builtin)
         (pair "break"  %sh-break)
         (pair "continue" %sh-continue)
         (pair "set"    %sh-set)
@@ -2358,6 +2519,9 @@
     (let ((pid (sh-fork)))
       (if (= pid 0)
         (do
+          ; A fork that exists to BECOME another program: no trap of the
+          ; script's can belong to it, and its 127 is not the shell exiting.
+          (set! %sh-traps ())
           (%sh-setup-redirs redirs)
           (sh-exec name wds)
           ; A DIAGNOSTIC GOES TO STDERR, and this one is the reason the rule
@@ -2427,7 +2591,7 @@
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error
   (fn (_ status)
-    (if (%sh-should-exit? status) (sh-exit status) status)))
+    (if (%sh-should-exit? status) (%sh-exit-shell status) status)))
 
 ; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
@@ -3139,8 +3303,9 @@
       (let ((pid (sh-fork)))
         (if (= pid 0)
           (do
+            (set! %sh-traps ())
             (unless (null? body) (%eval-list (%mk-cursor body)))
-            (sh-exit %sh-status))
+            (%sh-exit-shell %sh-status))
           (let ((status (sh-wait pid)))
             (set! %sh-status status)
             status))))))
@@ -3217,8 +3382,9 @@
               (sh-close read-fd)
               (sh-dup2 write-fd 1)
               (sh-close write-fd)
+              (set! %sh-traps ())
               (let ((cur (%mk-cursor left-tokens))) (%eval-command cur))
-              (sh-exit %sh-status))
+              (%sh-exit-shell %sh-status))
             ; Parent: stdin ← pipe, continue chain
 
             (do
@@ -3706,7 +3872,7 @@
                 (if (%match-op cur "&")
                   (let ((pid (sh-fork)))
                     (if (= pid 0)
-                      (do result (sh-exit 0))
+                      (do (set! %sh-traps ()) result (%sh-exit-shell 0))
                       (do
                         (set! %sh-status 0)
                         (%skip-newlines cur)
