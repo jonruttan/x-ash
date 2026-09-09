@@ -15,6 +15,6 @@
 ;   (reference "LINE")        one line in this project's own language, on the banner
 
 (costume "x-ash"
-  (rows "., .," "{OvO}" "( $ )" " \" \"")
+  (rows "., .," "{O,O}" "( $ )" " \" \"")
   (roles "ii ii" "ieifi" "i a i" " i i ")
   (reference "$ echo '{O,O}'"))
