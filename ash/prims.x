@@ -224,7 +224,7 @@
 ; --- What `test` needs to know about a path ------------------------------
 ; The kind symbol ('file, 'dir, 'link, ...) or nil when the path is not there
 ; at all -- so one call answers -e, -f and -d, and a missing path is a nil
-; rather than a raise.  File stat raises a kind-'io Err on failure, which for
+; rather than a raise.  File stat raises a tag 'io Err on failure, which for
 ; a shell test is an ANSWER, not an error.
 (def sh-path-kind
   (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit kind) (File stat path))))))
