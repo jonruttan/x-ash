@@ -1,18 +1,12 @@
 ## sh-eval redirections on compound commands
 
 `for ... done > log` redirects the whole loop, and the redirection is written
-AFTER the construct it applies to.  The parser evaluates as it reads, so it
-used to meet that `>` too late -- and `%eval-list` ends its list at any token
-it does not recognise, so the redirection was ignored AND every command after
-it in the script was silently dropped, with a zero status.
+after the construct it applies to, so the parser must apply it to the whole
+construct rather than ignore it.
 
-EVERY CASE ENDS IN A MARKER LINE, and that is deliberate.  The suite compares
-the last line of output, so a case that merely printed the redirected text
-would pass on the broken code too -- the text simply arrived on the terminal
-instead of in the file.  Ending with `echo "got=$o"` after reading the file
-back makes the truncation visible: on the old code that line never runs.
-
-Each expectation was taken from `/bin/sh` first.
+Every case ends in a marker line read back from the file, because the suite
+compares the last line of output: a case that only printed the redirected text
+would pass even if the text reached the terminal instead of the file.
 
 ### a subshell's output goes to the file
 

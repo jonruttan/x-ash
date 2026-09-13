@@ -15,9 +15,6 @@ subshell sets a variable nobody will ever see.
 before `}` is required rather than decorative, and why `echo {` still prints a
 brace: a reserved word is only reserved where a command could start.
 
-Each expectation was taken from `/bin/sh` first, and cross-checked against
-`dash` wherever the two could differ.
-
 ### it runs the commands
 
 ```sh

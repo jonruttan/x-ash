@@ -7,24 +7,11 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; ash reaches past x-lang in two directions -- it registers its own tokenizer
-; types on an isolated base, and it forks, execs and dup2s -- and both surfaces
-; moved onto classes since 2024.  Neither moved far.
-;
-; THE ARCHITECTURE SURVIVED INTACT, which is the headline.  ash tokenizes shell
-; syntax on a SEPARATE BASE with its own type alist, so that `;` can be a
-; separator rather than a comment and `#` a comment rather than a dispatch
-; character.  That design needed `make-token-base` and `base-make-type`, and
-; the obvious reading of their disappearance is that the platform stopped
-; supporting isolated tokenizer bases.  It did not: they are (Base make-tok)
-; and (Base make-type), documented in as many words --
-;
-;   "Create a minimal tokenizer base ... For custom tokenizer type
-;    registration on an isolated base."
-;
-; -- so the single most unusual thing in this bundle is still first-class.
-;
-; ONE FILE, so the two files above this one stay readable as what they are: a
-; tokenizer and a shell.
+; types on an isolated base, and it forks, execs and dup2s. Both surfaces are
+; classes now: (Base make-tok) and (Base make-type) for the tokenizer base, and
+; the Sys class for the process and file doors. This file forwards to them
+; under the names tokens.x and eval.x are written against, so those two files
+; read as a tokenizer and a shell rather than as platform glue.
 
 ; THE DIALECT IS HELIUM, so the doors this file forwards to arrive by NAME.
 ; lang.xon carries the arithmetic; the operative half is here.  x/sys/posix is
@@ -52,25 +39,11 @@
   sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
 ; --- The tokenizer base ------------------------------------------------------
-; (Base make-tok) is the isolated, type-free tokenizer base -- the exact
-; successor to 2024's make-token-base, and the reason ash's `;` can be a
-; separator rather than a comment.
-;
-; IT USED TO SEGFAULT ON THE FIRST CHARACTER OF ANY INPUT (x-lang#528), and
-; this comment described a bundle that was dead at load for that reason.  It is
-; not: x-lang v0.7.1 was the first release pinning an x-engine-c where an
-; isolated tokenizer base works, and the pairing row in lang.xon has been past
-; that for several releases.  The note is kept in the past tense because the
-; alternative it argued against is still the wrong answer, and the argument is
-; the useful part:
-;
+; (Base make-tok) is the isolated, type-free tokenizer base: ash's `;` is a
+; separator and its `#` a comment because no sexp types are registered on it.
 ; (Base make) would arrive with the built-in sexp types already registered, so
-; shell tokens would compete with them by score -- `a b` tokenizes as a bare
-; symbol followed by a word, `a|b` as one word, and ash's own INTEGER type
-; collides with the platform's.  A shell that reports the wrong tokens is not a
-; shell, and a green suite bought that way would be a lie about the port.
-;
-; So the faithful call stays, and it works.
+; shell tokens would compete with them by score -- `a|b` as one word, ash's
+; INTEGER type colliding with the platform's -- and report the wrong tokens.
 (def make-token-base (fn (_) (Base make-tok)))
 
 ; (Base make-type TARGET NAME HANDLERS) -- cross-base registration, which is
@@ -80,72 +53,58 @@
   (fn (_ base name handlers) (Base make-type base name handlers)))
 
 ; (prim-ref 'tok 'read-str), the same reference lib/x/repl/ansi.x and
-; lib/x/reader/lit-reader.x hold -- but it takes the RAW base, and (Base
-; make-tok) hands back a wrapped instance.  Pass the instance and the prim
-; SEGFAULTS rather than refusing, on any input including "".  So the unwrap
-; lives here, once, and the two files above never see the distinction.
-; Reported as x-lang#528.
+; lib/x/reader/lit-reader.x hold. It takes the raw base, and (Base make-tok)
+; hands back a wrapped instance -- passing the instance crashes the prim on any
+; input -- so the unwrap lives here, once.
 (def %token-read-str (prim-ref (lit tok) (lit read-str)))
 (def token-read-string
   (fn (_ base input) (%token-read-str (Base raw-of base) input)))
 
-; The consumed token's text, inside a reader callback.  (prim-ref 'buf 'tok)
-; -- note the namespace is `buf` and the member is `tok`, not the `token` the
-; 2024 name suggests.  Unbound, this raises INSIDE a tokenizer callback, which
-; is a segfault rather than a message.
+; The consumed token's text, inside a reader callback. The namespace is `buf`
+; and the member is `tok` (not `token`). Unbound, this raises inside a
+; tokenizer callback, which surfaces as a crash rather than a message.
 (def buffer-token (prim-ref (lit buf) (lit tok)))
 
 ; --- Tokenizer int cells -----------------------------------------------------
-; THESE ARE REAL C CELLS, so the raw-word accessors are correct here.  The
-; tokenizer's buffer and score are built by the engine, and %cell-int /
-; %set-cell-int! read and write the machine word in their first slot -- which
-; is what first-int / set-first-int! did.
-;
-; Worth being explicit, because the same two names are a heap-corrupting
-; mistake when applied to an ordinary (list 0): slot 0 of a pair holds an
-; object POINTER, and the next collection traces the integer as an address
-; (x-lang#522).  The distinction is which object you have, and here it is the
-; engine's.
+; These are real C cells built by the engine, so the raw-word accessors are
+; correct here: %cell-int / %set-cell-int! read and write the machine word in
+; their first slot. The same two names are wrong on an ordinary (list 0), whose
+; slot 0 holds an object pointer the collector would then follow to the
+; integer's value (x-lang#522); the distinction is which object you hold, and
+; here it is the engine's.
 (def first-int %cell-int)
 (def set-first-int! %set-cell-int!)
 
 ; --- convert -----------------------------------------------------------------
-; NO EXPLICIT RECEIVER: every call fills the `_` slot implicitly, `apply`
+; No explicit receiver: every call fills the `_` slot implicitly, apply
 ; included, so passing one by hand shifts every argument along and the
-; conversion silently answers nil.
+; conversion answers nil.
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def convert (fn (_ v target . extra) (apply %cvt (pair v (pair target extra)))))
 
-; The handful of Scheme-ish names ash reaches for.  It is not a Scheme -- there
-; is no alias layer here -- so these are only what tokens.x and eval.x actually
-; call, spelled through the classes that own them now.
-; THE DIRECT PRIM, NOT THE CONVERT DISPATCHER, and the difference is a crash.
-; (%cvt c %int) walks the type's from/to alists and allocates; char->integer is
-; called SIX TIMES PER CHARACTER from %sh-word-break?, inside a tokenizer
-; callback -- where the 2024 file's own note warns that allocation triggers a
-; collection mid-token.  Adding SH-WORD to the base was enough to kill
-; (sh-tokenize " ") with the dispatching version.
+; The handful of Scheme-ish names tokens.x and eval.x reach for, spelled
+; through the classes that own them now. ash is not a Scheme -- there is no
+; alias layer -- so these are only what those two files actually call.
 ;
-; lib/x/reader/analyser.x holds the same reference for the same reason:
+; char->integer is the direct prim, not the convert dispatcher: (%cvt c %int)
+; walks the type's from/to alists and allocates, and %sh-word-break? calls this
+; six times per character inside a tokenizer callback, where a collection
+; mid-token is a hazard. lib/x/reader/analyser.x holds the same reference:
 ;   (def %char->integer (prim-ref (lit char) (lit ->int)))
 (def char->integer (prim-ref (lit char) (lit ->int)))
-; NOTE THE NAMESPACE: conversions are keyed on the SOURCE type, so the pair is
-; (char ->int) and (int ->char).  (char from-int) exists as a Char METHOD but
-; not as a catalog member, and prim-ref answers nil for a member that is not
-; there -- which reaches the reader as a garbage int rather than an error.
+; Conversions are keyed on the source type, so the pair is (char ->int) and
+; (int ->char). (char from-int) exists as a Char method but not as a catalog
+; member, and prim-ref answers nil for a missing member -- which would reach
+; the reader as a garbage int rather than an error.
 (def integer->char (prim-ref (lit int) (lit ->char)))
-; BYTE DOORS, NOT CLASS DISPATCH.  These four are the whole of the expansion
-; walk's inner loop -- every unquoted word is scanned three times, a byte at a
-; time -- and through (Str8 ref) each call cost ~1,800 heap objects of
-; dispatch scaffolding; (Str8 sub) ~3,100.  The raw primitives cost ~350, which
-; is the interpreter's call floor.  Measured at 1,000 calls each with
-; (heap count), no collect between.  A shell in the C locale is a byte tool,
-; and x-awk made the same move for the same reason (awk/prims.x).
-;
-; Bound to the primitive DIRECTLY where the argument order already agrees, so
-; a call is one C call with no wrapper frame; only substring (Scheme's
-; [start, end) against the primitive's (start, length)) and the variadic
-; string-append keep one.
+; Byte doors, not class dispatch. These four are the expansion walk's inner
+; loop -- every unquoted word is scanned three times, a byte at a time -- and
+; the raw primitives cost about a fifth of the heap that (Str8 ref)/(Str8 sub)
+; dispatch does per call (measured at 1,000 calls each with (heap count)). A
+; shell in the C locale is a byte tool; x-awk made the same move (awk/prims.x).
+; Bound to the primitive directly where the argument order already agrees; only
+; substring (Scheme's [start, end) against the primitive's (start, length)) and
+; the variadic string-append keep a wrapper.
 (def string-length (prim-ref (lit str) (lit byte-len)))
 (def string-ref (prim-ref (lit str) (lit byte-ref)))
 (def %str-byte-sub (prim-ref (lit str) (lit byte-sub)))
@@ -185,19 +144,16 @@
 (def take (fn (_ n l) (List take n l)))
 (def drop (fn (_ n l) (List drop n l)))
 (def nth (fn (_ n l) (List ref n l)))
-; NEVER DEFINED, and %sh-run-builtin's `[` arm has called it since 2024: every
-; `[ x = x ]` answered "Unbound SYMBOL 'last'".  No spec reached it -- the
-; suite tested `test` and never the bracket spelling of the same builtin.
+; %sh-run-builtin's `[` arm forwards `last` to the platform, so it must be
+; bound here or `[ x = x ]` raises Unbound.
 (def last (fn (_ l) (List last l)))
 (def set-first! %set-first!)
 
 ; --- The shell's syscalls ----------------------------------------------------
-; ash named these sh-* in 2024 over lib/x/posix.x's bare wrappers.  posix.x is
-; lib/x/sys/posix.x now and publishes only %-private FFI handles; the public
-; surface is the Sys class, which carries every one of them under a name a
-; shell would recognise.  So these are one-line forwards, and the sh- prefix is
-; kept because eval.x reads better for it: `(sh-dup2 fh fd)` in a redirection
-; is the shell's vocabulary, not the platform's.
+; One-line forwards to the Sys class, which carries every process and file door
+; under a name a shell recognises. The sh- prefix is kept because eval.x reads
+; as a shell for it: (sh-dup2 fh fd) in a redirection is the shell's
+; vocabulary, not the platform's.
 (def sh-fork (fn (_) (Sys fork)))
 (def sh-exec (fn (_ path args) (Sys exec path args)))
 (def sh-wait (fn (_ pid) (Sys wait pid)))
@@ -210,8 +166,8 @@
 (def sh-close (fn (_ fd) (Sys close fd)))
 (def sh-dup2 (fn (_ from to) (Sys dup2 from to)))
 
-; (Sys pipe) answers a (read-fd . write-fd) pair, which is what ash's
-; %sh-pipe-create expects -- the 2024 sh-pipe had the same shape.
+; (Sys pipe) answers a (read-fd . write-fd) pair, which is what
+; %sh-pipe-create expects.
 (def sh-pipe (fn (_) (Sys pipe)))
 
 (def sh-getenv (fn (_ name) (Sys getenv name)))

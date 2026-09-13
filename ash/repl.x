@@ -1,6 +1,6 @@
 ; # x-ash -- a POSIX shell on x-lang
 ;
-; ## ash/repl.x -- the session, reading SHELL
+; ## ash/repl.x -- the session, reading shell
 ;
 ; @description The `$ ` prompt and the -f batch reader.  Reads lines, hands
 ;   them to sh-eval, and continues an entry that is not finished yet.
@@ -13,26 +13,16 @@
 ;     (   )
 ;      " "
 ;
-; THE PLATFORM REPL READS SEXPS, AND NO PROMPT STRING CHANGES THAT.  This is
-; the bug this file exists to fix, and it was total: run.x set %repl-prompt to
-; "$ " and %repl-print to ash's writer and stopped there, so `x -l ash` came up
-; with a shell's prompt, a shell's banner, and x's READER underneath --
+; The platform loop customizes prompt and print only (lib/x/repl/loop.x): its
+; read is the ambient sexp reader and its eval is eval!. A lang whose unit is
+; not an s-expression must replace the loop, which run.x does with
+; (set! repl %ash-repl) -- as x-python's repl.x and x-logo's do. Setting
+; %repl-prompt and %repl-print alone leaves x's reader underneath the shell
+; prompt, so `ls` reports Unbound SYMBOL 'ls'.
 ;
-;   $ ls
-;   Error: Unbound SYMBOL 'ls'
-;   $ echo
-;   Error: Unbound SYMBOL 'echo'
-;
-; -- which is the whole shell, unreachable.  Every one of the 82 specs called
-; sh-eval directly and passed; nothing in the suite ever started a session.
-; The platform loop customizes PROMPT and PRINT only (lib/x/repl/loop.x): its
-; read is the ambient reader and its eval is eval!.  A lang whose unit is not
-; an s-expression has to replace the LOOP, which is what x-python's repl.x and
-; x-logo's do, and what run.x now does with (set! repl %ash-repl).
-;
-; A SHELL'S UNIT IS A LINE -- until it is not.  `for f in a b c; do echo $f;
-; done` is one entry on one line, and the same entry typed over four lines is
-; the same entry; %ash-complete? below is what tells them apart.
+; A shell's unit is a line until it is not: `for f in a b c; do echo $f; done`
+; is one entry whether typed on one line or four. %ash-complete? tells them
+; apart.
 
 (import ash/base)
 (import ash/prims)
@@ -44,41 +34,32 @@
 
 ; --- is this entry finished? -------------------------------------------------
 ;
-; THE SCAN IS OVER TEXT, NOT TOKENS, and deliberately.  Asking the tokenizer
-; would be the tidier answer and is the wrong one twice: the quote readers are
-; this bundle's two recorded failures (tests/contract/known-failures.txt), so
-; the one construct where continuation matters most is the one the token
-; stream gets wrong -- and a tokenizer that raises on unterminated input
-; cannot distinguish "broken" from "not finished yet", which is the entire
-; question here.  A character scan tracking quote state answers it directly.
+; The scan is over text, not tokens: a tokenizer that raises on unterminated
+; input cannot tell "broken" from "not finished yet", which is the question
+; here, and the quote readers are the construct where continuation matters
+; most. A character scan tracking quote state answers it directly.
 ;
-; What continues an entry, and each is a line a real shell keeps reading after:
+; What continues an entry, each a line a real shell keeps reading after:
 ;   - an unclosed ' or " (a quoted string spanning lines)
 ;   - a trailing backslash (explicit continuation)
 ;   - a trailing |, && or || (the pipeline/list wants a right-hand side)
 ;   - an unbalanced compound: if..fi, case..esac, do..done, and ( .. )
 ;
-; KEYWORDS ARE COUNTED POSITIONALLY-UNAWARE, which is the documented limit of
-; this heuristic: `echo done` at the prompt decrements the do-depth it never
-; incremented.  Depths are floored at zero so that under-counting can only
-; ever end an entry early -- never hang the prompt waiting for a `done` the
-; user has no reason to type.  A shell that will not come back to the prompt
-; is unusable in a way that a mis-parsed `echo done` is not.
+; Keywords are counted position-unaware, the documented limit of this
+; heuristic: `echo done` at the prompt decrements a do-depth it never
+; incremented. Depths are floored at zero, so under-counting can only end an
+; entry early, never hang the prompt on a `done` the user will not type.
 
 ; --- Is this entry finished? -------------------------------------------------
 ;
-; TWO PASSES, because the two questions are independent.  The first strips
-; quoting and answers "is a quote or an escape still open"; the second counts
-; brackets and keywords over what is left.  Done as one walk it needed eight
-; positional parameters threaded through every branch -- quote state, four
-; depths, a word accumulator, the index -- which is how a scanner becomes
-; unreadable.  Neither pass now carries more than four.
+; Two passes, because the two questions are independent: the first strips
+; quoting and answers "is a quote or an escape still open", the second counts
+; brackets and keywords over what is left. Neither carries more than four
+; parameters; one walk would need eight.
 ;
-; THE SCAN IS OVER TEXT, NOT TOKENS, and deliberately.  Asking the tokenizer
-; would be tidier and is wrong twice: a tokenizer that raises on unterminated
-; input cannot distinguish "broken" from "not finished yet", which is the whole
-; question here -- and the answer is needed BEFORE the input is worth
-; tokenizing.
+; The scan is over text, not tokens: a tokenizer that raises on unterminated
+; input cannot tell "broken" from "not finished yet", which is the whole
+; question, and the answer is needed before the input is worth tokenizing.
 ;
 ; What continues an entry, each a line a real shell keeps reading after:
 ;   - an unclosed ' or " (a quoted string spanning lines)
@@ -370,13 +351,13 @@
 
 ; --- the loop ----------------------------------------------------------------
 ;
-; THE TURN SWEEP IS THIS LOOP'S DUTY.  x collects only when asked, and the
-; platform loop this one replaces asks at the top of every turn -- the seat is
-; quiet there: the previous command has finished, its output is written, no
-; reader is mid-flight, so everything unreachable is turn garbage.  A lang
-; that swaps the loop out inherits the sweep (crafting-a-lang.md §6/§7); this
-; one could not take it until x-engine-c v0.2.7, because a type registered on
-; the bundle's own tokenizer base did not survive a collect (x-lang#599).
+; The turn sweep is this loop's duty. x collects only when asked, and the
+; platform loop this one replaces asks at the top of every turn, where the seat
+; is quiet: the previous command has finished, its output is written, no reader
+; is mid-flight. A lang that swaps the loop out inherits the sweep
+; (crafting-a-lang.md 6/7); this bundle could not take it until x-engine-c
+; v0.2.7, because a type registered on its own tokenizer base did not survive a
+; collect (x-lang#599).
 (def %ash-collect (prim-ref 'heap 'collect))
 
 (def %ash-repl ())

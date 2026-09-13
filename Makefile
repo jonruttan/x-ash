@@ -1,30 +1,22 @@
 # x-ash -- the ASH lang for x-lang
 #
-# INSTALL PUTS THIS BUNDLE WHERE `-l` LOOKS, which is the whole of it: an
-# installed x searches <share>/langs/*/lang.xon, so a lang is "installed" when
-# its files are there.  No registry, no database, no per-project pin.
+# Install copies this bundle to <share>/langs/ash, where `x -l` looks: a lang
+# is installed when its files are there. No registry, no database.
 #
-#   make install                  into the x on PATH
+#   make install                        into the x on PATH
 #   PREFIX=$HOME/.local make install    into a particular prefix
 #
-# PIN OR INSTALL, AND THEY ANSWER DIFFERENT QUESTIONS.  A pin (lang.pin.xon +
-# Pin bundle) freezes a verified tarball for ONE project and is what a build
-# should depend on.  An install puts one copy on the machine for every project
-# and for the prompt -- convenient, unversioned, and exactly like installing a
-# language runtime.  Use the pin when it matters which version; use this when
-# you just want `x -l ash` to work.
+# A pin (lang.pin.xon + Pin bundle) freezes a verified tarball for one project
+# and is what a build should depend on. An install is one unversioned copy for
+# the whole machine. Pin when the version matters; install to get `x -l ash`
+# working.
 
 X ?= x
 
-# THE VERSION IS DERIVED, NEVER COMMITTED, and that is deliberate.
-#
-# A version row in lang.xon can only be true at ONE commit: the one you tag.
-# Bump it and tag it and the tree is honest for exactly that moment; every
-# commit after claims a release it is not, and a checkout of main always lies.
-# git describe does not -- v0.2.0-3-gabc123-dirty says precisely where you are.
-#
-# So lang.xon declares what this lang REQUIRES, and the installed artifact
-# carries what it IS.  Same split, and the same mechanism, as x-lang's own
+# The version is derived from git describe, never committed: a version literal
+# is true only at the commit it is tagged on and wrong on every commit after.
+# lang.xon declares what this bundle requires; the installed artifact carries
+# what it is, in a version stamp -- the same split as x-lang's own
 # $(X_RELEASE) -> <lib>/contract/release.
 LANG_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # PREFIX wins when given, so this matches x-lang's own `PREFIX=... make
@@ -33,9 +25,8 @@ LANG_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo
 SHARE := $(if $(PREFIX),$(PREFIX)/share/x,$(shell $(X) --share-dir))
 DEST  := $(SHARE)/langs/ash
 
-# What a consumer needs to RUN the lang: the declaration, the entry, the
-# modules.  Not the suite, not the tooling, not CI -- those are this
-# repository's business, not the installed platform's.
+# What a consumer needs to run the lang: the declaration, the entry, the
+# modules. Not the suite, the tooling, or CI.
 PAYLOAD := lang.xon run.x ash
 
 .PHONY: install

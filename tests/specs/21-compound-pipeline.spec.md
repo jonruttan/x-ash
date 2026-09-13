@@ -1,19 +1,18 @@
 ## sh-eval a compound command as a pipeline stage
 
-`( echo p ) | tr p P` cuts at the `|` like any other pipeline.  It did not:
-a compound was evaluated before any stage was collected, so the `|` after one
-was never looked for -- it was left unread, `%eval-list` ended its list at it,
-and the rest of the script was silently dropped.
+`( echo p ) | tr p P` cuts at the `|` like any other pipeline. The stage
+collector counts nesting, so the `;` inside a loop and the `done` that closes it
+belong to the stage rather than ending it, and a `case` pattern's `)` counts
+only when there is an open paren to match.
 
 The stage collector now counts nesting, so the `;` inside a loop and the
 `done` that closes it belong to the stage rather than ending it.  A `case`
 pattern's `)` closes nothing, so a closing paren only counts when there is an
 open one to match.
 
-Every case ends in a marker line: the suite compares the last line of output,
-so a case that merely printed the piped text would pass on the broken code
-too -- the text simply arrived unpiped.  Each expectation was taken from
-`/bin/sh` first.
+Every case ends in a marker line, because the suite compares the last line of
+output: a case that only printed the piped text would pass even if the text
+arrived unpiped.
 
 ### a subshell feeds the next stage
 

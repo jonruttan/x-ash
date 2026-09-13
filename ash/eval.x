@@ -44,22 +44,12 @@
       (eq? (first tok) (lit tok-sq))
       (eq? (first tok) (lit tok-dq)))))
 
-; A KEYWORD IS A BARE WORD.  %tok-is-word? is true of tok-sq and tok-dq too --
-; correct when asking "is this an argument", wrong when asking "is this the
-; word `done`".  The keyword scanners asked the first question and meant the
-; second, so
-;
-;   while test $N -eq 0; do echo "while"; N=1; done
-;
-; counted the QUOTED "while" as opening a nested loop, went looking for a
-; second `done`, and swallowed the rest of the script -- reported as
-; "parse error: unexpected EOF in while", pointing at a loop that is correct.
-; Any loop or if whose body echoed one of the fifteen reserved words did it.
-;
-; %at-stop-word?, %is-compound-start?, %skip-case-body and %skip-to-esac spell
-; this check out inline and were always right; the if/while family used the
-; loose predicate.  Naming it is what makes the difference visible at the call
-; site.
+; A keyword check must exclude quoted words. %tok-is-word? is true of tok-sq
+; and tok-dq too -- right for "is this an argument", wrong for "is this the
+; word `done`". The if/while family uses the named predicate for the second
+; question, so a quoted "while" or "done" in a loop body is an argument, not a
+; nested opener. %at-stop-word?, %is-compound-start?, %skip-case-body and
+; %skip-to-esac spell the check out inline.
 (def %tok-is-keyword?
   (fn (_ tok) (eq? (first tok) (lit tok-word))))
 
@@ -136,37 +126,23 @@
 ; The operators that end a command list the same way a closing word does.
 (def %sh-stop-ops (list ")" ";;"))
 
-; What NESTS, for the skip walks.  Every compound opens with one of these and
-; closes with one of those, and the five skippers each carried their own copy
-; of both lists -- three copies that had drifted: %skip-to-fi's openers were
-; missing `until` and `case` and its closers were missing `esac`, so an
-; `until` loop inside a skipped if-branch put the parser out by one.
-; The words that open and close a construct, which is how deep the parser is
-; inside one.  `{` and `}` are here for the same reason the rest are: a `;`
-; inside a brace group belongs to the group, so a pipeline stage must not be
-; cut at it -- and a function's `f() { ...; }` balances the pair the same way.
+; What nests, for the skip walks: every compound opens with one of these and
+; closes with one of those, and the skippers count depth with them. `{` and
+; `}` are included because a `;` inside a brace group belongs to the group, and
+; `f() { ...; }` balances the same pair.
 (def %sh-block-openers (list "if" "while" "until" "for" "case" "{"))
 (def %sh-block-closers (list "fi" "done" "esac" "}"))
 
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
-; The reserved words that CLOSE a construct.  %reserved-word? is the full
-; fifteen and is right for asking "could this word be syntax"; this is the
-; subset that may terminate a command already in progress.  `if`, `while`,
-; `for`, `case`, `in`, `!` and `{` are all OPENERS -- no compound parser looks
-; for one as a terminator, so treating them as arguments costs nothing and is
-; what a shell does.
-; HOW DEEP INSIDE A COMPOUND THE PARSER IS.  `done` only closes something when
-; there is something open: at the top level it is an ordinary word, and
-; treating it as a terminator did real damage --
+; The reserved words that close a construct: the subset of the fifteen that may
+; terminate a command already in progress. `if`, `while`, `for`, `case`, `in`,
+; `!` and `{` are openers, so treating them as arguments costs nothing.
 ;
-;   echo done      printed a blank line, AND
-;   echo end       (and everything after it) never ran
-;
-; -- because the abandoned `done` then satisfied %at-stop-word?, which ended
-; the enclosing %eval-list and silently discarded the rest of the script.
-; Bumped for the whole of any compound (see %eval-compound), so the closers
-; keep their power exactly where a construct is waiting for them.
+; %sh-compound-depth is how deep inside a compound the parser is. `done` closes
+; something only when something is open, so at the top level it is an ordinary
+; word. It is bumped for the whole of any compound (see %eval-compound), so the
+; closers keep their power exactly where a construct waits for them.
 (def %sh-compound-depth 0)
 
 (def %closing-word?
@@ -203,28 +179,15 @@
           (error (string-append "parse error: expected " word)))))))
 ; --- Variable expansion ---
 
-; EXPANSION USED TO BE ALL-OR-NOTHING, and the test was the FIRST CHARACTER.
-; A word was expanded only when it began with `$`, and then the whole of the
-; rest of it was taken as the variable name -- so `$HOME` worked, and
-;
-;   echo "n=$f"      ->  n=$f
-;   echo pre$X       ->  pre$X
-;   echo ${HOME}     ->  (nothing: the name looked up was "{HOME}")
-;
-; all failed, silently and as literals.  Embedded expansion is not a corner of
-; shell syntax; `"n=$f"` is the second thing anyone types into a for loop.
-;
-; So the scan walks the whole word.  What it understands:
+; Expansion walks the whole word, not just a leading $. What it understands:
 ;   $NAME     a name is [A-Za-z_][A-Za-z0-9_]*, ending at the first character
 ;             that is not one -- which is what makes `pre$X.txt` work
-;   ${NAME}   the braces delimit, for exactly the cases where the run would
-;             not end where you meant it to
-;   $?  $$    the last status and the shell's pid, as before
-;   $         anything else -- a literal dollar, which is what a shell does
-;             with `echo 50$`
+;   ${NAME}   the braces delimit, for the cases where the run would not end
+;             where you meant it to
+;   $?  $$    the last status and the shell's pid
+;   $         anything else -- a literal dollar, as in `echo 50$`
 ;
-; An unset variable expands to the empty string, which is POSIX default (no
-; `set -u` here yet).
+; An unset variable expands to the empty string unless `set -u` is on.
 
 (def %sh-digit? (fn (_ c) (and (>= c #\0) (<= c #\9))))
 
@@ -262,10 +225,9 @@
 (def %sh-opt-nounset ())
 (def %sh-opt-xtrace ())
 
-; ERREXIT MUST NOT FIRE IN A CONDITION.  `if false; then`, `false || echo`,
-; `! cmd` and a `while` test all run commands whose failure is the POINT, and a
-; shell that exited on them would be unusable.  POSIX lists those contexts
-; explicitly; this counts them, and %sh-should-exit? asks whether any is open.
+; errexit must not fire in a condition. `if false; then`, `false || echo`,
+; `! cmd` and a `while` test all run commands whose failure is the point; POSIX
+; exempts those contexts, and %sh-should-exit? asks whether any is open.
 (def %sh-cond-depth 0)
 
 (def %sh-in-condition
@@ -374,36 +336,28 @@
     (or (= c #\$) (= c #\`) (= c #\")
         (= c #\\) (= c #\newline))))
 
-; QUOTING IS A PROPERTY OF REGIONS WITHIN A WORD, not of the word, and this
-; scanner is where that becomes true.  `X="a b"` arrives as ONE word token
-; whose raw text still carries its quotes (see %sh-word-body in tokens.x), and
-; `pre'lit'$X` is three regions in one word.  So the walk carries a MODE:
+; Quoting is a property of regions within a word, not of the word. `X="a b"`
+; arrives as one word token whose raw text still carries its quotes (see
+; %sh-word-body in tokens.x), and `pre'lit'$X` is three regions. So the walk
+; carries a mode:
 ;
-;   0  unquoted   -- quotes open regions, backslash escapes anything,
-;                    $ expands
-;   1  '...'      -- everything literal until the closing quote
-;   2  "..."      -- $ expands, backslash escapes only the POSIX five
+;   0  unquoted   quotes open regions, backslash escapes anything, $ expands
+;   1  '...'      everything literal until the closing quote
+;   2  "..."      $ expands, backslash escapes only the POSIX five
 ;
-; A tok-word starts in mode 0.  A tok-dq starts in mode 2 -- its outer quotes
-; were already stripped by the reader, so there is no opening quote left to
-; switch on.  A tok-sq never gets here at all.
-;
-; The quote characters that switch mode are NOT emitted, which is what removes
-; them from the final argument.
+; A tok-word starts in mode 0; a tok-dq starts in mode 2 (its outer quotes were
+; stripped by the reader); a tok-sq never reaches here. The mode-switching
+; quote characters are not emitted, which is what removes them from the field.
 ; --- Command substitution ----------------------------------------------------
 ;
-; `$(...)` and the older backtick form.  Both run the text as a shell script in
-; a CHILD whose stdout is a pipe, and both answer what it printed with trailing
-; newlines removed -- which is the whole of what POSIX asks for, and the reason
-; `X=$(pwd)` is the single most-reached-for thing a shell does that ash could
-; not express at all.
+; `$(...)` and the older backtick form run the text as a shell script in a
+; child whose stdout is a pipe, and answer what it printed with trailing
+; newlines removed.
 ;
-; THE STATUS IS NOT PROPAGATED, and that is a deliberate limit rather than an
-; oversight: expansion happens while the command's words are being COLLECTED,
-; and %sh-run-cmd overwrites %sh-status with the command's own status
-; afterwards.  So `echo $(false)` correctly reports echo's 0, and
-; `X=$(false); echo $?` reports 0 where a POSIX shell says 1.  Recording it
-; here would be recording a value that is about to be overwritten.
+; The status is not propagated: expansion happens while the command's words are
+; collected, and %sh-run-cmd overwrites %sh-status with the command's own
+; status afterwards. So `echo $(false)` reports echo's 0, and
+; `X=$(false); echo $?` reports 0 where a POSIX shell says 1.
 
 ; The index of the `)` closing a substitution opened before I, or -1.  Quoted
 ; regions hide their parens, matching the tokenizer's own scan.
@@ -473,9 +427,9 @@
               ; way a shell does -- the error has already gone to stderr.
               (guard (e ()) (sh-eval-extracted src))
               (%sh-exit-shell %sh-status))
-            ; READ BEFORE WAIT.  A child whose output exceeds the pipe buffer
+            ; Read before wait: a child whose output exceeds the pipe buffer
             ; blocks in write() until someone drains it, so waiting first would
-            ; deadlock on any substitution bigger than a pipe.
+            ; deadlock on any substitution larger than a pipe.
             (do
               (sh-close write-fd)
               (let ((out (sh-read-all-fd read-fd)))
@@ -485,27 +439,19 @@
 
 ; --- FIELD SPLITTING -------------------------------------------------------
 ;
-; The expander answers a LIST OF FIELDS, not a string, and that is the whole
-; of this section.  A word is split on whitespace AFTER it expands, and only
-; the expanded part is split:
+; The expander answers a list of fields, not a string. A word is split on
+; whitespace after it expands, and only the expanded part is split:
 ;
 ;   X="a b"; cmd $X          two arguments
 ;   X="a b"; cmd "$X"        one
 ;   for f in $(cat list)     once per line, not once for the whole file
-;   cmd $EMPTY               NO argument at all, not an empty one
+;   cmd $EMPTY               no argument at all
 ;   cmd "$EMPTY"             one empty argument
 ;
-; Until this existed every one of those was one field, which is the single
-; behaviour scripts lean on hardest without noticing.
-;
-; The walker carries (fields cur started).  `started` is what separates "an
-; empty field" from "no field": literal text and quote marks set it, expanded
-; text sets it only for the characters it actually contributes.  That is why
-; `cmd "$EMPTY"` yields an empty argument -- the quotes started a field -- and
-; `cmd $EMPTY` yields none.
-;
-; IFS IS THE DEFAULT SET, space/tab/newline, and is not configurable: `set` is
-; not implemented, so there is nowhere to change it from.
+; The walker carries (fields cur started). `started` separates "an empty field"
+; from "no field": literal text and quote marks set it, expanded text sets it
+; only for the characters it contributes -- which is why `cmd "$EMPTY"` yields
+; an empty argument and `cmd $EMPTY` yields none.
 
 (def %sh-ws-char?
   (fn (_ c) (or (= c #\space) (= c #\tab) (= c #\newline))))
@@ -526,20 +472,15 @@
 ; The non-empty runs between whitespace, in order.
 ; --- IFS ---------------------------------------------------------------------
 ;
-; The default is space/tab/newline, and until `set` existed there was nowhere
-; to change it from -- so this was hard-coded.  POSIX gives IFS two kinds of
-; character and they behave differently:
+; POSIX gives IFS two kinds of character:
 ;
-;   WHITESPACE in IFS   a run of them is ONE delimiter, and leading or trailing
-;                       runs produce no field:  `a  b` is two fields
-;   anything else       EACH occurrence delimits, so adjacent ones make empty
-;                       fields:  IFS=: over `a::b` is three
+;   whitespace in IFS   a run of them is one delimiter; a leading or trailing
+;                       run produces no field, so `a  b` is two fields
+;   anything else       each occurrence delimits, so adjacent ones make empty
+;                       fields: IFS=: over `a::b` is three
 ;
-; and a non-whitespace delimiter may have IFS whitespace either side of it,
-; which belongs to it rather than delimiting again.
-;
-; IFS set but EMPTY means no splitting at all -- the one case people reach for
-; deliberately, to read a whole line into one field.
+; A non-whitespace delimiter may have IFS whitespace either side, which belongs
+; to it. IFS set but empty means no splitting at all.
 
 (def %sh-ifs-default " \t\n")
 
@@ -604,35 +545,23 @@
 
 ; --- The word being built ---------------------------------------------------
 ;
-; Three values travel together through the whole of the expansion walk: the
-; FIELDS finished so far (reversed), the field CURrently being built, and
-; whether anything has STARTED that field.  They were passed as three
-; positional parameters and returned as a bare (list a b c), read back with
-; (first (rest (rest r))) -- which is not a data structure, it is a dare.
+; Three values travel through the expansion walk: the fields finished so far
+; (reversed), the field currently being built, and whether anything has started
+; it. A named constructor and accessors carry them, so no caller depends on the
+; list layout.
 ;
-; Named constructor and accessors instead.  The representation is still a
-; list, because that is what the language offers; what changes is that no
-; caller has to know it.
-; THE FIELD IN HAND IS A LIST OF PIECES, not a string.  It was a string, grown
-; with (string-append cur here) once per character -- which copies the whole
-; accumulated field every time, so building an n-character word cost O(n^2) and
-; two allocations per character.  While this bundle's runner had to keep the
-; per-snippet collect off (x-lang#599, fixed in x-engine-c v0.2.7) a batched
-; spec run accumulated all of that and died on the allocation ceiling.
+; The field in hand is a list of pieces, not a string: pieces are pushed in
+; reverse and joined once, when the field closes, so building an n-character
+; word is one cons per character rather than a fresh copy each time.
 ;
-; Pieces are pushed in reverse and joined ONCE, when the field closes.  Per
-; character that is one cons; the copying happens exactly once per field.
 ; --- A finished field -------------------------------------------------------
 ;
-; A field is its TEXT and the two things pathname expansion would otherwise
+; A field is its text plus two things pathname expansion would otherwise
 ; re-derive by scanning it: whether it holds a live wildcard (so it is a
-; pattern) and whether it holds an escape this walk wrote (so the text the
-; user meant is not the text in hand).  The walk knows both AS IT WRITES; the
-; scans that asked again were two more passes over every word the shell runs.
-; first/rest CHAINS, NOT (nth n): nth is (List ref), and a class dispatch
-; costs about 1,800 heap objects where the raw pair walk costs a handful --
-; measured, after the version of this that used nth made every word DEARER
-; than the two scans it removed.
+; pattern) and whether it holds an escape this walk wrote (so the literal text
+; differs from the text in hand). The walk knows both as it writes.
+; first/rest chains, not (nth n): nth is (List ref), a class dispatch that
+; costs far more heap than a raw pair walk for the same reach.
 (def %sh-field (fn (_ text glob? esc?) (list text glob? esc?)))
 (def %sh-field-text  (fn (_ f) (first f)))
 (def %sh-field-glob? (fn (_ f) (first (rest f))))
@@ -687,11 +616,10 @@
       ()
       meta?)))
 
-; AN UNQUOTED EXPANSION'S RESULT, which is neither of the two above.  Its
-; wildcards are live -- `X='*'; echo $X` globs -- but a BACKSLASH in a value
-; is an ordinary character rather than an escape: `x='a\*b'` matches a
-; backslash, any run, a b.  The glob machinery reads a backslash AS an escape,
-; so a literal one goes in doubled and %sh-field-plain takes it back off.
+; An unquoted expansion's result: its wildcards are live (`X='*'; echo $X`
+; globs), but a backslash in a value is an ordinary character, not an escape.
+; The glob machinery reads a backslash as an escape, so a literal one goes in
+; doubled and %sh-field-plain takes it back off.
 (def %sh-acc-add-value
   (fn (_ a text)
     (if (%sh-has-glob-inert? text)
@@ -732,20 +660,14 @@
 
 ; --- Keeping quoted glob characters literal ---------------------------------
 ;
-; Pathname expansion happens AFTER the word is built, by which point `"*"` and
-; `*` are the same character -- so the accumulator has to carry the difference.
-; It carries it as a BACKSLASH: text that was quoted or escaped goes in with
-; its glob metacharacters escaped, which is exactly the notation %sh-glob-at
-; already understands and %sh-glob-unescape takes back off at the end.
-;
-; A backslash is escaped too, so the unescape is exact: every backslash in a
-; finished field is one this put there (an unquoted one was consumed by the
-; walk as an escape and never reached here).
-; TWO SETS, ONE OF THEM DERIVED.  A metacharacter is one that has to be
-; escaped to survive as itself; an ACTIVE one is a wildcard.  Every character
-; in the first set is in the second but the backslash, which escapes and does
-; not match -- so the second is written as that subtraction rather than as a
-; second list somebody has to remember to keep in step.
+; Pathname expansion happens after the word is built, by which point `"*"` and
+; `*` are the same character, so the accumulator carries the difference as a
+; backslash: quoted or escaped text goes in with its glob metacharacters
+; escaped, the notation %sh-glob-at understands and %sh-glob-unescape removes.
+; A backslash is escaped too, so the unescape is exact.
+; A metacharacter must be escaped to survive as itself; an active one is a
+; wildcard. Every metacharacter is active but the backslash, so the active set
+; is written as that subtraction rather than a second list to keep in step.
 (def %sh-glob-meta (list #\* #\? #\[ #\\))
 (def %sh-glob-active (filter (fn (_ c) (not (= c #\\))) %sh-glob-meta))
 
@@ -768,10 +690,9 @@
 (def %sh-glob-meta-char?
   (fn (_ c) (%sh-char-in? c %sh-glob-meta)))
 
-; SCAN FIRST, BUILD ONLY IF NEEDED.  One scanner, either set: text that came
-; out of an expansion has not been through the walk, so it is the one thing
-; still worth scanning -- and which question to ask depends on whether it is
-; going in quoted (does it need escaping) or bare (is it a pattern).
+; Scan first, build only if needed: text out of an expansion has not been
+; through the walk, so it is the one thing still worth scanning -- for escaping
+; if it goes in quoted, or for a pattern if bare.
 (def %sh-has-char-in?
   (fn (_ text chars)
     (let ((n (string-length text)))
@@ -844,25 +765,21 @@
                             (rest pieces))))
               (if (%sh-trail-ws? text) (%sh-acc-break filled) filled))))))))
 
-; "$@" -- ONE FIELD PER POSITIONAL PARAMETER.
+; "$@" -- one field per positional parameter.
 ;
 ; Every other special answers a string, and inside quotes a string is one
-; field.  `"$@"` is the exception the whole idiom rests on: `cmd "$@"` has to
-; forward three arguments as three, with the spaces inside any of them intact.
-; Joining them -- which is what `$*` means and what this used to do for both --
-; turns `wrapper "$@"` into a single argument and silently mangles every
-; script that forwards what it was given.
+; field. `"$@"` is the exception `cmd "$@"` rests on: it forwards each
+; parameter as its own argument, with the spaces inside any of them intact.
 ;
-; The parameters splice like any other pieces: the first JOINS the field in
-; hand, so `"x$@"` starts `x` on the first; each later one begins its own; and
-; the last is left OPEN so `"$@y"` closes onto the last.  They go in as
-; literal text -- quoted parameters are not split again and do not glob.
+; The parameters splice like other pieces: the first joins the field in hand,
+; so `"x$@"` starts `x` on the first; each later one begins its own; the last
+; is left open so `"$@y"` closes onto it. They go in as literal text -- quoted
+; parameters are not split again and do not glob.
 ;
-; NO PARAMETERS AT ALL is the case that is not obvious: `"$@"` then contributes
-; nothing AND the quotes around it produce no empty argument, so `cmd "$@"`
-; with none passes none -- where `cmd ""` passes one empty string.  The field
-; the opening quote started is un-started here, and only when nothing else has
-; gone into it: `"x$@"` with no parameters is still the one field `x`.
+; With no parameters `"$@"` contributes nothing and produces no empty argument,
+; so `cmd "$@"` with none passes none, where `cmd ""` passes one empty string.
+; The field the opening quote started is un-started here, and only when nothing
+; else has gone into it: `"x$@"` with no parameters is still the one field `x`.
 (def %sh-add-args
   (fn (self a args)
     (if (null? args)
@@ -1072,14 +989,11 @@
       (not (= c #\'))
       (not (or (= c #\') (= c #\") (= c #\\) (= c #\`) (= c #\$))))))
 
-; A PLAIN RUN, AND WHETHER IT HOLDS A METACHARACTER -- one pass for both.
-; Finding where the run ends means looking at every character in it, and the
-; only other thing anyone asks of a run is whether it contains `*`, `?`, `[`
-; or `\`.  Asking here costs one comparison per character and saves the two
-; whole-field scans that used to ask afterwards.
-;
-; The flag rides in rather than out of the recursion so it accumulates; `or`
-; short-circuits, so once a run is known to hold one the test is not repeated.
+; A plain run, and whether it holds a metacharacter, in one pass. Finding where
+; the run ends looks at every character; the only other question about a run is
+; whether it contains `*`, `?`, `[` or `\`, so asking here costs one comparison
+; per character and saves two whole-field scans. The flag rides in through the
+; recursion so it accumulates, and `or` short-circuits once one is found.
 (def %sh-run (fn (_ end meta?) (pair end meta?)))
 (def %sh-run-end (fn (_ r) (first r)))
 (def %sh-run-meta? (fn (_ r) (rest r)))
@@ -1089,10 +1003,9 @@
     (if (>= i n)
       (%sh-run i meta?)
       (let ((c (string-ref s i)))
-        ; TILDE? ENDS A RUN, and only where one could expand.  A `~` is
-        ; ordinary text to this scanner otherwise, so a word with no
-        ; assignment in it pays one short-circuited test per run, not per
-        ; character.
+        ; `~` ends a plain run only where one could expand; otherwise it is
+        ; ordinary text, so a word with no assignment pays one short-circuited
+        ; test per run, not per character.
         (if (and (%sh-plain-char? c mode)
                  (not (and tilde? (= c #\~))))
           (self s (+ i 1) n mode (or meta? (%sh-glob-meta-char? c)) tilde?)
@@ -1100,27 +1013,23 @@
 
 ; --- Tilde expansion --------------------------------------------------------
 ;
-; `~` stands for HOME, but only where a shell says it does: at the START of a
-; word, and -- in an ASSIGNMENT word only -- straight after the `=` and after
-; any `:` beyond it, which is what makes `PATH=~/bin:~/lib` work.  Everywhere
-; else it is an ordinary character, and all three of these keep theirs:
+; `~` stands for HOME, but only where a shell says it does: at the start of a
+; word, and -- in an assignment word only -- straight after the `=` and after
+; any `:` beyond it, which makes `PATH=~/bin:~/lib` work. Everywhere else it is
+; ordinary:
 ;
 ;   echo a~b        not at the start
 ;   echo x~         not at the start
-;   echo a=~/x      an ARGUMENT that looks like an assignment is not one
+;   echo a=~/x      an argument that looks like an assignment is not one
 ;
-; ASSIGNMENT POSITION IS A FACT OF THE COMMAND, not of the word's shape, so it
-; is passed in: `%collect-cmd-tokens` knows which leading words are still
-; assignments and nothing else can.
+; Assignment position is a fact of the command, not the word's shape, so it is
+; passed in from %collect-cmd-tokens. Quoting suppresses tilde for free -- the
+; walk only stands on a bare `~`, so `"~"`, `'~'` and `\~` never reach here.
 ;
-; QUOTING SUPPRESSES IT for free -- the walk only stands on a bare `~`, so
-; `"~"`, `'~'` and `\~` never reach here.
-;
-; ONLY A BARE `~` EXPANDS: the next character must be `/`, `:` or the end of
-; the word.  `~user` wants the password database, and until there is a door to
-; it the honest answer is the one a shell gives for a user that does not
-; exist -- leave it as written.  `~+` and `~-` are extensions and are not
-; here either.
+; Only a bare `~` expands: the next character must be `/`, `:` or the end of
+; the word. `~user` wants the password database, absent here, so it is left as
+; written -- what a shell gives for a user that does not exist. `~+` and `~-`
+; are not implemented.
 (def %sh-first-eq
   (fn (self s i n)
     (if (>= i n)
@@ -1340,14 +1249,11 @@
                   (self (+ i 1) %sh-mode-dq (%sh-acc-open a)))
                 ((and (= mode %sh-mode-dq) (= c #\"))
                   (self (+ i 1) %sh-mode-bare (%sh-acc-open a)))
-                ; A backslash emits what it protects and resumes PAST it, so a
-                ; `$` it protected stays a `$`.
-                ; A TRAILING BACKSLASH PROTECTS NOTHING, so it stands for
-                ; itself.  It must be claimed HERE: the arm below needs a
-                ; character to protect, and the plain-run scanner cannot
-                ; consume a backslash at all -- so this used to fall through
-                ; to a run of length zero and the walk recursed on the same
-                ; index forever, allocating until the process was killed.
+                ; A backslash emits what it protects and resumes past it, so a
+                ; `$` it protected stays a `$`. A trailing backslash protects
+                ; nothing and stands for itself; it is claimed here, because the
+                ; plain-run scanner cannot consume a backslash and the arm below
+                ; needs a character to protect.
                 ((and (= c #\\) (>= (+ i 1) n))
                   (self (+ i 1) mode
                     (%sh-acc-add-literal a (substring s i (+ i 1)) #t)))
@@ -1383,24 +1289,18 @@
                       (self (+ i 1) mode
                         (%sh-acc-add-literal a home
                           (%sh-has-glob-meta? home))))))
-                ; ORDINARY TEXT GOES IN A RUN AT A TIME.  One character per
-                ; step meant one substring allocation per character of every
-                ; word; a plain word is now one substring, which is what took
-                ; a batched spec run back under the interpreter's allocation
-                ; ceiling.
-                ;
-                ; A bare `*` IS the glob; the same character inside quotes is
-                ; not -- so the run is escaped or not by the mode it was read
-                ; in, exactly as a single character was.
+                ; Ordinary text goes in a run at a time: a plain word is one
+                ; substring rather than one per character. A bare `*` is the
+                ; glob; the same character inside quotes is not, so the run is
+                ; escaped or not by the mode it was read in.
                 (else
                   (let ((r (%sh-plain-run s i n mode ()
                              (and assign? (= mode %sh-mode-bare)))))
                     (let ((e (%sh-run-end r)) (meta? (%sh-run-meta? r)))
-                      ; A RUN OF NOTHING WOULD NOT ADVANCE, and a walk that
-                      ; does not advance is the hang described above rather
-                      ; than a wrong answer.  Every character that is not
-                      ; plain is claimed by an arm before this one, so this
-                      ; is unreachable -- and says so out loud if it ever is.
+                      ; A run of nothing would not advance, which would hang
+                      ; rather than answer. Every non-plain character is
+                      ; claimed by an earlier arm, so this is unreachable and
+                      ; says so if it ever is.
                       (when (= e i)
                         (error "internal: expansion made no progress"))
                       (let ((run (substring s i e)))
@@ -1456,8 +1356,8 @@
             (cont (+ i 2) mode (%sh-add-args a %sh-args)))
           ; The one-character specials: $? $$ $# $@ $* and $1..$9.
           ;
-          ; A SINGLE DIGIT ONLY, which is POSIX and surprises people: `$10` is
-          ; $1 followed by a literal 0, and ${10} is how the tenth is spelled.
+          ; A single digit only, per POSIX: `$10` is `$1` followed by a literal
+          ; 0, and `${10}` is how the tenth is spelled.
           ((or (= d #\?) (= d #\$) (= d #\#)
                (= d #\@) (= d #\*) (%sh-digit? d))
             (substitute (+ i 2) (%sh-var-value (substring s (+ i 1) (+ i 2)))))
@@ -1626,9 +1526,9 @@
     (and (not (null? segments))
          (= (string-length (last segments)) 0))))
 
-; NO SCAN TO DECIDE.  The field already knows whether it is a pattern and
-; whether it carries escapes; this used to ask %sh-glob-pattern? and then
-; %sh-glob-unescape, two more walks of text the expander had just walked.
+; No scan to decide: the field already knows whether it is a pattern and
+; whether it carries escapes, so this does not re-derive them with
+; %sh-glob-pattern? and %sh-glob-unescape.
 (def %sh-glob-field
   (fn (_ f)
     (if (not (%sh-field-glob? f))
@@ -1669,19 +1569,16 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-dq)) %sh-mode-dq %sh-mode-bare)))
 
-; ASSIGN? says this word IS AN ASSIGNMENT: a leading NAME=... of the command,
-; or an argument to a utility whose arguments are assignments.  Two rules turn
-; on it, and both are POSIX.
+; ASSIGN? says this word is an assignment: a leading NAME=... of the command,
+; or an argument to a utility whose arguments are assignments. Two POSIX rules
+; turn on it.
 ;
-; ITS VALUE IS NOT SPLIT AND NOT GLOBBED.  `v=$(echo a b)` is one field, and
-; `g=$(echo "*")` is a star rather than the directory:
+; Its value is not split and not globbed: `v=$(echo a b)` is one field and
+; `g=$(echo "*")` is a star, per "the word shall be expanded ... without field
+; splitting or pathname expansion".
 ;
-;   "the word shall be expanded ... without field splitting or pathname
-;    expansion" -- and without them, `v=$(date)` is a date rather than the
-;   first word of one, which is what this was doing.
-;
-; ITS TILDE EXPANDS AFTER THE `=` (and after any `:` beyond it), which is
-; %sh-tilde-pos? and is why the flag existed before this.
+; Its tilde expands after the `=` (and after any `:` beyond it), which is
+; %sh-tilde-pos?.
 (def %sh-expand-tok
   (fn (_ tok assign?)
     (if (eq? (first tok) (lit tok-sq))
@@ -1712,9 +1609,8 @@
     (if (not (string? word))
       word
       (let ((fs (%sh-expand-str word %sh-mode-bare () ())))
-        ; THE ESCAPES STAY ON.  This feeds pattern operands (`${x#pat}`),
-        ; which read them; %sh-field-plain is for the sites that want the
-        ; literal text.
+        ; The escapes stay on: this feeds pattern operands (`${x#pat}`), which
+        ; read them. %sh-field-plain is for the sites that want literal text.
         (if (null? fs) "" (%sh-field-text (first fs)))))))
 
 (def %sh-expand-words
@@ -1799,15 +1695,11 @@
 
 ; A here-document's body reaches the command down a pipe.
 ;
-; THE WRITER IS A FORKED CHILD, not this process.  Writing the body here and
-; then reading it back would deadlock on any body larger than the pipe buffer
-; (64 KB on the usual boxes): nothing is draining the other end yet.  The child
-; writes and exits; the parent keeps only the read end.
-;
-; It is not waited for.  Waiting would be the same deadlock from the other
-; side -- the reader has not run yet -- so the writer is reaped when the shell
-; exits, which is what a shell using a temp file avoids and what this trades
-; for having no temp file at all.
+; The writer is a forked child, not this process: writing the body here and
+; reading it back would deadlock on any body larger than the pipe buffer, since
+; nothing is draining the other end yet. The child writes and exits; the parent
+; keeps the read end. It is not waited for -- waiting would deadlock from the
+; other side -- so the writer is reaped when the shell exits.
 (def %sh-setup-heredoc
   (fn (_ index fd)
     (let ((h (%sh-heredoc-at (convert index %int))))
@@ -1883,24 +1775,16 @@
         (%sh-setup-redir (first redirs))
         (%sh-setup-redirs (rest redirs))))))
 
-; A BUILTIN'S REDIRECTIONS WERE DROPPED ON THE FLOOR.  %sh-run-cmd handed
-; `redirs` to %sh-run-external and to nothing else, so
+; A builtin's redirections are applied and then undone. A builtin runs in the
+; shell itself, so `echo x > out.txt` must not leave the shell writing to
+; out.txt afterwards -- unlike an external, whose redirections are set up in
+; the child after the fork. This is the same shape as the pipeline's stdin
+; handling below: save the descriptor, redirect, run, restore.
 ;
-;   echo hi > out.txt
-;
-; printed hi to the terminal and created no file -- while `/bin/echo hi >
-; out.txt` worked, because the external path sets its redirections up in the
-; CHILD, after the fork, where nothing has to be undone.
-;
-; A builtin runs in the shell itself, so its redirections have to be undone or
-; the shell keeps them: one `echo > log` and every later command in the session
-; writes to log.  That is the same shape as the pipeline's stdin leak below,
-; and it takes the same answer -- save the descriptor, redirect, run, restore.
-;
-; SAVED ONE FD AT A TIME, at a fixed offset, which is what makes the restore
-; exact: fd N is parked at N + %sh-fd-save-base for the duration.  The base is
-; high enough to clear the descriptors a script plausibly names itself (and
-; x.sh's fd 3, and %sh-stdin-save at 19).
+; Descriptors are saved one at a time at a fixed offset, so the restore is
+; exact: fd N is parked at N + %sh-fd-save-base for the duration. The base
+; clears the descriptors a script plausibly names itself (and x.sh's fd 3, and
+; %sh-stdin-save at 19).
 (def %sh-fd-save-base 30)
 
 (def %sh-save-fds
@@ -1977,19 +1861,14 @@
 
 ; --- test / [ -------------------------------------------------------------
 ;
-; The 2024 version knew -n, -z, = and != and answered 1 (false) to everything
-; else, which meant `test -f config` and `test "$n" -gt 3` were not wrong so
-; much as silently always-false -- the worst answer a conditional can give.
+; test knows -n, -z, =, != (string), the file predicates, and the numeric
+; comparisons; an unknown operator is a usage error, not a silent false.
 
-; FLAT, VIA match, NOT A NESTED if-CHAIN.  The first version of these two was
-; a six-deep if ladder and it came out one closing paren short -- which does
-; not fail loudly: the parenthesis deficit swallowed every def that followed,
-; so %sh-run-builtin and the rest bound INSIDE this function's body instead of
-; at the top level, and the shell died with "Unbound SYMBOL '%sh-run-builtin'"
-; at the first command.  A flat match cannot make that mistake.
-; The operator tables.  A test operator is a NAME and a PREDICATE, and the
-; shell's inverted truth (0 is true) is applied once, by the caller, rather
-; than by every arm.
+; Flat, via match: a nested if-ladder here once came out a closing paren short,
+; which binds the defs that follow inside this function rather than at the top
+; level and fails only later at the first command. A flat match cannot do that.
+; The operator tables. A test operator is a name and a predicate; the shell's
+; inverted truth (0 is true) is applied once, by the caller.
 (def %sh-file-ops
   (list (pair "-e" (fn (_ kind path) (not (null? kind))))
         (pair "-f" (fn (_ kind path) (eq? kind (lit file))))
@@ -2048,9 +1927,7 @@
             r))))))
 
 ; A plain def: %sh-test-2 calls back into this for `!`, but a body's references
-; resolve when it RUNS, so no forward declaration is needed.  The (def x ())
-; then (set! x ...) dance this replaces is what let the declaration be deleted
-; with the block above it and turned every spec red at load.
+; resolve when it runs, so no forward declaration is needed.
 (def %sh-test
   (fn (_ wds)
     (let ((n (length wds)))
@@ -2234,15 +2111,11 @@
           (sh-eval (sh-read-file path))
           %sh-status)))))
 
-; FLAT, VIA match.  This was a fourteen-deep nested-if dispatch, and adding
-; four builtins to the bottom of it is how the file acquired a stray closing
-; paren -- the counterpart to the missing one in %sh-test-num above, and
-; between them the two hid each other in the whole-file total.  A match arm
-; per builtin is one line each and cannot be miscounted.
-; The three builtins that were written inline in the dispatch.  A table holds
-; functions, so they have to BE functions -- which is no loss: `:` and `true`
-; differing only in name is clearer as two bindings to one function than as two
-; arms of a case.
+; Flat, via match, rather than a deep nested-if dispatch that is easy to
+; miscount a paren in. One match arm per builtin.
+; The three builtins written inline in the dispatch. A table holds functions,
+; so they have to be functions -- `:` and `true` differ only in name, clearer
+; as two bindings to one function than two arms of a case.
 (def %sh-true  (fn (_ wds) 0))
 (def %sh-false (fn (_ wds) 1))
 
@@ -2261,21 +2134,19 @@
 
 ; `eval` -- the arguments, joined by a space, read back as shell input.
 ;
-; The joining is why `eval echo a b` and `eval "echo a b"` are the same
-; command: eval takes WORDS, and its arguments have already been expanded once
-; by the time they arrive here.  That second pass is the whole point of it --
+; The join is why `eval echo a b` and `eval "echo a b"` are the same command:
+; eval takes words, already expanded once by the time they arrive, and the
+; second pass is the point --
 ;
 ;   a=b; b=c; eval "echo \$$a"
 ;
-; expands to `echo $b` and then evaluates THAT, which nothing else offers.
+; expands to `echo $b` and then evaluates that.
 ;
-; IN THIS SHELL, never a subshell: `eval "v=1"` sets v for the caller and
-; `eval "exit 3"` exits.
-;
-; THE TEXT IS A FRESH TOP LEVEL, so %sh-compound-depth is reset around it for
-; exactly the reason %sh-call-fn resets it: eval'd from inside an `if`, a bare
-; `echo done` in the text would otherwise be read as that `if`'s terminator.
-; Restored on the way out AND on a raise, the shape the function call uses.
+; In this shell, never a subshell: `eval "v=1"` sets v for the caller and
+; `eval "exit 3"` exits. The text is a fresh top level, so %sh-compound-depth
+; is reset around it -- as %sh-call-fn resets it -- so a bare `echo done` in the
+; text is not read as an enclosing `if`'s terminator. Restored on the way out
+; and on a raise.
 (def %sh-eval-builtin
   (fn (_ wds)
     (let ((src (%sh-join-args wds)))
@@ -2295,18 +2166,16 @@
 ; Two commands wearing one name, told apart by whether a command follows:
 ;
 ;   exec CMD [args]   replace this shell with CMD; nothing after it runs
-;   exec [redirs]     apply the redirections TO THIS SHELL and carry on
+;   exec [redirs]     apply the redirections to this shell and carry on
 ;
-; The second is why exec cannot take the save/apply/restore above: `exec > log`
-; means the REST OF THE SCRIPT goes to log, and `exec 3<file` leaves fd 3 open
-; for the commands after it.  With a command, the same non-restoring setup is
-; what the replacement image inherits -- there is nothing to restore to,
-; because on success this process stops existing.
+; The second is why exec does not save and restore: `exec > log` sends the rest
+; of the script to log, and `exec 3<file` leaves fd 3 open for later commands.
+; With a command, the same non-restoring setup is what the replacement image
+; inherits.
 ;
-; A FAILED EXEC ENDS A SCRIPT: POSIX has a non-interactive shell exit, and
-; `sh -c "exec nosuchcmd; echo after"` prints nothing and exits 127.  At a
-; PROMPT that would close the session over a typo, so there the status is
-; reported and the shell stays -- the same split POSIX draws.
+; A failed exec ends a non-interactive shell (POSIX): `sh -c "exec nosuchcmd;
+; echo after"` prints nothing and exits 127. At a prompt the status is reported
+; and the shell stays, rather than closing the session over a typo.
 (def %sh-exec-builtin
   (fn (_ wds)
     (if (null? wds)
@@ -2321,31 +2190,26 @@
 
 ; --- trap --------------------------------------------------------------------
 ;
-; `trap ACTION CONDITION...` says what to do when a condition arrives, and the
-; two kinds of condition are not equally answerable here.
+; `trap ACTION CONDITION...` says what to do when a condition arrives; the two
+; kinds are not equally answerable here.
 ;
-;   EXIT (or 0)  when the shell exits.  Implemented, and it is what scripts
-;                overwhelmingly reach for trap to do: remove the temp file
-;                however the script ends.
+;   EXIT (or 0)  when the shell exits. Implemented, and what scripts reach for
+;                trap to do: clean up however the script ends.
 ;
-;   a SIGNAL     an ACTION CANNOT BE RUN.  The platform says so in its own
-;                contract -- lib/x/sys/posix.x on (Sys signal): "(Sys sig-ign)
-;                or (Sys sig-dfl) ONLY -- an x-lang closure cannot be a C
-;                signal handler".  What a signal can still be told is to be
-;                IGNORED or restored to its default, so `trap "" INT` and
-;                `trap - INT` are real.  An action on a signal is refused with
-;                a diagnostic; accepting it and never running it would be the
-;                worse answer, because the script would look protected.
+;   a signal     an action cannot be run: the platform's (Sys signal) takes
+;                only sig-ign or sig-dfl -- an x-lang closure cannot be a C
+;                signal handler. So `trap "" INT` (ignore) and `trap - INT`
+;                (default) are real; an action on a signal is refused with a
+;                diagnostic rather than accepted and never run.
 ;
-; A SUBSHELL DOES NOT INHERIT THEM, which is POSIX and is checked: `trap "echo
-; T" EXIT; ( echo sub )` prints T once, at the end, not twice.  Every fork in
-; this file clears the table in the child for that reason.
+; A subshell does not inherit traps (POSIX): every fork clears the table in the
+; child.
 (def %sh-traps ())
 (def %sh-exit-trap-ran ())
 
-; The signals this shell will name.  These numbers are the ones POSIX fixes on
-; every system; USR1 and USR2 are deliberately absent, because they differ
-; between Linux and the BSDs and nothing here can ask which one it is on.
+; The signals this shell will name. These numbers are the ones POSIX fixes on
+; every system; USR1 and USR2 are absent because they differ between Linux and
+; the BSDs and nothing here can ask which one it is on.
 (def %sh-signal-numbers
   (list (pair "HUP" 1) (pair "INT" 2) (pair "QUIT" 3) (pair "PIPE" 13)
         (pair "ALRM" 14) (pair "TERM" 15)))
@@ -2457,9 +2321,9 @@
           (do (%stderr "ash: trap: usage: trap [action] condition ...\n") 2)
           (%sh-trap-set action conds 0))))))
 
-; THE EXIT TRAP, RUN ONCE.  An action that itself exits must not re-enter this
-; -- `trap "echo n; exit 9" EXIT; exit 1` prints n once and leaves with 9,
-; which is the status the ACTION chose, not the one the exit asked for.
+; The exit trap, run once. An action that itself exits must not re-enter this:
+; `trap "echo n; exit 9" EXIT; exit 1` prints n once and leaves with 9, the
+; status the action chose.
 (def %sh-run-exit-trap
   (fn (_)
     (unless %sh-exit-trap-ran
@@ -2478,31 +2342,26 @@
 
 ; --- getopts ------------------------------------------------------------------
 ;
-; `getopts OPTSTRING NAME [ARG...]` reads ONE option per call, and is meant to
-; be driven by a loop:
+; `getopts OPTSTRING NAME [ARG...]` reads one option per call, driven by a loop:
 ;
 ;   while getopts "ab:c" opt; do
 ;     case $opt in a) ...;; b) use "$OPTARG";; esac
 ;   done
 ;   shift $((OPTIND - 1))
 ;
-; TWO THINGS CARRY BETWEEN CALLS.  OPTIND is the index of the next ARGUMENT and
-; is a shell variable, so a script may reset it to 1 and parse again.  The
-; other is an offset INSIDE the current argument, because `-abc` is three
-; options in one word; that one is private, and is reset whenever OPTIND is
-; not the value this builtin last wrote -- which is how a script's reset is
-; noticed without the script having to know the offset exists.
+; Two things carry between calls. OPTIND is the index of the next argument and
+; is a shell variable, so a script may reset it to 1 and parse again. The other
+; is an offset inside the current argument, because `-abc` is three options in
+; one word; it is private and is reset whenever OPTIND is not the value this
+; builtin last wrote.
 ;
-; ERRORS COME IN TWO FLAVOURS and the caller picks by writing a leading `:` in
-; the optstring:
+; Errors come in two flavours, chosen by a leading `:` in the optstring:
 ;
 ;                 unknown option          option missing its argument
 ;   normal        NAME=?, diagnostic      NAME=?, diagnostic
 ;   silent  `:`   NAME=? OPTARG=letter    NAME=: OPTARG=letter
 ;
-; The silent form is the one a script can report on in its own words, which is
-; why POSIX offers it; the normal form is what a script gets if it says
-; nothing.
+; The silent form lets a script report in its own words.
 (def %sh-optchar 1)
 (def %sh-optind-seen 0)
 
@@ -2643,15 +2502,9 @@
 
 ; --- The builtin table ------------------------------------------------------
 ;
-; ONE table, not a list of names beside a dispatch that repeats them.  Those
-; were two structures obliged to agree with nothing making them agree: adding a
-; builtin to one and forgetting the other gives a name that %sh-builtin? claims
-; and %sh-run-builtin answers 1 to -- a command that silently fails instead of
-; running.  Now the names ARE the table's keys, so the question "is this a
-; builtin" and the question "what runs it" cannot diverge.
-;
-; `.` and `source` are the same handler under two names, which a table says
-; directly and a dispatch could only say twice.
+; One table, so "is this a builtin" and "what runs it" cannot diverge: the
+; names are the table's keys rather than a separate list a dispatch repeats.
+; `.` and `source` are the same handler under two names.
 (def %sh-builtin-table
   (list (pair "echo"   %sh-echo)
         (pair "cd"     %sh-cd)
@@ -2687,13 +2540,12 @@
       ; both read this table -- but a missing handler must not be a crash.
       (if (null? run) 1 (run wds)))))
 
-; A builtin under redirection: park the descriptors, run, put them back.  The
-; guard is not decoration -- a builtin that raises with fd 1 still pointing at
-; a file would leave the SHELL writing there, and the prompt would vanish into
-; out.txt.  Restore, then re-raise, the way lib/x/sys/stream.x does it.
-; THE BUILTINS WHOSE REDIRECTIONS OUTLIVE THEM.  There is one, and it is named
-; here rather than tested for inline so the fact sits with the other facts
-; about builtins -- and so a second one is a list entry, not another branch.
+; A builtin under redirection: park the descriptors, run, put them back. The
+; guard restores and re-raises, so a builtin that raises with fd 1 still on a
+; file does not leave the shell writing there -- the way lib/x/sys/stream.x
+; does it.
+; The builtins whose redirections outlive them, named here rather than tested
+; for inline, so a second one is a list entry rather than another branch.
 (def %sh-keeps-redirs (list "exec"))
 
 (def %sh-run-builtin-redir
@@ -2725,19 +2577,18 @@
           (set! %sh-traps ())
           (%sh-setup-redirs redirs)
           (sh-exec name wds)
-          ; A DIAGNOSTIC GOES TO STDERR, and this one is the reason the rule
-          ; exists: on stdout it was captured by `x=$(nosuchcmd)` as if it
-          ; were the command's output, and `nosuchcmd 2>/dev/null` could not
-          ; silence it.  The redirections are already applied above, so a
-          ; script that asked for 2>/dev/null gets it.
+          ; A diagnostic goes to stderr: on stdout it would be captured by
+          ; `x=$(nosuchcmd)` as the command's output and `2>/dev/null` could
+          ; not silence it. The redirections are applied above, so a script
+          ; that asked for 2>/dev/null gets it.
           (%stderr "ash: " name ": command not found\n")
           (sh-exit 127))
         (sh-wait pid)))))
 ; --- Assignment handling ---
 
-; THE UTILITIES WHOSE ARGUMENTS ARE ASSIGNMENTS, so `export V=$(cmd)` reads
-; the way `V=$(cmd)` does.  A list rather than a test for one name, because
-; `readonly` and `local` belong here the day they arrive.
+; The utilities whose arguments are assignments, so `export V=$(cmd)` reads the
+; way `V=$(cmd)` does. A list rather than a test for one name, so `readonly`
+; and `local` can join it.
 (def %sh-declaration-utilities (list "export"))
 
 (def %sh-declaration?
@@ -2773,8 +2624,8 @@
 
 (def %sh-run-cmd
   (fn (_ wds redirs)
-    ; ALREADY EXPANDED, at extraction (%collect-cmd-tokens).  Re-expanding here
-    ; would expand a variable's VALUE -- `X='$Y'; echo $X` would print $Y's
+    ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
+    ; would expand a variable's value -- `X='$Y'; echo $X` would print $Y's
     ; contents rather than the two characters it holds.
     (let ((remaining (%process-assignments wds)))
       (if (null? remaining)
@@ -2788,8 +2639,8 @@
             (%sh-exit-on-error
              (%sh-set-status
               (cond
-                ; A FUNCTION WINS OVER AN EXTERNAL AND LOSES TO A BUILTIN,
-                ; which is the POSIX order.
+                ; A function wins over an external and loses to a builtin, the
+                ; POSIX order.
                 ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
                 ; Redirections on a function call apply for the whole body, and
                 ; the shell's own descriptors must survive it -- the same
@@ -2859,11 +2710,10 @@
 
 (def %collect-cmd-tokens ())
 
-; ASSIGN? IS THE COLLECTOR'S TO KNOW.  A word is in assignment position while
-; every word before it was an assignment -- `a=1 b=2 cmd x=3` assigns the
-; first two and passes the third as an argument -- and that is a fact of where
-; the word sits, not of how it is spelt.  It is decided on the RAW token, the
-; way POSIX decides it: before expansion, and never for a quoted one.
+; Assignment position is the collector's to know: a word is in assignment position while
+; every word before it was an assignment -- `a=1 b=2 cmd x=3` assigns the first
+; two and passes the third -- a fact of where the word sits, not how it is
+; spelt. Decided on the raw token, before expansion, and never for a quoted one.
 (set! %collect-cmd-tokens
   (fn (_ cur wds redirs assign?)
     (if (%cursor-empty? cur)
@@ -2892,24 +2742,12 @@
                       assign?))))
               (if (%tok-is-word? tok)
                 (let ((val (%tok-word-val tok)))
-                  ; A RESERVED WORD IN ARGUMENT POSITION IS AN ARGUMENT.  This
-                  ; used to end the command at ANY of the fifteen, so
-                  ;
-                  ;   echo done      printed a blank line
-                  ;   echo if        printed a blank line
-                  ;
-                  ; -- the word was dropped and `echo` ran with none.  POSIX
-                  ; recognises a reserved word only as the FIRST word of a
-                  ; command, and that position is already handled before this
-                  ; loop by %is-compound-start?.
-                  ;
-                  ; Only the STOP words keep their power here, and only those
-                  ; that close a construct: a body written without its `;`
-                  ; (`do echo x done`) still ends at `done` rather than
-                  ; swallowing it.  bash errors on that input; ending the
-                  ; command is the friendlier of two answers to a script that
-                  ; is wrong either way, and it is what the compound parsers
-                  ; below already assume.
+                  ; A reserved word in argument position is an argument. POSIX
+                  ; recognises a reserved word only as the first word of a
+                  ; command, which %is-compound-start? handles before this loop.
+                  ; Only the stop words that close a construct keep their power
+                  ; here, so a body written without its `;` (`do echo x done`)
+                  ; still ends at `done` rather than swallowing it.
                   (if (and
                         (not (null? wds))
                         (eq? (first tok) (lit tok-word))
@@ -3024,12 +2862,9 @@
   (fn (_ cur stop?)
     (unless (null? (%sh-skip-block cur 0 stop?)) (%cursor-advance! cur))))
 
-; Skip a false branch's body, stopping ON the elif/else/fi that follows it.
-;
-; NOT CONSUMED, and that is the whole of the bug this once had: swallowing the
-; `fi` left %eval-elif-chain looking at the token after it, so
-; `if false; then echo yes; fi` -- an else-less if whose condition is false --
-; was a parse error on every version of this bundle.
+; Skip a false branch's body, stopping on the elif/else/fi that follows it --
+; not consuming it, so %eval-elif-chain sees the terminator. Swallowing the
+; `fi` would make `if false; then echo yes; fi` a parse error.
 (def %sh-elif-else-fi (list "elif" "else" "fi"))
 
 (set! %skip-body-to-elif-else-fi
@@ -3278,19 +3113,12 @@
               (%eval-for-body cur var (rest words) body-start))))))))
 ; case WORD in PATTERN[|PATTERN]...) BODY;; ... esac
 
-; CASE PATTERNS ARE GLOBS, and this used to be `pat = "*"` or string equality
-; -- so `case $f in a*)` never matched anything, and `*.txt)` never matched
-; anything, and a `case` whose arms all miss falls through silently.  The two
-; commonest shapes a case statement is written in were both dead.
-;
-; This is PATTERN MATCHING, not pathname expansion: it answers "does this word
-; look like that", which is what `case` needs and what `test`-style code
-; reaches for.  Filename globbing (expanding `*.txt` against a directory) is a
-; separate feature and is still absent -- see the README.
-;
-; Supported: `*` (any run, including empty), `?` (one character), `[abc]`,
-; `[a-z]`, `[!abc]` / `[^abc]` negation, and `\` escaping any of them.  An
-; unterminated `[` is a literal `[`, which is what POSIX says.
+; case patterns are globs, matched with %sh-glob-match -- `a*)`, `*.txt)`,
+; `[abc])`. This is pattern matching, not pathname expansion: it answers "does
+; this word look like that", which is what `case` needs; filename globbing is a
+; separate feature. Supported: `*` (any run, including empty), `?` (one
+; character), `[abc]`, `[a-z]`, `[!abc]` / `[^abc]` negation, and `\` escaping
+; any of them. An unterminated `[` is a literal `[`.
 
 ; The character-class helpers, taking the class body as the half-open range
 ; [lo, hi) -- lo just after the `[`, hi at the `]`.
@@ -3476,22 +3304,11 @@
         (%eval-case-clauses cur word)))))
 ; ( list ) — subshell
 
-; THE CHILD USED TO RUN THE REST OF THE SCRIPT.  It forked and called
-; %eval-list on the SHARED cursor, and %eval-list does not stop at `)` -- so
-; the subshell evaluated its body and then kept going, through every command
-; after it, before exiting.  In batch mode, where the whole file is one token
-; stream, that means everything following a `( ... )` happened twice:
-;
-;   ( echo hi )        ->  hi
-;   echo after             after
-;                          after      <- the child, still going
-;
-; Invisible for a subshell at the end of a script, and doubled side effects
-; anywhere else.
-;
-; So the body is COLLECTED FIRST, in the one process, and the child evaluates
-; a cursor over just those tokens.  The parent is then already positioned past
-; the closing paren and needs no separate skip.
+; The subshell body is collected first, in the one process, and the child
+; evaluates a cursor over just those tokens. %eval-list does not stop at `)`,
+; so a child forked onto the shared cursor would run every command after the
+; subshell as well; collecting first bounds it, and the parent is left
+; positioned past the closing paren.
 (def %collect-subshell-tokens
   (fn (self cur depth toks)
     (if (%cursor-empty? cur)
@@ -3542,27 +3359,22 @@
           (%skip-to-close-paren cur depth))))))
 ; --- Compound command dispatch ---
 
-; THE DEPTH IS BUMPED HERE, around the whole compound, rather than in each of
-; the five parsers: they have many return points apiece and a skip path each,
-; and a counter that has to be decremented on all of them would be wrong within
-; a week.  One place, with the guard/re-raise shape used for the descriptor
-; saves, cannot drift.
+; The depth is bumped here, around the whole compound, rather than in each of
+; the five parsers -- they have many return points apiece, and a counter
+; decremented on all of them would drift. One place, with the guard/re-raise
+; shape used for the descriptor saves.
 ; --- { ...; } -- the group that does NOT fork -------------------------------
 ;
-; `{ ...; }` and `( ... )` group commands for the same reasons -- one
-; redirection over several of them, one stage of a pipeline, one operand of
-; `&&` -- and differ in exactly one way: the braces run in THIS shell.
+; `{ ...; }` and `( ... )` group commands for the same reasons, and differ in
+; one way: the braces run in this shell.
 ;
 ;   v=1; { v=2; }; echo $v      prints 2
 ;   v=1; ( v=2 );  echo $v      prints 1
 ;
-; so the braces are what a script wants unless it is after the isolation, and
-; `cmd | { read x; ...; }` is the idiom that needs them: a `read` in a
-; subshell sets a variable nobody will see again.
-;
-; `{` and `}` are RESERVED WORDS rather than punctuation, which is why the `;`
-; before `}` is required rather than decorative, and why `echo {` still prints
-; a brace -- a reserved word is only reserved where a command could start.
+; So `cmd | { read x; ...; }` is the idiom that needs them: a `read` in a
+; subshell sets a variable nobody will see again. `{` and `}` are reserved
+; words, which is why the `;` before `}` is required and why `echo {` prints a
+; brace -- a reserved word is only reserved where a command could start.
 (def %eval-brace-group
   (fn (_ cur)
     (%cursor-advance! cur)
@@ -3636,25 +3448,13 @@
               (let ((result (%sh-pipe-chain rest-cmds)))
                 (sh-wait pid)
                 result))))))))
-; THE PARENT'S STDIN IS THE SHELL'S STDIN, and %sh-pipe-chain moves it.
-;
-; The chain runs its LAST stage in the shell process, so the parent dup2s each
-; pipe's read end onto fd 0 and leaves it there.  Nothing restores it.  In a
-; one-shot process -- which is every one of the 82 specs, each calling sh-eval
-; once and exiting -- that is invisible.  In a SESSION it ends the session: run
-; `echo hello | grep h` at the prompt and the shell's stdin is now an exhausted
-; pipe, so the next read is EOF and ash exits without a word.  The bug was
-; latent for exactly as long as there was no session to expose it.
-;
-; `exec 9<&0` is how a shell says this, and dup2 onto a high spare fd is what
-; that compiles to.  19 rather than 9: a script may legitimately redirect 9
-; (`exec 9>log`), and x.sh has already claimed 3 for the terminal stdin it
-; parks while the boot stream owns 0.
-;
-; RESTORED ON THE ERROR PATH TOO, via the guard/re-raise shape lib/x/sys/
-; stream.x uses for the output fd.  A pipeline that raises mid-chain would
-; otherwise leave the prompt reading the pipe -- the same dead session,
-; reached by the path that is harder to notice.
+; The parent's stdin is the shell's stdin, and %sh-pipe-chain moves it. The
+; chain runs its last stage in the shell process, so the parent dup2s each
+; pipe's read end onto fd 0. Left there it ends a session: after
+; `echo hello | grep h` at the prompt, stdin is an exhausted pipe and the next
+; read is EOF. So stdin is saved first (dup2 onto a high spare fd, 19 -- 9 is
+; a script's to redirect and x.sh has claimed 3) and restored after, on the
+; error path too, via the guard/re-raise shape lib/x/sys/stream.x uses.
 (def %sh-stdin-save 19)
 
 (def %sh-run-pipeline
@@ -3761,11 +3561,10 @@
         (rest (first fns))
         (self name (rest fns))))))
 
-; `return` unwinds to the call site, which needs a non-local exit -- so it
-; raises a sentinel symbol and %sh-call-fn catches exactly that one, the shape
-; lib/x/type/err.x documents ("re-raise what we don't handle").  atom? guards
-; the symbol->str: reading a structured Err's memory as a symbol name is how
-; the REPL used to print garbage bytes.
+; `return` unwinds to the call site with a non-local exit: it raises a sentinel
+; symbol and %sh-call-fn catches exactly that one, re-raising anything else
+; (lib/x/type/err.x). atom? guards the symbol->str, since a structured Err read
+; as a symbol name would print garbage bytes.
 (def %sh-signal?
   (fn (_ e name) (if (atom? e) (str=? (symbol->str e) name) ())))
 
@@ -3776,10 +3575,10 @@
     (let ((saved %sh-args) (saved-depth %sh-compound-depth))
       (set! %sh-args args)
       (set! %sh-fn-depth (+ %sh-fn-depth 1))
-      ; A BODY IS A FRESH TOP LEVEL.  %collect-fn-body already took the closing
-      ; `}` off, so nothing in these tokens closes anything outside them -- and
-      ; a function called from inside an `if` would otherwise inherit that
-      ; depth and read a bare `echo done` in its body as a terminator.
+      ; A body is a fresh top level: %collect-fn-body has taken the closing `}`
+      ; off, so nothing in these tokens closes anything outside them, and a
+      ; function called from inside an `if` does not read a bare `echo done` in
+      ; its body as a terminator.
       (set! %sh-compound-depth 0)
       (guard (e
           (do
@@ -3795,26 +3594,17 @@
 
 ; --- A compound command's own redirections ----------------------------------
 ;
-; `for i in ...; do ...; done > log` redirects the WHOLE loop, and the
-; redirection is written AFTER the construct it applies to.  A parser that
-; evaluates as it reads meets it too late: by the time `done` is consumed,
-; everything the loop printed has already gone somewhere else.
-;
-; So the construct is SKIPPED first -- read past without being evaluated -- to
-; see what follows it.  Any redirections there are collected, the cursor is
-; wound back, and the construct is then evaluated with its descriptors already
-; in place.  Winding a cursor back is what the loop bodies already do to
-; repeat themselves; nothing new is asked of it here.
-;
-; WHAT THIS REPLACES WAS SILENT.  %eval-list ends its list at any token it does
-; not recognise, and `>` was one -- so `( echo a ) > f` wrote to the terminal
-; and every command after it in the SCRIPT was quietly dropped, with no
-; diagnostic and a zero status.  A missing feature is a nuisance; a missing
-; feature that swallows the rest of the file is a trap.
+; `for i in ...; do ...; done > log` redirects the whole loop, and the
+; redirection is written after the construct it applies to. A parser that
+; evaluates as it reads would meet it too late, so the construct is skipped
+; first -- read past without evaluating -- to see what follows; any
+; redirections there are collected, the cursor wound back, and the construct
+; evaluated with its descriptors in place. Winding a cursor back is what the
+; loop bodies already do.
 ;
 ; The skip counts what the construct is made of, by the same split
-; %eval-compound-body makes: a subshell is punctuation and counts parens,
-; every other compound is words and counts its own keywords.
+; %eval-compound-body makes: a subshell counts parens, every other compound
+; counts its own keywords.
 (def %sh-compound-delta
   (fn (_ tok paren?)
     (if (not paren?)
@@ -3903,20 +3693,18 @@
       (%tok-is-newline? tok)
       (%tok-is-op? tok "|")
       (%tok-is-op? tok ";")
-      ; `;;` ENDS A COMMAND, and it was missing here.  It is a distinct
-      ; token from `;`, so the test above does not catch it, and a stage
-      ; therefore swallowed the clause terminator and everything after it --
-      ; which is why a `case` whose FIRST clause matched ran the remaining
-      ; clauses' patterns as commands the moment a newline followed the `;;`.
+      ; `;;` ends a command and is a distinct token from `;`, so the test above
+      ; does not catch it: a case stage must not swallow the clause terminator
+      ; and the clauses after it.
       (%tok-is-op? tok ";;")
       (%tok-is-op? tok "&")
       (%tok-is-op? tok "&&")
       (%tok-is-op? tok "||")
       (and (%tok-is-word? tok) (%at-stop-word? cur)))))
 
-; A CLOSING PAREN CLOSES ONLY WHEN THERE IS AN OPEN ONE.  `case x in x) ...`
-; ends its pattern with a `)` that opens nothing, so counting every `)` would
-; take the depth negative and cut the stage in the middle of the case.
+; A closing paren closes only when one is open: `case x in x) ...` ends its
+; pattern with a `)` that opens nothing, so counting every `)` would take the
+; depth negative and cut the stage inside the case.
 (def %sh-paren-depth
   (fn (_ d tok)
     (if (%tok-is-op? tok "(")
@@ -3976,25 +3764,19 @@
       ; that %collect-stage would incorrectly split on. Handle directly.
 
       (let ((result
-              ; A DEFINITION IS RECOGNISED HERE, beside the compounds, and for
-              ; the same reason they are: %collect-stages below cuts the token
-              ; run at the first `;` or newline, so a cursor that has been
-              ; through it can never see a function BODY.  Hooked into
-              ; %eval-command instead, `f() { echo hi; }` reached
-              ; %collect-fn-body with only `f ( ) {` in hand and died with
-              ; "unexpected EOF in function body".
+              ; A definition is recognised here, beside the compounds:
+              ; %collect-stages cuts the token run at the first `;` or newline,
+              ; so a cursor through it never sees a function body. Hooked into
+              ; %eval-command instead, `f() { echo hi; }` would reach
+              ; %collect-fn-body with only `f ( ) {` in hand.
               (if (%is-fn-def? cur)
                 (%eval-fn-def cur)
-              ; A COMPOUND IS A STAGE LIKE ANY OTHER, now that %collect-stage
+              ; A compound is a stage like any other, now that %collect-stage
               ; counts nesting: `( echo p ) | tr p P` and
-              ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|` and
-              ; not at the `;` inside them.  This used to evaluate a compound
-              ; HERE, before any stage was collected, so a `|` after one was
-              ; never looked for -- the pipe was left unread, %eval-list ended
-              ; its list at it, and the rest of the script was dropped.
-              ;
-              ; A single stage still reaches %eval-command, whose own compound
-              ; branch applies the construct's redirections.
+              ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|`, not at
+              ; the `;` or `done` inside them. A single stage reaches
+              ; %eval-command, whose compound branch applies the construct's
+              ; redirections.
               (let ((stages (%collect-stages cur ())))
                 (if (null? (rest stages))
                   (let ((cur (%mk-cursor (first stages))))
@@ -4007,26 +3789,13 @@
           result)))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
-; Skip an operand without running it -- what a short-circuit must do with the
-; side it does not take.
-;
-; RECURSIVE DESCENT DOES NOT SKIP TOKENS BY ITSELF, and the old code's comment
-; said it did: "since we use recursive descent, the right side won't be
-; evaluated if we just return".  True of the EVALUATION and false of the
-; CURSOR, which was left sitting on the skipped operand -- so %eval-list found
-; a command where it expected a separator, gave up, and silently discarded the
-; whole rest of the script:
-;
-;   false && echo no; echo after      printed nothing at all
-;   true  || echo no; echo after      printed nothing at all
-;
-; Pre-existing since 2024, and invisible for as long as nothing followed the
-; short-circuit on the same line.
-; An operand ends at a list separator OR at the next connective -- skipping
-; through `||` swallowed the alternative, so `false && a || b` ran nothing.
-; `|` is NOT here: the operand of `&&` is a PIPELINE, so the skip has to cross
-; pipes.  Stopping at one left `grep a` behind in `false && echo a | grep a`
-; and abandoned the rest of the list all over again.
+; Skip an operand without running it -- what a short-circuit does with the side
+; it does not take. Recursive descent skips the evaluation, not the cursor, so
+; the cursor is advanced past the operand explicitly; leaving it on the operand
+; would make %eval-list find a command where it expects a separator.
+; An operand ends at a list separator or the next connective, and the skip
+; crosses pipes, because the operand of `&&` is a pipeline: stopping at a `|`
+; would leave `grep a` behind in `false && echo a | grep a`.
 (def %sh-operand-end-ops (list ";" "&" "&&" "||"))
 
 (def %sh-operand-end?
@@ -4053,11 +3822,10 @@
           ()
           (do
             (%cursor-advance! cur)
-            ; PARENS COUNT TOO, and only here: %sh-nest-delta is the keyword
-            ; nesting the compound skippers share, and a subshell's `(` is
-            ; punctuation rather than a keyword.  Without it the skip stopped
-            ; on the `)` of `false && (echo a)` -- %at-stop-word? treats one as
-            ; a terminator -- and abandoned the list again.
+            ; Parens count too, and only here: %sh-nest-delta is the keyword
+            ; nesting the skippers share, and a subshell's `(` is punctuation,
+            ; not a keyword. Without it the skip stopped on the `)` of
+            ; `false && (echo a)` and abandoned the list.
             (let ((d (+ depth
                         (+ (%sh-nest-delta tok) (%sh-paren-delta tok)))))
               (self cur (if (< d 0) 0 d)))))))))
@@ -4307,15 +4075,12 @@
 
 ; --- Public API ---
 
-; EXTRACTION HAPPENS ONCE, at the top.  A command substitution evaluates a
-; FRAGMENT of text whose here-documents the outer pass already lifted -- the
-; fragment still carries the `<<N` markers, and running the pass again over it
-; would find `N` as a delimiter, consume no body (there is none left), and
-; overwrite %sh-heredocs with the result.  `X=$(cat <<EOF ... )` came back
-; empty for exactly that.
-;
-; So the substitution path evaluates already-extracted text.  Reading a FILE
-; (`.` / source) is fresh text and goes through the full entry.
+; Extraction happens once, at the top. A command substitution evaluates a
+; fragment whose here-documents the outer pass already lifted; the fragment
+; still carries the `<<N` markers, and running the pass again would find `N`,
+; consume no body, and overwrite %sh-heredocs. So the substitution path
+; evaluates already-extracted text; reading a file (`.` / source) is fresh and
+; goes through the full entry.
 (def sh-eval-extracted
   (fn (_ input)
     (let ((tokens (sh-tokenize input)))

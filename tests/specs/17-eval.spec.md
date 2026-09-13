@@ -5,8 +5,6 @@ in THIS shell -- an assignment sticks, and `eval "exit 3"` exits.  The words
 have already been expanded once by the time they arrive, so evaluating them
 is a second pass, which is the whole point of the builtin.
 
-Each expectation was taken from `/bin/sh` first.
-
 ### it reads its argument as shell input
 
 ```sh

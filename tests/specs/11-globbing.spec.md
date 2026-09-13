@@ -116,9 +116,8 @@
 
 ### a two-level pattern walks down
 
-Globbing a large directory is expensive enough to matter to the suite -- see
-the SPEC_BATCH note in tests/spec-runner.sh -- so exactly one case listens to a
-big one, and the rest match against `/`.
+Globbing a large directory is expensive, so exactly one case matches a big one
+and the rest match against `/`.
 
 ```sh
 (write (%sh-glob-text "/dev/nul?"))
@@ -202,12 +201,9 @@ big one, and the rest match against `/`.
 
 ## sh-eval a backslash in a VALUE is not an escape
 
-A backslash the shell reads in the source escapes what follows it.  A
-backslash that arrives inside a variable's value does not: it is an ordinary
-character, and it survives to the output.  The expander used to lose it,
-because the finished field was scanned for escapes to strip and could not tell
-one it had written from one that came out of a value.  All four checked
-against `/bin/sh`.
+A backslash the shell reads in the source escapes what follows it. A backslash
+that arrives inside a variable's value does not: it is an ordinary character and
+survives to the output. All four are checked against `/bin/sh`.
 
 ### an unquoted expansion keeps a literal backslash
 

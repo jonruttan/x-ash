@@ -273,9 +273,9 @@ what these are about.
 
 ## sh-eval reserved words as arguments
 
-A reserved word is only reserved as the FIRST word of a command, and a closer
-only closes when a construct is open — `echo done` at the top level used to
-print a blank line AND silently discard the rest of the script.
+A reserved word is only reserved as the first word of a command, and a closer
+only closes when a construct is open, so `echo done` at the top level prints
+`done`.
 
 ### done is an ordinary argument at the top level
 
@@ -319,9 +319,8 @@ print a blank line AND silently discard the rest of the script.
 
 ## sh-eval if without an else
 
-An else-less `if` whose condition was FALSE had never parsed on any version of
-this bundle: the skip consumed the `fi` that %eval-elif-chain then needed to
-see, and every one of these was "parse error: expected elif, else, or fi".
+An else-less `if` whose condition is false must still parse: the skip of the
+then-branch stops on the `fi` rather than consuming it.
 
 ### a false condition with no else runs nothing and continues
 
@@ -381,11 +380,8 @@ see, and every one of these was "parse error: expected elif, else, or fi".
 
 ## sh-eval skipping a branch that contains a compound
 
-The five skip walks each carried their own copy of the opener and closer word
-lists, and they had drifted: %skip-to-fi's openers were missing `until` and
-`case` and its closers were missing `esac`. So a compound inside a branch the
-parser SKIPS put the nesting count out by one. The first case below was
-"parse error: unexpected EOF in if" until the lists became one.
+A compound inside a skipped branch must keep the parser's nesting count
+balanced; these check an `until` loop and a `case` inside a skipped `if`.
 
 ### an until loop in a skipped else branch
 
@@ -437,9 +433,8 @@ parser SKIPS put the nesting count out by one. The first case below was
 
 ## sh-eval the [ spelling of test
 
-`[` has called an undefined `last` since 2024 — every `[ ... ]` answered
-"Unbound SYMBOL 'last'". No spec reached it: the suite tested `test` and never
-the bracket spelling of the same builtin.
+`[` is the bracket spelling of `test`; these check it as well as the `test`
+spelling.
 
 ### [ compares strings
 

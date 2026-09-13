@@ -1,9 +1,9 @@
-; bitwise.xon -- what this project's owl wears.
+; bitwise.xon -- x-ash's costume for Bitwise the owl.
 ;
-; Bitwise is the ASCII owl in every x source header; x-lang's apps/bitwise
-; draws it for a named project, and THIS file is this project's own say in
-; how it looks.  The generator reads it during discovery; drop the file and
-; the owl goes plain.  Fields, all optional:
+; Bitwise is the ASCII owl in x source headers; x-lang's apps/bitwise draws it
+; for a named project, and this file is x-ash's costume for it. The generator
+; reads it during discovery; without it the owl goes plain. Fields, all
+; optional:
 ;
 ;   (mascot "LABEL")          shown on the gallery card and in the readout
 ;   (logo "COLOUR NAME")      printed where the hashed hue would be

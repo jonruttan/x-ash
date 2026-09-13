@@ -3,29 +3,9 @@
 # One "UNIT: TEST" per line, matching the runner's own `FAIL:` lines verbatim.
 # Blank lines and #-comments are ignored.
 #
-# BY NAME, NOT BY COUNT.  A budget of "2 failures" is satisfied by fixing one
-# and breaking another, which is the exact event a ratchet exists to catch.
-# Names catch it; a number cannot.
+# Listed by name, not by count: a budget of N failures is satisfied by fixing
+# one and breaking another, which names catch and a number cannot.
 #
-# THE LIST MAY ONLY SHRINK.  tests/spec-gate.sh is red when a failure appears
-# that is not here, AND when a line here starts passing.
-#
-# WHY IT IS EMPTY
-#
-# It was not.  Two entries stood here -- the single- and double-quoted string
-# readers -- described as "in how the tokenizer drives a state that scores
-# nothing on entry", wanting "someone reading the C token loop".  The C token
-# loop was innocent.
-#
-# Both readers accumulated their value character by character in the analyse
-# callback and converted the list to a string there, and list->string is
-# (%cvt l %string): %cvt inside a reader callback answers NIL, silently.  ''
-# passed only because the conversion short-circuits on the empty list and never
-# ran.  The readers now take the consumed run from buffer-token in the READ
-# handler -- where allocating is safe, and which is what the word reader beside
-# them has always done.
-#
-# So the list is empty, and the rule that keeps it honest is unchanged: this
-# file may only SHRINK.  tests/spec-gate.sh is red when a failure appears that
-# is not here, AND when a line here starts passing.  An empty list means every
-# spec passes and any new failure is a regression.
+# The list may only shrink. tests/spec-gate.sh is red when a failure appears
+# that is not here, and when a line here starts passing. An empty list means
+# every spec passes and any new failure is a regression.

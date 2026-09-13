@@ -1,6 +1,6 @@
 ; # x-ash -- a POSIX shell on x-lang
 ;
-; ## run.x -- THE entry
+; ## run.x -- the entry point
 ;
 ; @description A POSIX-ish shell: its own tokenizer on its own base,
 ;   expansion, redirection, pipelines, control structures.
@@ -12,16 +12,10 @@
 ;   x -l ash              interactive
 ;   x -l ash -f script.sh batch
 ;
-; THIS FILE KNOWS NO PATHS, and that is the whole point of the arrangement.
-; x.sh boots the dialect lang.xon declares, arms this bundle's root with
-; import-path!, cats this file, and appends the launcher when no -f was given.
-; So by the time anything below runs, the platform is up and `import` resolves
-; against the bundle wherever it happens to sit.
-;
-; It used to do all of that itself: include "lib/x-core.x" to self-boot, probe
-; a list of candidate directories to guess its own location, and end with its
-; own %batch?-guarded launcher.  Every line of that was a workaround for `-l`
-; not knowing about bundles.  It does now.
+; This file contains no path literals and no boot code. x.sh boots the dialect
+; lang.xon declares, arms this bundle's root with import-path!, cats this file,
+; and appends the launcher when no -f was given, so `import` below resolves
+; against the bundle wherever it sits.
 (import ash/base)
 (import ash/repl)
 
@@ -46,18 +40,15 @@
 (set! repl %ash-repl)
 
 ; Batch (-f): stdin holds a shell script, not a session, and %ash-repl's fd-3
-; swap would discard it unread.  %batch? comes from the seam and means "a file
-; was supplied".  This line is LAST and nothing structural may follow it --
+; swap would discard it unread. %batch? comes from the seam and means "a file
+; was supplied". This line is last and nothing structural may follow it --
 ; neither branch returns.
-; NOT WHILE THIS BUNDLE IS BEING IMAGED.  The image writer loads this entry in
-; a child base to capture the booted lang, and there %batch? is true and the
-; child's stdin is the writer's own script -- %ash-batch would read that
-; script as a shell program and then (Sys exit) out of the writer, which is
-; exactly what "ended the writer while loading" meant.  The writer binds
-; %image-writing in the child before it loads this, and takes it back before
-; it walks the heap, so an image never carries a true one.  Through a guard
-; because the name is bound in the child ALONE and there is no bound?
-; predicate to ask with; a real boot raises Unbound and answers #f.
+;
+; Not while this bundle is being imaged: the image writer loads this entry in a
+; child to capture the booted lang, where %batch? is true and the child's stdin
+; is the writer's own script, which %ash-batch would run and (Sys exit) out of
+; the writer. %image-writing is bound in that child alone; a real boot raises
+; Unbound and answers #f, so the guard chooses the session.
 (if (guard (_ #f) %image-writing)
   ()
   (if %batch?
