@@ -2,8 +2,9 @@
 
 <p align="center"><img src="docs/bitwise-banner.svg" alt="x-ash, with Bitwise the owl" width="100%"></p>
 
-A shell on [x-lang](https://github.com/jonruttan/x-lang): its own tokenizer on its own base, word
-expansion, redirection, pipelines, and the control structures.
+A shell on [x-lang](https://github.com/jonruttan/x-lang): its own tokenizer on
+its own base, word expansion, redirection, pipelines, and the control
+structures.
 
 ```
 $ x -l ash
@@ -31,7 +32,7 @@ double quotes. Trailing newlines come off, as POSIX asks.
 
 Arithmetic expansion: `$((...))` — integers, `+ - * / %` (division truncates
 toward zero), comparisons, `&&` / `||` / `!`, parentheses, and bare names read
-as their values (unset or non-numeric is zero). So a counting loop works:
+as their values (unset or non-numeric is zero). A counting loop is
 `i=$((i+1))`.
 
 Parameter expansion: `${X:-default}`, `${X:=assign}`, `${X:?message}`,
@@ -46,10 +47,11 @@ unquoted expansion of nothing produces *no* argument; `""` produces an empty
 one. `for f in $(cat list)` iterates once per line.
 
 Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
-`until`, `for`, `case`, `!` negation, and `( ... )` subshells.
+`until`, `for`, `case`, `!` negation, `( ... )` subshells and `{ ...; }`
+groups.
 
-`case` patterns are real globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\`
-to escape any of them.
+`case` patterns are globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\` to
+escape any of them.
 
 Pathname expansion: an unquoted `*`, `?` or `[...]` in a word is matched
 against the filesystem, and the word becomes the sorted list of what it
@@ -68,16 +70,18 @@ order.
 
 Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
-does not leave the shell writing to `log`.
+does not leave the shell writing to `log`. A redirection written after a
+compound (`for ...; done > log`) applies to the whole construct. `exec` with
+redirections and no command applies them to the shell itself.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `set`,
-`test` / `[`, `.` / `source`, `return`, `shift`, `exit`, `true`, `false`, `:`.
+`test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `trap` (EXIT only),
+`return`, `shift`, `exit`, `true`, `false`, `:`.
 
 `set -- a b c` replaces the positional parameters; `set -e` exits on a failed
 command, `-u` makes an unset parameter an error, `-x` traces to stderr, and
-`set +e` (etc.) turns each back off. `-e` is correctly suppressed where a
-failure is the point — a condition, `!`, and any operand of an AND-OR list but
-the last.
+`set +e` (etc.) turns each back off. `-e` is suppressed where a failure is the
+point — a condition, `!`, and any operand of an AND-OR list but the last.
 
 `IFS` is honoured: whitespace runs collapse to one delimiter, a non-whitespace
 delimiter keeps empty fields (`IFS=:` over `a::b` is three), and an empty `IFS`
@@ -87,70 +91,34 @@ suppresses splitting entirely.
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-**Not there yet**, and worth knowing before you reach for them: `{ ...; }`
-grouping, `trap`, `local`, `command`, and job control.
+Not implemented: `local`, `command`, signal traps, and job control.
 
-One thing worth knowing about subshells: `( ... )` forks, and the interpreter
-has no flush primitive, so a child's buffered output can be lost if the parent
-exits first. In practice it prints correctly to a terminal and through a pipe;
-the spec suite asserts subshell *status* rather than subshell stdout for this
-reason.
+Subshells: `( ... )` forks, and the interpreter has no flush primitive, so a
+child's buffered output can be lost if the parent exits first. It prints
+correctly to a terminal and through a pipe; the spec suite asserts subshell
+*status* rather than subshell stdout for this reason.
 
 At the prompt, an entry that is not finished continues on a `> ` line — an
 unclosed quote, a trailing `|` or `&&` or backslash, an `if`/`for`/`while`/
 `until`/`case` whose closer has not been typed yet, or a function body whose
 `}` is still to come.
 
-x-ash is a **lang**: a different surface language loaded over an x-lang
-dialect. Where x-lang and ash spell something the same way, ash is free to mean
-something different by it — `;` separates commands here rather than starting a
-comment, and `#` starts one rather than dispatching. It is the only one of the
-five that is not a Lisp, and the only one that brings its own tokenizer base.
-The terms are in x-lang's
+x-ash is a **lang**: a surface syntax loaded over an x-lang dialect, so a
+spelling shared with x-lang can mean something different here — `;` separates
+commands rather than starting a comment, and `#` starts one rather than
+dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 [lang contract](https://github.com/jonruttan/x-lang/blob/main/docs/lang-contract.md).
 
 ## Status
 
-**363 of 363 specs green** against x-lang **v0.10.0**, with nothing recorded in
-the contract.
-
-That row is a *pairing* — what this bundle was last built and tested against —
-but the floor beneath it is a hard requirement, unusually for this bundle:
-x-lang v0.7.1 is the first release pinning an x-engine-c in which an isolated
-tokenizer base works at all
-([#528](https://github.com/jonruttan/x-lang/issues/528)). On anything earlier
-this bundle is not merely failing, it is dead at load. `lang.xon` carries that
-reasoning beside the row.
-
-Last of the five 2024-era langs to come back, the largest, and the only
-one that is not a Lisp. It is also the only one that was blocked on an engine
-bug rather than on drift — see below.
-
-**The session was the thing that did not work.** Until recently `x -l ash` came
-up with a shell's banner and a `$ ` prompt and x's *reader* underneath it:
-
-```
-$ ls
-Error: Unbound SYMBOL 'ls'
-```
-
-The entry set `%repl-prompt` and `%repl-print` and stopped there, and the
-platform loop customizes prompt and print only — its read is the ambient sexp
-reader. A lang whose unit is not an s-expression has to replace the loop, which
-[`ash/repl.x`](ash/repl.x) now does. Nothing in the suite caught it because
-every spec called `sh-eval` directly; none of them ever started a session.
-
-The two quoted-string failures this section used to record are fixed, and the
-diagnosis they carried was wrong: the C token loop was innocent. Both readers
-built their value in the *analyse* callback and converted it with `%cvt`, which
-answers nil there — silently. `''` passed only because the conversion
-short-circuits on the empty list. They take the consumed run from
-`buffer-token` in the read handler now, which is what the word reader beside
-them always did.
+513 specs, all green against x-lang **v0.13.0**, the release `lang.xon`
+declares. x-lang v0.7.1 or later is required: it is the first release pinning
+an engine in which an isolated tokenizer base works, and this shell does not
+run without one.
 
 ## Install
 
-Nothing cloned, from any directory:
+From any directory, nothing cloned:
 
 ```bash
 x --install-lang https://github.com/jonruttan/x-ash/releases/latest/download/lang.pin.xon
@@ -158,10 +126,10 @@ x -l ash
 ```
 
 x fetches the published pin, then the tarball it names, verifies the digest,
-and installs to `<share>/langs/ash` — where `x -l` looks. A failed upgrade
+and installs to `<share>/langs/ash`, where `x -l` looks. A failed upgrade
 leaves the working install untouched.
 
-From a clone, if you have one:
+From a clone:
 
 ```bash
 make install                      # into the x on your PATH
@@ -169,24 +137,19 @@ PREFIX=$HOME/.local make install  # or a particular prefix
 ```
 
 `make uninstall` removes it either way. An installed x searches
-`<share>/langs/*/lang.xon`, so a lang is installed when its files are there —
-no registry, no database.
+`<share>/langs/*/lang.xon`; a lang is installed when its files are there.
+There is no registry.
 
-**Installing writes a boot image.** `make install` ends with `x --image -l ash`,
-which saves the booted shell to `.images/` beside the bundle; `x -l ash` loads
-that instead of re-reading the sources — 0.9s against 3.5s here — for as long
-as the image's key still matches the library and the engine. Three things in
-this bundle belong to the running process rather than to the heap, and are
-remade after an image loads: the tokenizer base, which `(Base make-tok)` puts
-on a chain of its own, and `$$`, which would otherwise report the pid of the
-process that wrote the image. The entry stands aside entirely while an image
-is being written, since `%ash-batch` would read the writer's own script as a
-shell program and exit out of it. `x --no-image -l ash` boots from source.
+`make install` ends with `x --image -l ash`, which saves the booted shell to
+`.images/` beside the bundle; `x -l ash` then loads that instead of re-reading
+the sources (about 0.9s against 3.5s) for as long as the image's key matches
+the library and the engine. The tokenizer base and `$$` belong to the running
+process rather than the heap and are remade after an image loads.
+`x --no-image -l ash` boots from source.
 
-**One trap, and it is the one you will hit.** `x` decides where to look for
-langs from the directory you run it *in*. Inside an **x-lang checkout** it
-searches `deps/langs/` and an installed lang is invisible, however correctly it
-was installed:
+`x` resolves langs relative to the directory it runs in. Inside an x-lang
+checkout it searches `deps/langs/` only, so an installed lang is not found
+there:
 
 ```
 $ cd path/to/x-lang && x -l ash
@@ -195,57 +158,44 @@ Error: no library, app or lang named 'ash'
       and deps/langs/*/lang.xon
 ```
 
-Run it from anywhere else, or name the bundles explicitly — `X_LANG_DIR` wins
-in both modes:
+Run `x` from another directory, or set `X_LANG_DIR`, which takes precedence in
+both cases:
 
 ```bash
 X_LANG_DIR=$HOME/.local/share/x/langs/ x -l ash   # the installed one
 X_LANG_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
 ```
 
+The dialect is helium: what the shell needs from the platform is `x/sys/posix`
+and `x/sys/file`, imported by name in `ash/prims.x`, and nothing in the larger
+dialects.
 
-**This bundle needs helium plus two modules**, and `lang.xon` says so as a
-requirement rather than a preference. It used to ask for radon on the grounds
-that ash forks, execs, dup2s and opens files — which does not follow: radon is
-a *set of libraries*, not a capability tier, and what ash needs from it is
-`x/sys/posix` and `x/sys/file`, imported by name in `ash/prims.x`. Everything
-else radon boots — the numeric tower, bigint, rational, complex, decimal,
-regex, the compile pipeline — was cost paid on every invocation and never
-touched. A shell has no use for a rational.
+## Pin it for a project
 
-Measured on one machine, `x -l ash` start to prompt: **radon 10–18s, helium
-3.0–3.8s** (five and six samples; this box is noisy enough that the spread is
-worth quoting rather than a single number). The first measurement of the pair,
-on a quieter machine, was 20.7s against 2.7s.
-
-## Pin it instead, for a project
-
-An install is unversioned and machine-wide. When it matters *which* version a
-project builds against, pin it: `Pin bundle` fetches the release tarball and
+An install is unversioned and machine-wide. When a project must build against
+a specific version, pin it: `Pin bundle` fetches the release tarball and
 verifies it against a digest before unpacking. In the project's
 `lang.pin.xon`:
 
 ```x
 (lang "ash")
-(release "v0.1.2")
-(bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.2/x-ash-v0.1.2.tar.gz")
+(release "v0.1.4")
+(bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.4/x-ash-v0.1.4.tar.gz")
 (source "https://github.com/jonruttan/x-ash.git")
 ```
 
-Each release publishes its own digest, and the release notes carry this block
-ready to paste. Then:
+Each release's notes carry this block with its digest, ready to paste. Then:
 
 ```x-repl
 > (import x/tool/pin)
 > (Pin bundle "deps/langs")
-"deps/langs/ash-v0.1.2"
+"deps/langs/ash-v0.1.4"
 ```
 
-`deps/langs/` is where `x -l` looks in a checkout. `X_LANG_DIR` overrides it.
+`deps/langs/` is where `x -l` looks in a checkout; `X_LANG_DIR` overrides it.
 
-**Which to use.** Install when you just want `x -l ash` to work. Pin when a
-build depends on it — the digest is what makes the version reproducible, and
-an install has none.
+Install when you just want `x -l ash` to work. Pin when a build depends on it:
+the digest is what makes the version reproducible.
 
 ## Running it
 
@@ -255,128 +205,65 @@ x -l ash -f script.sh   # batch
 ```
 
 x-lang boots the dialect `lang.xon` declares, arms this bundle's module root,
-and loads `run.x` on top — which is why nothing here needs to know a path.
+and loads `run.x` on top.
 
 ## Development
 
-Run the specs against any x-lang checkout or install:
+Run the specs against an x-lang checkout or install:
 
 ```bash
-X=/path/to/x-lang/x.sh make test    # the suite -- every failure is loud
+X=/path/to/x-lang/x.sh make test    # the suite
 X=/path/to/x-lang/x.sh make check   # the suite against the contract, which CI gates on
 make bundle                         # roll a release tarball and print its pin
 ```
 
-**Pass `X` explicitly.** Without it the suite takes the `x` on your PATH, and a
-stale install reports failures the platform has already fixed — or, worse here,
-a locally built `x-bin` that predates the engine the release pins. `x.sh
---engine-path` prefers the local build, and that is how this bundle once
-reported 80 of 82 red on a platform where it passes.
+Pass `X` explicitly: without it the suite takes the `x` on your PATH, and an
+installed x that trails the checkout — or a locally built `x-bin` older than
+the engine the release pins, which `x.sh --engine-path` prefers — reports
+failures the platform has already fixed.
 
-**Do not `make install` into an x-lang checkout.** The Makefile asks
+Do not `make install` into an x-lang checkout. The Makefile asks
 `$(X) --share-dir` where to put the bundle, and a checkout answers with its own
-root — so the files land in `<checkout>/langs/NAME`, which is not one of the
-three paths `-l` searches there. It reports success and the lang stays
-invisible. Install into a real `<share>` tree, or use `X_LANG_DIR`.
-
+root, so the files land in `<checkout>/langs/ash`, which `-l` does not search
+there. The install reports success and the lang is still not found. Install
+into a real `<share>` tree, or use `X_LANG_DIR`.
 
 Known failures are recorded by name in
-[`tests/contract/known-failures.txt`](tests/contract/known-failures.txt), and
-`make check` gates on that list rather than on a count — red when a new failure
-appears *and* red when a recorded one starts passing. Documented debt can ship;
-a regression cannot, and a fixed test cannot stay quietly excused. The list is
-currently empty, so any failure at all is a regression.
+[`tests/contract/known-failures.txt`](tests/contract/known-failures.txt).
+`make check` is red when a failure appears that is not listed and when a
+listed one starts passing, so the list can only shrink. It is currently empty:
+any failure is a regression.
 
 The release tarball is byte-reproducible: it is built from the tag with
-`git archive` and a timestamp-free gzip, so two people rolling one tag get one
+`git archive` and a timestamp-free gzip, so the same tag always yields the same
 digest. Pushing a `v*` tag runs the suite and, only if it is green, publishes
 the tarball, its `.sha256` and `lang.pin.xon` as a GitHub release. CI runs the
-declared release *and* x-lang `main`, so a platform that moves underneath this
-bundle shows up as a red build rather than a surprise later.
+declared release and x-lang `main`, so a platform change that breaks this
+bundle shows up as a red build.
 
 ## Layout
 
 ```
-lang.xon          name, dialect, release pairing
-run.x             THE entry -- and it knows no paths at all
+lang.xon          name, dialect, and the x-lang release this pairs with
+run.x             the entry point
 ash/prims.x       the platform layer, under the names ash was written against
 ash/tokens.x      shell token types, on an isolated tokenizer base
 ash/eval.x        parser and evaluator in one pass
-ash/printer.x     a shell shows what the command printed
-ash/repl.x        the $ prompt and the -f batch reader -- THE loop
+ash/printer.x     Scheme-style `write` for token lists
+ash/repl.x        the $ prompt and the -f batch reader
 ```
-
-`lib/parser.x` from the 2024 tree is not here. `eval.x`'s own header says it
-"replaces parser.x + old eval.x", and nothing loaded parser.x then either;
-carrying 389 lines of superseded recursive descent into a new bundle would be
-carrying a fossil.
-
-## The architecture survived; the engine had not
-
-ash tokenizes shell syntax on a **separate base with its own type alist**, so
-`;` can be a separator rather than a comment and `#` a comment rather than a
-dispatch character. In 2024 that needed `make-token-base` and
-`base-make-type`, and the obvious reading of their disappearance is that the
-platform stopped supporting isolated tokenizer bases.
-
-It did not. They are `(Base make-tok)` and `(Base make-type)`, and `make-tok`
-documents itself as being "for custom tokenizer type registration on an
-isolated base" — so the single most unusual thing in this bundle is still
-first-class.
-
-It also segfaulted on the first character of any input. `x_prim_make_token_base`
-assigned to `x_eval_field_true(p_new)` where `x-eval-layout.h` marks that field
-a *cell* and `x_eval_make`'s own parented path writes through it, so each cell
-was replaced by the singleton it should have contained; and it never created a
-read buffer, which `make_base` does. Fixed in the engine
-([#528](https://github.com/jonruttan/x-lang/issues/528)), which took this bundle
-from dead at load to 80/82.
-
-**It presented as radon-only**, which sent me the wrong way for a while. It is
-not the dialect — it is collection pressure. radon simply allocates more at
-boot, so a collect lands in the wrong place without anyone asking for one. Force
-one under xenon and the shipped engine fails identically.
-
-## What porting it cost
-
-`ash/prims.x` is the whole of it. Everything the shell needs from the platform
-moved onto classes since 2024, and none of it moved far: `sh-fork`, `sh-dup2`,
-`sh-open-read` and the rest are one-line forwards to `Sys`, which carries every
-one under a name a shell would recognise.
-
-**Every `fn` needed a receiver.** 102 of them across `tokens.x` and `eval.x` —
-x's `fn` takes an explicit `_`, so each was binding its first real parameter to
-the receiver. Mechanical, and the same defect as `(def lambda fn)` in x-r5rs.
-
-**Three bugs were mine, and they rhyme.** Each was a convenient spelling that
-allocates inside a reader callback — where `lib/x/reader/analyser.x` says
-outright that class dispatch is "hazardous mid-reader-callback":
-
-- `char->integer` as `(convert c %int)` goes through the *dispatcher*, and
-  `%sh-word-break?` calls it six times **per character**. Registering SH-WORD
-  was enough to kill `(sh-tokenize " ")`. The cached
-  `(prim-ref (lit char) (lit ->int))` is the spelling analyser.x itself holds.
-- `(prim-ref (lit char) (lit from-int))` **does not exist** — conversions are
-  keyed on the *source* type, so it is `(int ->char)`. `prim-ref` answers nil
-  for a missing member, which reached the reader as a garbage integer rather
-  than an error.
-- `reverse` as `(List reverse …)` is a class dispatch, called at a closing
-  quote. `''` tokenized fine; `'a'` silently produced an empty accumulator.
-
-The middle one is the one to watch: a `prim-ref` miss is indistinguishable from
-a legitimate nil until it surfaces somewhere far away.
 
 ## Background
 
-The language here is POSIX's Shell Command Language: the Bourne shell's syntax
-— V7 Unix, 1979 — as the standard later pinned it down. It is an odd and
-underrated language: words rather than values, expansion rather than
-evaluation, and a grammar in which `;` and newline are the sequencing
-operators, which is exactly why this bundle needs its own tokenizer base.
+The language is POSIX's Shell Command Language: the Bourne shell's syntax
+(V7 Unix, 1979) as the standard later pinned it down — words rather than
+values, expansion rather than evaluation, and a grammar in which `;` and
+newline are the sequencing operators, which is why this bundle needs its own
+tokenizer base.
 
 It shares its name with the small-shell lineage begun by Kenneth Almquist's
 `ash` (1989), which lives on as Debian's `dash` and BusyBox's `sh` — shells
-that implement the standard and stop, which is this bundle's ambition too.
+that implement the standard and stop, which is this bundle's scope too.
 
 - [Shell Command Language](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html) — POSIX.1-2017, the language being implemented
 - [Ash variants](https://www.in-ulm.de/~mascheck/various/ash/) — Sven Mascheck's history of the lineage

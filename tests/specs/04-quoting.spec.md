@@ -158,15 +158,11 @@
 
 ## sh-eval subshells
 
-A subshell FORKS, and the awk harness cannot see the child's stdout: the child
+A subshell forks, and the awk harness cannot see the child's stdout: the child
 writes into its inherited copy of the interpreter's output buffer, and there is
-no flush primitive to force it out before `Sys exit`.  Run directly, `( echo
-inner ); echo after` prints `inner` then `after` exactly once, to a terminal
-and through a pipe alike -- but only the first case below is observable from
-here.  So the leak that %collect-subshell-tokens fixes (the child used to run
-every command AFTER the subshell as well, because %eval-list does not stop at
-`)`) is asserted through the parent-side facts the harness CAN see: the status,
-and that the parser lands past the closing paren.
+no flush primitive to force it out before `Sys exit`. So these cases assert the
+parent-side facts the harness can see -- the status, and that the parser lands
+past the closing paren.
 
 ### a subshell runs its body
 

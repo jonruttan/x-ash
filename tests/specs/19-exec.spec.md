@@ -10,8 +10,6 @@ log, so exec is the one builtin whose redirections are NOT put back when it
 returns.  The cases below run it in a subshell, because a spec that redirected
 the harness's own output would take the suite with it.
 
-Each expectation was taken from `/bin/sh` first.
-
 ### it replaces the shell, so nothing after it runs
 
 ```sh

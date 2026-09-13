@@ -1,8 +1,9 @@
 ## sh-eval a backslash protects a word delimiter
 
-Outside quotes a backslash protects the character after it, and that includes
-the characters that would otherwise END the word.  The bare-word scanner did
-not know about backslashes at all, so
+Outside quotes a backslash protects the character after it, including the
+characters that would otherwise end the word, so `a\ b` is one word. Checked
+against `/bin/sh` with `printf` rather than `echo`, since dash's `echo`
+interprets escapes of its own.
 
     echo a\ b
 
@@ -12,10 +13,6 @@ character for it to protect, and fell through to a run of length zero: the
 walk recursed on the same index forever and allocated until the process was
 killed.  It was a HANG, not a wrong answer, which is why it is worth its own
 change.
-
-Each expectation was taken from `/bin/sh` first, using `printf` rather than
-`echo` wherever a backslash reaches the output -- dash's `echo` interprets
-escape sequences of its own, so `echo a\\b` is not a test of the shell.
 
 ### an escaped space is part of the word
 

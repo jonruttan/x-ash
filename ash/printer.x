@@ -17,11 +17,9 @@
 
 (provide ash/printer %ash-repl-print %ash-write)
 
-; THAT SAID, ash STILL NEEDS ITS OWN `write`, for the same reason the other
-; four bundles do: x's is round-trippable, so a token list renders as
-; (('tok-word "a")) rather than ((tok-word "a")).  The specs assert the second,
-; and a shell that shows you quote marks around its own token tags is not
-; showing you a shell.  Fourth bundle, same twenty lines -- x-lang#518.
+; ash needs its own `write`: x's is round-trippable, so a token list renders as
+; (('tok-word "a")) where the specs assert ((tok-word "a")). Only the rendering
+; of a token differs; everything else delegates to x's writer.
 (def %ash-write ())
 (def %x-write write)
 (def %ash-write-items

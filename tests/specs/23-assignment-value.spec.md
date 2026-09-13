@@ -1,7 +1,9 @@
 ## sh-eval an assignment's value is not split or globbed
 
 POSIX: the word of a variable assignment "shall be expanded ... without field
-splitting or pathname expansion".  ash split it, so
+splitting or pathname expansion". So `v=$(echo a b)` is one field and
+`v=$(date)` under a path with a space stays one word. The last case is the
+guard: an ordinary word still splits.
 
     v=$(echo a b)
 
@@ -12,8 +14,6 @@ The flag saying a word is an assignment already existed, for tilde expansion.
 It is tightened here from "still in the leading run" to "this word IS an
 assignment", which is what both rules actually want.  The last case is the
 guard on that tightening: an ordinary word still splits.
-
-Each expectation was taken from `/bin/sh` first.
 
 ### a command substitution is one value, not its first word
 

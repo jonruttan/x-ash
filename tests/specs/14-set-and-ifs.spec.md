@@ -206,10 +206,8 @@ these would end the shell if it did.
 
 ## sh-eval short-circuit consumes the operand it skips
 
-Recursive descent skips the EVALUATION, not the tokens. The cursor was left on
-the skipped operand, so %eval-list found a command where it expected a
-separator, gave up, and silently discarded the rest of the script. Pre-existing
-since 2024 and invisible whenever nothing followed on the same line.
+A short-circuited operand is skipped, not evaluated, and the cursor is advanced
+past it so `%eval-list` finds the separator that follows rather than a command.
 
 ### a skipped && operand does not eat what follows
 
@@ -293,10 +291,9 @@ since 2024 and invisible whenever nothing followed on the same line.
 
 ## sh-eval "$@" forwards the parameters as parameters
 
-`"$@"` is the idiom every wrapper rests on: it has to hand three arguments on
-as three, with the spaces inside any of them intact.  It used to answer the
-same joined string as `$*`, which turned `wrapper "$@"` into one argument.
-Each expectation below was taken from `/bin/sh` before it was written here.
+`"$@"` forwards each positional parameter as its own argument, with the spaces
+inside any of them intact, where `$*` joins them into one. `wrapper "$@"` is the
+idiom that depends on it.
 
 ### each parameter arrives as its own field, spaces intact
 
@@ -384,8 +381,8 @@ shell, and the IFS section above leaves it at `:`.
 ## sh-eval "$*" joins on IFS
 
 `$*` puts the first character of IFS between the parameters -- not a space,
-which is only what the default IFS starts with.  An empty IFS puts nothing
-between them at all.  Each expectation was taken from `/bin/sh`.
+which is only what the default IFS starts with. An empty IFS puts nothing
+between them.
 
 ### the first character of IFS separates them
 

@@ -13,8 +13,7 @@ argument, because `-abc` is three options in one word.  The offset is private,
 and is reset whenever OPTIND is not what this builtin last wrote -- which is
 how a script's `OPTIND=1` is noticed.
 
-Every case runs in a subshell so OPTIND cannot leak between them, and every
-expectation was taken from `/bin/sh` first.
+Every case runs in a subshell so OPTIND cannot leak between them.
 
 ### it reads options in turn, and reports where the arguments start
 

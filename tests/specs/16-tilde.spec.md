@@ -1,13 +1,11 @@
 ## sh-eval tilde expansion
 
-`~` stands for HOME at the start of a word, and -- in an assignment word only
--- after its `=` and after any `:` beyond that, which is what makes
-`PATH=~/bin:~/lib` work.  Anywhere else it is an ordinary character.  HOME is
-set in each case rather than inherited, so the expectation is a fact of the
-spec and not of the machine; each was taken from `/bin/sh` first.  The
-assignment cases read their variable back QUOTED for the same reason: spec
-files share a process under batching, and the IFS file leaves IFS at `:`, so
-an unquoted read would be a test of field splitting wearing a tilde costume.
+`~` stands for HOME at the start of a word, and -- in an assignment word only --
+after its `=` and after any `:` beyond that, which makes `PATH=~/bin:~/lib`
+work. Anywhere else it is an ordinary character. HOME is set in each case rather
+than inherited, so the expectation is a fact of the spec, not the machine. The
+assignment cases read their variable back quoted because spec files share a
+process and the IFS file leaves IFS at `:`.
 
 `~user` is not expanded: it wants the password database and the platform has
 no door to it, so it is left as written -- which is what a shell does for a

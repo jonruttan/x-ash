@@ -1,14 +1,12 @@
-; lang.xon -- what this bundle IS.
+; lang.xon -- what this bundle is.
 ;
-; xon: read with the ordinary reader and never evaluated, like every other
-; manifest in the x-lang world (pin.xon, engine.pin.xon).  A form a reader
-; does not know is a loud error, never a skip -- a manifest that silently
-; ignores half of itself cannot be extended without wondering which readers
-; obeyed which half.
+; xon: read with the ordinary reader and never evaluated, like every manifest
+; in the x-lang world (pin.xon, engine.pin.xon). An unknown form is a loud
+; error, never a silent skip.
 ;
 ; FORMAT (one form per line):
 ;   (lang "NAME")               the -l name
-;   (dialect NAME)              he | xe | rn -- a REQUIREMENT, not a taste
+;   (dialect NAME)              he | xe | rn -- a requirement
 ;   (requires-release "TAG")    the x-lang this bundle was built against
 ;   (requires-lang "NAME" ["V"]) another lang this one is written on top
 ;                               of, optionally at an exact version
@@ -16,45 +14,18 @@
 
 (lang "ash")
 
-; HELIUM PLUS WHAT ASH ACTUALLY IMPORTS, which is the whole of the boot cost.
-; ash forks, execs, dup2s and opens files, and the 2024 reading of that was
-; "therefore radon".  It does not follow: radon is a SET OF LIBRARIES, not a
-; capability tier, and the process and file doors ash needs are one module --
-; x/sys/posix, imported by name in ash/prims.x.  Everything else radon boots
-; (the numeric tower: bigint, rational, complex, decimal, regex, the compile
-; pipeline) is cost this bundle pays on every single invocation and never
-; touches: a shell has no use for a rational.
-;
-; Measured on this machine, `x -l ash` start to prompt: 20.7s on rn, 2.3s on
-; he.  The other six arc bundles made this same move on 2026-09-02; ash was
-; last only because it was the one whose manifest argued hardest for radon.
-;
-; STILL A REQUIREMENT, NOT A TASTE -- the row just names a smaller one.  An
-; unbound `Sys` at the first pipeline is exactly the failure the old comment
-; wanted to avoid, and the import in prims.x is what prevents it: acquisition
-; refuses legibly, before any shell syntax is read.
+; Helium plus the two modules ash imports. ash forks, execs, dup2s and opens
+; files, but that needs one module -- x/sys/posix, imported by name in
+; ash/prims.x -- not the whole radon library set (the numeric tower, regex, the
+; compile pipeline), none of which a shell uses. The import in prims.x makes an
+; unbound `Sys` fail at acquisition rather than at the first pipeline.
 (dialect he)
 
-; PAIRING, NOT PINNING.  A digest freezes bytes; it says nothing about whether
-; those bytes still run against a platform that moved.  This row is the part
-; that is checkable, and it is compared for EQUALITY, never parsed.
-;
-; v0.6.0 was the first release carrying what this bundle needs: bundle
-; acquisition, `-l` loading, --share-dir answering from any cwd, and eval! in
-; the seam.  This row tracks what the specs are green AGAINST rather than the
-; floor -- the question it answers is "what was this built against", not "what
-; is the oldest that would still work".
-;
-; v0.7.1 IS A HARD REQUIREMENT HERE, unusually for this row.  It is the first
-; release pinning x-engine-c v0.1.3, and v0.1.2 does not merely fail this
-; bundle -- it is dead at load.  x_prim_make_token_base assigned to the boolean
-; singletons' cells rather than through them and never created the read buffer,
-; so (Base make-tok) segfaulted on the first character of any input, and an
-; isolated tokenizer base is the one thing a shell tokenizer cannot do without:
-; 80 of 82 red for a reason that was never ash's.
-;
-; So on v0.7.0 this row was a promise the platform could not keep, and CI said
-; so every run.  On v0.7.1 the two failures left are ash's own.
+; The x-lang release this bundle is built and tested against; CI compares it
+; for equality. v0.7.1 or later is required, not merely paired with: it is the
+; first release pinning an engine in which an isolated tokenizer base -- which
+; a shell tokenizer cannot do without -- works at all. On anything earlier
+; this bundle does not run.
 
 (requires-release "v0.13.0")
 

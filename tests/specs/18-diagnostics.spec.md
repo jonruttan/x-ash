@@ -1,14 +1,9 @@
 ## sh-eval diagnostics go to stderr
 
-A shell reports on standard error so that a caller can silence it, redirect
-it, or capture the command's real output without it.  Two of ash's own
-diagnostics went to standard OUTPUT instead -- a missing command and a failed
-`cd` -- which made `2>/dev/null` useless against them and, worse, put them
-inside `x=$(...)` as if they were the command's answer.
-
-These cases fail on the old code by capturing the message; they are not
-merely a status check, which would have passed either way.  Each expectation
-was taken from `/bin/sh` first.
+A shell reports on standard error so a caller can silence or redirect it
+without losing the command's real output. These check that ash's diagnostics --
+a missing command, a failed `cd` -- go to stderr, so `2>/dev/null` silences
+them and `x=$(...)` does not capture them.
 
 ### a command substitution does not capture the not-found message
 

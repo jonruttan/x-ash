@@ -13,13 +13,11 @@
 ;   ; -> ((tok-word "echo") (tok-word "hello") (tok-op "|") (tok-word "grep") (tok-word "h"))
 ; --- Create shell tokenizer base (bare, no sexp types) ---
 
-; THE TOKENIZER BASE IS PROCESS STATE.  (Base make-tok) puts it on a chain of
-; its own, and nothing in the ambient heap can name what lives there, so a
-; state image cannot carry it -- the writer refused this bundle with one
-; unplaced reference until it was named a transient.  Each type RECORDS itself
-; in this table as its handlers are defined, and %sh-base-make builds a base
-; from the table: the one registration list, read when this file loads and
-; again after an image load.
+; The tokenizer base is process state: (Base make-tok) puts it on a chain of
+; its own that the ambient heap cannot name, so a state image cannot carry it
+; and it is remade after an image load. Each type records itself in this table
+; as its handlers are defined, and %sh-base-make builds a base from the table
+; -- read when this file loads and again after an image load.
 (def %sh-tok-types (pair () ()))    ; ((name . handlers) ...), newest first
 (def %sh-tok-type!
   (fn (_ nm hs)
@@ -44,16 +42,11 @@
 ; Buffer layout: (val . (read . write)) — all char pointers.
 ; Score layout:  (int-score . reader) — raw int + object pointer.
 
-; THE PLATFORM OWNS THESE NOW.  The 2024 file reimplemented buffer-len,
-; buffer-unread and score-set over the raw int-cell accessors, with a comment
-; describing the buffer layout it assumed: "(val . (read . write)) -- all char
-; pointers".  That layout is unchanged, and lib/x/reader/intrinsics.x
-; implements exactly the same three functions against it -- so the
-; reimplementation is now a second copy of a contract someone else maintains.
-;
-; Aliasing the platform's is not just tidier: these run per character inside a
-; tokenizer callback, where the platform's versions are the ones the engine's
-; own reader is tested against.
+; The platform owns buffer-len, buffer-unread and score-set:
+; lib/x/reader/intrinsics.x implements them against the same buffer layout
+; ((val . (read . write)), all char pointers), so these are aliases rather than
+; a second copy. They run per character inside a tokenizer callback, where the
+; platform's versions are the ones the engine's own reader is tested against.
 (def buffer-len %buffer-len)
 (def buffer-unread %buffer-unread)
 (def score-set %score-set)
@@ -91,17 +84,11 @@
       (= c (char->integer #\'))
       (= c (char->integer #\")))))
 
-; `#` IS NOT HERE, and that is the fix rather than an omission.  It used to
-; break a word anywhere, so `#` mid-word started a comment:
-;
-;   echo a#b      printed `a`
-;   echo $#       printed nothing, and ate the rest of the LINE
-;
-; A shell starts a comment at `#` only where a word could start, which the
-; SH-COMMENT type below already expresses -- its analyse hook only ever runs at
-; a token boundary, so leaving `#` out of the break set is exactly the POSIX
-; rule.  `echo # note` still comments: the space ends the word, and the `#`
-; opens a fresh token.
+; `#` is not in the word-break set, and deliberately: a shell starts a comment
+; at `#` only where a word could start, which the SH-COMMENT type below already
+; expresses (its analyse hook runs only at a token boundary). So `echo a#b`
+; keeps the `#`, and `echo # note` still comments -- the space ends the word
+; and `#` opens a fresh token.
 ; --- Token constructors ---
 
 (def mk-tok-newline (fn (_) (list (lit tok-newline))))
@@ -253,28 +240,15 @@
 ; Everything between ' and ' is literal (no escapes).
 ; Accumulates chars into a list; score is computed from bufferlen.
 
-; THE ACCUMULATOR NEVER SURVIVED, AND THE GLOBAL WAS NOT THE REASON.  Both
-; quoted-string readers used to build the value character by character in the
-; analyse callback -- a list of chars threaded through a closure per character
-; -- and hand it to the read handler through a module-level global.  '' worked
-; and 'a' answered (tok-sq ()), which reads like a global that does not
-; survive and is not: the closure threading is correct, and the empty case
-; only worked because prims' list->string short-circuits (null? l) to "" and
-; never reaches the conversion.
-;
-; The conversion is what fails.  list->string is (%cvt l %string), and %cvt
-; inside a reader callback ANSWERS NIL -- silently, with no error -- which is
-; the x-python finding too ("%cvt is nil inside read handlers; build code-point
-; strings at load").  Every non-empty string was therefore nil, and the two
-; entries in tests/contract/known-failures.txt were one line of allocation in
-; the wrong place.
-;
-; So don't accumulate.  BUFFER-TOKEN IS THE PLATFORM'S ANSWER to "what text did
-; this token consume", it is what %sh-word-reader has always used, and it runs
-; in the READ handler where allocating is safe.  The analyse pass now only
-; scans for the closing quote and scores; the read pass takes the consumed run
-; and strips the quotes off it.  No global, no per-character cons, and the
-; unusual thing about this tokenizer stays unusual for the right reason.
+; Both quoted-string readers take their value from buffer-token in the read
+; handler, not by accumulating characters in the analyse callback. list->string
+; is (%cvt l %string), and %cvt inside a reader callback answers nil silently
+; (the same finding as x-python: build strings at load, not in a read handler),
+; so an accumulated value was nil for every non-empty string. buffer-token is
+; the platform's answer to "what text did this token consume", runs in the read
+; handler where allocating is safe, and is what %sh-word-reader has always
+; used. The analyse pass scans for the closing quote and scores; the read pass
+; takes the consumed run and strips the quotes.
 
 ; The consumed run is 'text' -- quotes included, since neither reader un-reads
 ; the closing quote.  Drop one from each end.
@@ -283,17 +257,14 @@
     (let ((n (string-length s)))
       (if (< n 2) "" (substring s 1 (- n 1))))))
 
-; A QUOTED WORD THAT DOES NOT END AT ITS CLOSING QUOTE IS STILL ONE WORD.
-; `"$HOME"/bin` and `'a'"$b"` are single arguments, and scoring at the closing
-; quote made them two and three -- the mirror of the mid-word case handled in
-; %sh-word-body below, from the other side.  So the closing quote hands over to
-; %sh-qword-body, which ends the token only at a real word break.
+; A quoted word that does not end at its closing quote is still one word:
+; `"$HOME"/bin` and `'a'"$b"` are single arguments. So the closing quote hands
+; over to %sh-qword-body, which ends the token only at a real word break.
 ;
-; The READ handler then decides what kind of token this was: a run that is
-; nothing but one quoted string keeps its tok-sq / tok-dq identity (which is
-; the bundle's token vocabulary, and what the specs assert), and anything
-; MIXED comes back as a tok-word carrying its raw text for %sh-expand-str to
-; interpret.  %sh-pure-quote? is what tells them apart.
+; The read handler then decides the token's kind: a run that is nothing but one
+; quoted string keeps its tok-sq / tok-dq identity (the token vocabulary the
+; specs assert), and anything mixed comes back as a tok-word carrying its raw
+; text for %sh-expand-str to interpret. %sh-pure-quote? tells them apart.
 (def %sh-sq-read
   (fn (_ . args)
     (let ((text (buffer-token (first args))))
@@ -311,12 +282,10 @@
       ; %sh-qword-body read that quote as OPENING a fresh region, so the token
       ; ran on past the end of the line and swallowed the next command.
       (do
-        ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
-        ; so that input ENDING at the closing quote produces a token at all --
-        ; without it `'a'` scored nothing and vanished.  If the word does carry
-        ; on, %sh-qword-body scores again at the real break and that later
-        ; score wins; this one is the floor, exactly as SH-WORD's analyse entry
-        ; scores -1 before its body has seen anything.
+        ; Score here even though the word may continue, so input ending at the
+        ; closing quote still produces a token. If it continues, %sh-qword-body
+        ; scores again at the real break and that later score wins; this is the
+        ; floor, like SH-WORD's -1 analyse entry.
         (score-set score 1 buffer)
         %sh-qword-body)
       %sh-sq-body)))
@@ -360,12 +329,10 @@
       ; Closing quote: hand over to the word continuation for the NEXT
       ; character -- never call it with this one (see %sh-sq-body).
       ((= chr (char->integer #\")) (do
-        ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
-        ; so that input ENDING at the closing quote produces a token at all --
-        ; without it `'a'` scored nothing and vanished.  If the word does carry
-        ; on, %sh-qword-body scores again at the real break and that later
-        ; score wins; this one is the floor, exactly as SH-WORD's analyse entry
-        ; scores -1 before its body has seen anything.
+        ; Score here even though the word may continue, so input ending at the
+        ; closing quote still produces a token. If it continues, %sh-qword-body
+        ; scores again at the real break and that later score wins; this is the
+        ; floor, like SH-WORD's -1 analyse entry.
         (score-set score 1 buffer)
         %sh-qword-body))
       ; Backslash: the next character cannot close the string
@@ -489,10 +456,10 @@
           (#t %sh-qword-body)))
       (#t %sh-bt-scan))))
 
-; After a `$`, one character decides.  Anything that is not `(` is RE-DISPATCHED
-; through the state we came from -- a direct call, which is correct here (we
-; want that character handled normally) and is not the mistake made at a closing
-; quote, where the character had already been consumed by meaning.
+; After a `$`, one character decides. Anything that is not `(` is re-dispatched
+; through the state we came from -- a direct call, correct here because we want
+; that character handled normally, unlike at a closing quote where the
+; character has already been consumed by meaning.
 (def %sh-word-dollar ())
 (def %sh-dq-dollar ())
 (def %sh-sq-dq-dollar ())
@@ -523,37 +490,30 @@
 (def %sh-word-esc ())
 (def %sh-qword-esc ())
 
-; A WORD ABSORBS QUOTES THAT START INSIDE IT, which is what makes
+; A word absorbs quotes that start inside it:
 ;
 ;   X="a b"            one word, not `X=` followed by the string `a b`
 ;   pre"mid"post       one word
 ;   "$HOME"/bin        one word (from the other direction -- see %sh-sq-read)
 ;
-; `'` and `"` are word-BREAK characters, so a run used to end at the quote:
-; %process-assignments then set X to the empty string and tried to run `a b` as
-; a command.  Every quoted assignment in every script did this.
+; `'` and `"` are word-break characters, so a word that begins with a quote is
+; SH-SQ's or SH-DQ's (the analyse entry below refuses a leading quote) and
+; `echo 'hi'` tokenizes as always. A quote met mid-word applies to a region of
+; the word, per POSIX: the token keeps its raw text, quotes included, and
+; %sh-expand-str in eval.x interprets the regions -- the same division of
+; labour as the backslash.
 ;
-; A word that BEGINS with a quote is still SH-SQ's or SH-DQ's -- the analyse
-; entry below refuses a leading quote -- so `echo 'hi'` tokenizes as it always
-; has.  What changes is only a quote met MID-word, where POSIX says the
-; quoting applies to a REGION of the word rather than to the word.  The token
-; keeps its raw text, quotes included, and %sh-expand-str in eval.x interprets
-; the regions -- the same division of labour as the backslash.
-;
-; THE QUOTE REGIONS RETURN TO %sh-qword-body, the positive-scoring twin, and
-; that is deliberate: a run that has passed through an explicit quote is not a
-; bare word any more, and should not carry SH-WORD's "let other types win"
-; -1.  A plain word never enters these states and keeps its -1 exactly.
+; The quote regions return to %sh-qword-body, the positive-scoring twin: a run
+; that has passed through an explicit quote is not a bare word and should not
+; carry SH-WORD's "let other types win" -1. A plain word keeps its -1.
 (set! %sh-word-in-sq
   (fn (_ buffer score chr)
     (if (= chr (char->integer #\'))
       (do
-        ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
-        ; so that input ENDING at the closing quote produces a token at all --
-        ; without it `'a'` scored nothing and vanished.  If the word does carry
-        ; on, %sh-qword-body scores again at the real break and that later
-        ; score wins; this one is the floor, exactly as SH-WORD's analyse entry
-        ; scores -1 before its body has seen anything.
+        ; Score here even though the word may continue, so input ending at the
+        ; closing quote still produces a token. If it continues, %sh-qword-body
+        ; scores again at the real break and that later score wins; this is the
+        ; floor, like SH-WORD's -1 analyse entry.
         (score-set score 1 buffer)
         %sh-qword-body)
       %sh-word-in-sq)))
@@ -578,12 +538,10 @@
       ((= chr (char->integer #\$)) %sh-dq-dollar)
       ((= chr #\`) (do (set! %sh-cs-return 1) %sh-bt-scan))
       ((= chr (char->integer #\")) (do
-        ; SCORED HERE AND STILL CONTINUING.  The score marks a valid token end
-        ; so that input ENDING at the closing quote produces a token at all --
-        ; without it `'a'` scored nothing and vanished.  If the word does carry
-        ; on, %sh-qword-body scores again at the real break and that later
-        ; score wins; this one is the floor, exactly as SH-WORD's analyse entry
-        ; scores -1 before its body has seen anything.
+        ; Score here even though the word may continue, so input ending at the
+        ; closing quote still produces a token. If it continues, %sh-qword-body
+        ; scores again at the real break and that later score wins; this is the
+        ; floor, like SH-WORD's -1 analyse entry.
         (score-set score 1 buffer)
         %sh-qword-body))
       ((= chr (char->integer #\\)) %sh-word-dq-esc)
@@ -651,12 +609,9 @@
         (if (not (%sh-word-break? chr))
           (do
             (score-set score (- 0 1) buffer)
-            ; A WORD MAY OPEN WITH THE SUBSTITUTION.  `echo $(pwd)` puts the
-            ; `$` first, and routing it through the plain body meant the next
-            ; character -- `(`, an operator -- broke the word immediately,
-            ; leaving the bare word `$`.  Mid-word `$` reaches %sh-word-dollar
-            ; from the body's own arm; this is the same door for the first
-            ; character.
+            ; A word may open with the substitution: `echo $(pwd)` puts the
+            ; `$` first. Mid-word `$` reaches %sh-word-dollar from the body's
+            ; own arm; this is the same door for the first character.
             (if (= chr (char->integer #\$))
               %sh-word-dollar
               (if (= chr #\`)
@@ -678,22 +633,12 @@
 (def %sh-int-body ())
 (def %sh-int-word-body ())
 
-; A DIGIT RUN THAT TURNS INTO A WORD IS A WORD, and giving up here was a
-; SEGFAULT rather than a fallback.  The `(#t ())` this replaces meant "this
-; type no longer matches", and on an isolated base carrying the engine's own
-; INTEGER type that hands the run to the built-in reader -- which produces a
-; RAW INTEGER, not a token list.  So
-;
-;   echo 50$        ->  ((tok-word "echo") 50 (tok-word "$"))
-;
-; and %tok-is-word? then called `first` on the integer 50 and the shell died
-; with no message.  Any word starting with digits and continuing with a
-; non-digit, non-break character did it: `50$`, `2x`, `3rd`.  Verified on the
-; pre-change tree, so the crash is older than the file it is fixed in.
-;
-; The fix is to keep scanning as a word, which is what the run IS.  Scoring
-; stays +1 so this type still beats SH-WORD's -1 and the read handler is the
-; shared %sh-word-reader either way -- so the token comes out (tok-word "50$").
+; A digit run that continues with a non-digit is a word: `50$`, `2x`, `3rd`.
+; Giving up here would hand the run to the base's built-in INTEGER type, which
+; produces a raw integer rather than a token list, and %tok-is-word? would then
+; call `first` on an integer. Keep scanning as a word, scoring +1 so this type
+; beats SH-WORD's -1; the read handler is the shared %sh-word-reader, so the
+; token comes out (tok-word "50$").
 (set! %sh-int-word-body %sh-qword-body)
 
 (set! %sh-int-body
@@ -719,12 +664,12 @@
     (pair (lit read) %sh-word-reader)))
 ; --- Convenience: tokenize a string ---
 
-; A SAFETY NET UNDER THE PARSER, because a token that is not a list is a
-; segfault and not an error: every predicate in eval.x opens with (first tok).
-; The INTEGER fallback above was one way to produce one; rather than trust that
-; it was the only way, anything that comes back not-a-pair is rendered as the
-; word it stands for.  Costs one walk of a token list; buys the guarantee that
-; the parser only ever sees tokens.
+; A safety net under the parser: every predicate in eval.x opens with
+; (first tok), so a token that is not a list would crash rather than raise.
+; The INTEGER fallback above produces one such case; rather than trust it is
+; the only one, anything that comes back not-a-pair is rendered as the word it
+; stands for. One walk of the token list buys the guarantee that the parser
+; only ever sees tokens.
 (def %sh-normalize-tokens
   (fn (self toks)
     (if (null? toks)

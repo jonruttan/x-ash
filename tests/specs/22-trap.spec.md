@@ -16,8 +16,6 @@ Every case runs inside a subshell.  A spec file is one shell process, so an
 EXIT trap set at the top level of a case would outlive it and fire on the
 harness itself.
 
-Each expectation was taken from `/bin/sh` first.
-
 ### an EXIT action runs when the shell leaves
 
 ```sh

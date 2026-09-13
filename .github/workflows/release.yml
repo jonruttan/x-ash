@@ -1,12 +1,7 @@
 name: Release
 
-# A TAG PUBLISHES A BUNDLE.  x-lang's Pin bundle fetches a tarball by URL and
-# verifies it against a sha256 the consumer's lang.pin.xon carries, so a
-# release is exactly two artifacts: the tarball, and the digest of it.
-#
-# THE SUITE RUNS FIRST.  A tag on a red tree publishes nothing -- the same
-# ruling x-lang's own release workflow follows.  A bundle whose specs fail is
-# not a release, it is a trap with a digest on it.
+# A v* tag publishes a release: the tarball and its sha256, which a consumer's
+# lang.pin.xon verifies. The suite runs first; a red tree publishes nothing.
 
 on:
   push:
@@ -41,8 +36,8 @@ jobs:
           make             # x-bin at the repo root -- `make engine` does not build it
           make boot        # the launcher-free amalgams the harness loads
 
-      # THE GATE, not a formality: this is the last point at which a bad
-      # bundle can be stopped from acquiring a digest and a URL.
+      # The gate: the last point a bad bundle can be stopped before it gets a
+      # digest and a URL.
       - name: Run the ASH specs
         run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
 
@@ -53,8 +48,7 @@ jobs:
           sh tools/bundle.sh "$TAG" dist | tee roll.out
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # The pin a consumer needs, in the release notes rather than in a wiki
-      # that drifts: the digest is only useful next to the URL it belongs to.
+      # Put the pin in the release notes, next to the URL it belongs to.
       - name: Publish
         if: github.event_name == 'push'
         env:
