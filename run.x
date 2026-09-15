@@ -18,6 +18,7 @@
 ; against the bundle wherever it sits.
 (import ash/base)
 (import ash/repl)
+(import ash/line)
 
 (set! %lang-name "ASH Shell")
 (set! %lang-version ash-version)
