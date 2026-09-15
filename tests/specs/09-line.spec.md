@@ -13,13 +13,16 @@ builtins and the executables on PATH.
 ---
     #t
 
+The completer reads the buffer through one method, `before`, the text to the
+left of the cursor; a stand-in with that method is enough to test it, and
+lets these cases run on a platform that has no editor to build a buffer with.
+
 ### the word being completed ends at the cursor and starts after a separator
 
 ```sh
 (do (import ash/line)
-    (let ((ed (Edit make)))
-      (ed insert! "echo one | gre")
-      (%ash-word-at ed)))
+    (def-class %spec-buf () text (method before (self) (member (lit text))))
+    (%ash-word-at (new %spec-buf text "echo one | gre")))
 ```
 ---
     "gre"
@@ -28,10 +31,8 @@ builtins and the executables on PATH.
 
 ```sh
 (do (import ash/line)
-    (let ((ed (Edit make)))
-      (ed insert! "whi")
-      (let ((r (%ash-complete ed)))
-        (list (first r) (List includes? "while" (rest r))))))
+    (let ((r (%ash-complete (new %spec-buf text "whi"))))
+      (list (first r) (List includes? "while" (rest r)))))
 ```
 ---
     ("whi" #t)
@@ -40,8 +41,7 @@ builtins and the executables on PATH.
 
 ```sh
 (do (import ash/line)
-    (let ((ed (Edit make)))
-      (%ash-complete ed)))
+    (%ash-complete (new %spec-buf text "")))
 ```
 ---
     ("")
