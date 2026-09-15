@@ -308,14 +308,14 @@
       (fn (self acc)
         (if (%ash-complete? acc)
           acc
-          (do
-            (display "> ")
-            (let ((line (sh-read-line)))
+          (let ((line (%ash-read-line "> ")))
+            (match
               ; EOF mid-entry: hand back what there is and let sh-eval report
               ; the parse error, rather than looping on nil forever.
-              (if (null? line)
-                acc
-                (self (Str8 append acc (Str8 append "\n" line)))))))))
+              ((null? line) acc)
+              ; ctrl-c mid-entry abandons the whole entry.
+              ((eq? line (lit cancel)) "")
+              (#t (self (Str8 append acc (Str8 append "\n" line)))))))))
     (more first-line)))
 
 ; --- the banner --------------------------------------------------------------
@@ -376,18 +376,22 @@
 (set! %ash-repl-loop
   (fn (_)
     (%ash-collect)
-    (display %repl-prompt)
-    (let ((line (sh-read-line)))
-      (if (null? line)
+    ; Through the line editor when there is a terminal (ash/line.x), which
+    ; draws the prompt itself; through the byte reader otherwise.
+    (let ((line (%ash-read-line %repl-prompt)))
+      (match
         ; ctrl-d leaves, with the last command's status -- `x -l ash -f x.sh`
         ; and an interactive session both answer $? to the caller.  Through
         ; %sh-exit-shell, so an EXIT trap set at the prompt still fires.
-        (do (newline) (%sh-exit-shell %sh-status))
-        (do
-          (guard (err (%ash-report err))
-            (let ((entry (%ash-read-entry line)))
-              (unless (= (Str8 length entry) 0) (sh-eval entry))))
-          (%ash-repl-loop))))))
+        ((null? line) (do (newline) (%sh-exit-shell %sh-status)))
+        ; ctrl-c abandons the line being typed.
+        ((eq? line (lit cancel)) (%ash-repl-loop))
+        (#t
+          (do
+            (guard (err (%ash-report err))
+              (let ((entry (%ash-read-entry line)))
+                (unless (= (Str8 length entry) 0) (sh-eval entry))))
+            (%ash-repl-loop)))))))
 
 ; --- batch (-f) --------------------------------------------------------------
 ;
