@@ -40,13 +40,29 @@
 ---
     ()
 
-### ? and [ also make it a pattern
+### ? and a closed [ also make it a pattern
 
 ```sh
-(write (list (%sh-glob-pattern? "a?b") (%sh-glob-pattern? "a[b")))
+(write (list (%sh-glob-pattern? "a?b") (%sh-glob-pattern? "a[b]")))
 ```
 ---
     (#t #t)
+
+### a [ that nothing closes does not
+
+```sh
+(write (list (%sh-glob-pattern? "a[b") (%sh-glob-pattern? "[") (%sh-glob-pattern? "[]")))
+```
+---
+    (() () ())
+
+### nor does an escaped one, even when closed
+
+```sh
+(write (%sh-glob-pattern? "a\\[b]"))
+```
+---
+    ()
 
 ### unescaping takes one backslash off
 

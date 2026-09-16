@@ -1568,7 +1568,10 @@
         (go 0 ())))))
 
 ; Does this text hold a glob character the user meant AS one?  Escaped ones do
-; not count, which is the whole point of the escaping.
+; not count, which is the whole point of the escaping, and neither does a `[`
+; that no `]` closes: POSIX makes that an ordinary character, and %sh-glob-at
+; matches it as one.  Both ask %sh-glob-class-end where a bracket expression
+; ends, so they cannot disagree about it.
 (def %sh-glob-pattern?
   (fn (_ text)
     (let ((n (string-length text)))
@@ -1577,9 +1580,12 @@
           (if (>= i n)
             ()
             (let ((c (string-ref text i)))
-              (if (= c #\\)
-                (self (+ i 2))
-                (if (or (= c #\*) (= c #\?) (= c #\[)) #t (self (+ i 1))))))))
+              (match
+                ((= c #\\) (self (+ i 2)))
+                ((= c #\*) #t)
+                ((= c #\?) #t)
+                ((and (= c #\[) (>= (%sh-glob-class-end text (+ i 1) n) 0)) #t)
+                (#t (self (+ i 1))))))))
       (go 0))))
 
 ; Split on UNESCAPED `/`.
@@ -1690,12 +1696,14 @@
     (and (not (null? segments))
          (= (string-length (last segments)) 0))))
 
-; No scan to decide: the field already knows whether it is a pattern and
-; whether it carries escapes, so this does not re-derive them with
-; %sh-glob-pattern? and %sh-glob-unescape.
+; The field knows whether it holds a live metacharacter and whether it carries
+; escapes, which settles most words with no scan.  A word that does hold one
+; is scanned once more before the directory is read, because the walk saw a
+; `[` before it could know whether a `]` closes it -- the `]` can arrive in a
+; later piece -- and a word that is not a pattern must not reach the directory.
 (def %sh-glob-field
   (fn (_ f)
-    (if (not (%sh-field-glob? f))
+    (if (not (and (%sh-field-glob? f) (%sh-glob-pattern? (%sh-field-text f))))
       (list (%sh-field-plain f))
       (let ((field (%sh-field-text f))
             (absolute? (= (string-ref (%sh-field-text f) 0) #\/))
