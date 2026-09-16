@@ -122,6 +122,78 @@
         (rest (first table))
         (self key (rest table))))))
 
+(def %sh-table-without
+  (fn (self key table)
+    (match
+      ((null? table) ())
+      ((string=? key (first (first table))) (rest table))
+      (#t (pair (first table) (self key (rest table)))))))
+
+(def %sh-words-without
+  (fn (self word words)
+    (match
+      ((null? words) ())
+      ((string=? word (first words)) (rest words))
+      (#t (pair (first words) (self word (rest words)))))))
+
+; --- Shell variables ---------------------------------------------------------
+;
+; A variable is exported or it is not.  An exported one lives in the process
+; environment, which is what a child is given; any other lives in %sh-vars, a
+; table only this process reads.  A name is in one place at a time.  A name
+; exported before it has a value is kept in %sh-export-marks, so that the value
+; it gets later goes to the environment: `export x; x=1` exports 1.
+;
+; Both belong to this process, so a state image carries neither: each is a
+; transient, and a shell that loads an image starts with them empty.
+(def %sh-vars ())
+(def %sh-export-marks ())
+(set! %image-transients
+  (pair (lit %sh-vars) (pair (lit %sh-export-marks) %image-transients)))
+
+; The value of NAME, or () when it is unset.
+(def %sh-var-get
+  (fn (_ name)
+    (let ((v (%sh-table-get name %sh-vars)))
+      (if (null? v) (sh-getenv name) v))))
+
+(def %sh-var-exported?
+  (fn (_ name)
+    (match
+      ((not (null? (sh-getenv name))) #t)
+      ((%sh-word-in? name %sh-export-marks) #t)
+      (#t ()))))
+
+; Assign NAME where it already lives: the environment when it is exported,
+; the table otherwise.
+(def %sh-var-set!
+  (fn (_ name value)
+    (if (%sh-var-exported? name)
+      (do
+        (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
+        (sh-setenv name value))
+      (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))))
+
+; Unset NAME everywhere, the export attribute included.
+(def %sh-var-unset!
+  (fn (_ name)
+    (set! %sh-vars (%sh-table-without name %sh-vars))
+    (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
+    (sh-unsetenv name)))
+
+; Give NAME the export attribute: a value it holds in the table moves to the
+; environment, and a name with no value is marked.
+(def %sh-var-export!
+  (fn (_ name)
+    (let ((v (%sh-table-get name %sh-vars)))
+      (match
+        ((not (null? v))
+          (do
+            (set! %sh-vars (%sh-table-without name %sh-vars))
+            (sh-setenv name v)))
+        ((%sh-var-exported? name) ())
+        (#t (set! %sh-export-marks (pair name %sh-export-marks)))))))
+
 (def %sh-reserved-words
   (list "if" "then" "elif" "else" "fi"
         "while" "until" "for" "do" "done"
@@ -320,7 +392,7 @@
         ((%all-digits? name) (%sh-arg-at (convert name %int)))
         ; An unset variable expands to the empty string, which is POSIX
         ; default -- there is no `set -u` here to make it an error.
-        (else (let ((v (sh-getenv name))) (if (null? v) "" v)))))))
+        (else (let ((v (%sh-var-get name))) (if (null? v) "" v)))))))
 
 ; The end of the name run starting at I.
 (def %sh-name-end
@@ -507,15 +579,16 @@
 ; A shell starts with IFS set to that, whatever the environment held: POSIX
 ; lets a shell ignore an inherited IFS, and dash and bash both do.  So `$IFS`
 ; has a value to save, and `old=$IFS; IFS=:; ...; IFS=$old` puts splitting
-; back.  An image is written by another process, so a process that loads one
-; sets it again, the way $$ is read again.
-(sh-setenv "IFS" %sh-ifs-default)
+; back.  It is an ordinary assignment, so IFS stays unexported unless the
+; environment handed one in.  An image is written by another process, so a
+; process that loads one sets it again, the way $$ is read again.
+(%sh-var-set! "IFS" %sh-ifs-default)
 (set! %image-recache-hooks
-  (pair (fn (_) (sh-setenv "IFS" %sh-ifs-default)) %image-recache-hooks))
+  (pair (fn (_) (%sh-var-set! "IFS" %sh-ifs-default)) %image-recache-hooks))
 
 (def %sh-ifs
   (fn (_)
-    (let ((v (sh-getenv "IFS")))
+    (let ((v (%sh-var-get "IFS")))
       (if (null? v) %sh-ifs-default v))))
 
 (def %sh-in-ifs? (fn (_ c ifs) (%sh-str-has-char? ifs c)))
@@ -860,7 +933,7 @@
 
 (def %sh-param-assign
   (fn (_ name val fired? word)
-    (if fired? (do (sh-setenv name word) word) val)))
+    (if fired? (do (%sh-var-set! name word) word) val)))
 
 (def %sh-param-error
   (fn (_ name val fired? word)
@@ -954,13 +1027,13 @@
               (substring inner 0 1))))))))
 
 ; Is the parameter unset?  A special is always set; a positional is set when it
-; is within range; anything else asks the environment.
+; is within range; anything else asks the variables.
 (def %sh-param-unset?
   (fn (_ name)
     (cond
       ((not (null? (%sh-table-get name %sh-special-vars))) ())
       ((%all-digits? name) (> (convert name %int) (length %sh-args)))
-      (else (null? (sh-getenv name))))))
+      (else (null? (%sh-var-get name))))))
 
 (def %sh-param-apply
   (fn (_ name op word)
@@ -1091,7 +1164,7 @@
 (def %sh-tilde-home
   (fn (_ s i n assign? eq)
     (if (and (%sh-tilde-pos? s i assign? eq) (%sh-tilde-bare? s i n))
-      (let ((home (sh-getenv "HOME")))
+      (let ((home (%sh-var-get "HOME")))
         (if (or (null? home) (= (string-length home) 0)) () home))
       ())))
 
@@ -2129,11 +2202,11 @@
 (def %sh-cd-destination
   (fn (_ wds)
     (if (null? wds)
-      (let ((home (sh-getenv "HOME"))) (if (null? home) "/" home))
+      (let ((home (%sh-var-get "HOME"))) (if (null? home) "/" home))
       (let ((operand (first wds)))
         (if (not (string=? operand "-"))
           operand
-          (let ((old (sh-getenv "OLDPWD")))
+          (let ((old (%sh-var-get "OLDPWD")))
             (if (or (null? old) (= (string-length old) 0)) () old)))))))
 
 (def %sh-cd
@@ -2148,8 +2221,8 @@
                 (%stderr "ash: cd: " dest ": No such file or directory\n")
                 1)
               (do
-                (sh-setenv "OLDPWD" base)
-                (sh-setenv "PWD" target)
+                (%sh-var-set! "OLDPWD" base)
+                (%sh-var-set! "PWD" target)
                 (set! %sh-pwd-logical target)
                 ; `cd -` reports where it arrived, which is how a script can
                 ; use it without keeping its own copy of OLDPWD.
@@ -2159,27 +2232,24 @@
                     (newline)))
                 0))))))))
 
+; `export NAME[=VALUE]...`, every operand.  A value is assigned before the name
+; is exported, so `export x=1` and `x=1; export x` leave the same variable, and
+; a bare NAME with no value yet is marked for the value it gets later.
 (def %sh-export
-  (fn (_ wds)
+  (fn (self wds)
     (if (null? wds)
       0
       (let ((word (first wds)))
-        (def %find-eq ())
-        (set! %find-eq
-          (fn (_ i)
-            (if (= i (string-length word))
-              -1
-              (if (= (string-ref word i) (convert #\= %int))
-                i
-                (%find-eq (+ i 1))))))
-        (let ((eq-pos (%find-eq 0)))
-          (if (= eq-pos -1)
-            0
-            (do
-              (sh-setenv
-                (substring word 0 eq-pos)
-                (substring word (+ eq-pos 1) (string-length word)))
-              0)))))))
+        (let ((eq (%sh-first-eq word 0 (string-length word))))
+          (match
+            ((fx<? 0 eq)
+              (do
+                (%sh-var-set! (substring word 0 eq)
+                              (substring word (fx+ eq 1) (string-length word)))
+                (%sh-var-export! (substring word 0 eq))))
+            ((= eq -1) (%sh-var-export! word))
+            (#t ()))
+          (self (rest wds)))))))
 
 ; A shell's truth is INVERTED: 0 is true.  %sh-bool turns a predicate's answer
 ; into that, once, instead of every arm spelling `(if p 0 1)`.
@@ -2283,7 +2353,7 @@
   (fn (_ wds)
     (if (null? wds)
       0
-      (do (sh-unsetenv (first wds)) (%sh-unset (rest wds))))))
+      (do (%sh-var-unset! (first wds)) (%sh-unset (rest wds))))))
 
 ; `read [-r] VAR...` -- one line from stdin, split on IFS across the names,
 ; with the LAST name taking everything that is left, separators and all.  A
@@ -2384,9 +2454,9 @@
   (fn (self names line i n ifs raw?)
     (let ((start (%sh-ifs-ws-end line i n ifs)))
       (if (null? (rest names))
-        (do (sh-setenv (first names) (%sh-read-rest line start n ifs raw?)) 0)
+        (do (%sh-var-set! (first names) (%sh-read-rest line start n ifs raw?)) 0)
         (let ((got (%sh-read-field line start n ifs raw?)))
-          (sh-setenv (first names) (first got))
+          (%sh-var-set! (first names) (first got))
           (self (rest names) line (%sh-read-past line (rest got) n ifs) n
                 ifs raw?))))))
 
@@ -2813,7 +2883,7 @@
 ; the script has moved OPTIND itself.
 (def %sh-getopts-optind
   (fn (_)
-    (let ((v (sh-getenv "OPTIND")))
+    (let ((v (%sh-var-get "OPTIND")))
       (let ((n (if (null? v) 1 (convert v %int))))
         (unless (= n %sh-optind-seen) (set! %sh-optchar 1))
         n))))
@@ -2821,14 +2891,14 @@
 (def %sh-getopts-save
   (fn (_ optind)
     (set! %sh-optind-seen optind)
-    (sh-setenv "OPTIND" (convert optind %string))))
+    (%sh-var-set! "OPTIND" (convert optind %string))))
 
 ; Finish one call: park OPTIND, set NAME and OPTARG, answer the status.
 (def %sh-getopts-yield
   (fn (_ name value optarg optind status)
     (%sh-getopts-save optind)
-    (sh-setenv "OPTARG" optarg)
-    (sh-setenv name value)
+    (%sh-var-set! "OPTARG" optarg)
+    (%sh-var-set! name value)
     status))
 
 (def %sh-getopts-done
@@ -3026,11 +3096,30 @@
       (self (rest wds) (pair (first wds) assigns))
       (pair (reverse assigns) wds))))
 
+; NAME=VALUE words as ordinary assignments: what a command with no command name
+; does, and what a special builtin's prefix does.
 (def %sh-apply-assignments
   (fn (self assigns)
     (unless (null? assigns)
-      (%sh-export (list (first assigns)))
+      (%sh-var-set! (%sh-assignment-name (first assigns))
+                    (%sh-assignment-value (first assigns)))
       (self (rest assigns)))))
+
+; A prefix assignment on any other command is exported to it: the variable is
+; in the environment for as long as the command runs, and %sh-restore-values
+; puts it back where it was.
+(def %sh-apply-exported
+  (fn (self assigns)
+    (unless (null? assigns)
+      (let ((name (%sh-assignment-name (first assigns))))
+        (%sh-var-unset! name)
+        (sh-setenv name (%sh-assignment-value (first assigns))))
+      (self (rest assigns)))))
+
+(def %sh-assignment-value
+  (fn (_ word)
+    (let ((n (string-length word)))
+      (substring word (fx+ (%sh-first-eq word 0 n) 1) n))))
 
 (def %sh-assignment-name
   (fn (_ word)
@@ -3042,23 +3131,42 @@
             (self (+ i 1)))))
       (find 0))))
 
-; What the named variables hold now, as (name . value) with () for unset, so
-; that what a prefix assignment covered can be put back exactly.
+; Where each named variable stands now, so that what a prefix assignment
+; covered can be put back exactly: (NAME WHERE VALUE), WHERE being env, shell,
+; or marked for a name exported with no value, and () for an unset name.
 (def %sh-save-values
   (fn (self assigns saved)
     (if (null? assigns)
       saved
-      (let ((name (%sh-assignment-name (first assigns))))
-        (self (rest assigns) (pair (pair name (sh-getenv name)) saved))))))
+      (self (rest assigns)
+            (pair (%sh-var-where (%sh-assignment-name (first assigns))) saved)))))
+
+(def %sh-var-where
+  (fn (_ name)
+    (let ((shell (%sh-table-get name %sh-vars)))
+      (match
+        ((not (null? shell)) (list name (lit shell) shell))
+        ((not (null? (sh-getenv name))) (list name (lit env) (sh-getenv name)))
+        ((%sh-word-in? name %sh-export-marks) (list name (lit marked) ()))
+        (#t (list name () ()))))))
 
 (def %sh-restore-values
   (fn (self saved)
     (unless (null? saved)
-      (let ((row (first saved)))
-        (if (null? (rest row))
-          (sh-unsetenv (first row))
-          (sh-setenv (first row) (rest row))))
+      (%sh-var-put-back (first saved))
       (self (rest saved)))))
+
+(def %sh-var-put-back
+  (fn (_ row)
+    (let ((name (first row))
+          (where (first (rest row)))
+          (value (first (rest (rest row)))))
+      (%sh-var-unset! name)
+      (match
+        ((eq? where (lit shell)) (%sh-var-set! name value))
+        ((eq? where (lit env)) (sh-setenv name value))
+        ((eq? where (lit marked)) (%sh-var-export! name))
+        (#t ())))))
 
 ; The builtins POSIX calls special.  A prefix assignment on one of them
 ; outlives the command; on anything else it covers that command only.
@@ -3109,7 +3217,7 @@
         (%sh-apply-assignments assigns)
         (%sh-dispatch remaining redirs))
       (let ((saved (%sh-save-values assigns ())))
-        (%sh-apply-assignments assigns)
+        (%sh-apply-exported assigns)
         (guard (e (do (%sh-restore-values saved) (error e)))
           (let ((status (%sh-dispatch remaining redirs)))
             (%sh-restore-values saved)
@@ -3586,7 +3694,7 @@
     (if (null? words)
       (do (set! %sh-status 0) 0)
       (do
-        (sh-setenv var (first words))
+        (%sh-var-set! var (first words))
         (set-first! cur body-start)
         ; reset to body
 
