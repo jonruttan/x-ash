@@ -30,10 +30,13 @@ one. An unset name expands to nothing.
 Command substitution: `$(...)` and the older `` `...` ``, nested, and inside
 double quotes. Trailing newlines come off, as POSIX asks.
 
-Arithmetic expansion: `$((...))` — integers, `+ - * / %` (division truncates
-toward zero), comparisons, `&&` / `||` / `!`, parentheses, and bare names read
-as their values (unset or non-numeric is zero). A counting loop is
-`i=$((i+1))`.
+Arithmetic expansion: `$((...))` — integers in decimal, octal (`010`) or
+hexadecimal (`0x10`), `+ - * / %` (division truncates toward zero),
+comparisons, the bitwise `& | ^ ~` and the shifts `<< >>`, `&&` / `||` / `!`,
+the conditional `c ? a : b`, parentheses, and bare names read as their values
+(unset or non-numeric is zero). `&&`, `||` and the conditional evaluate only
+the side they take, so `$((n && total/n))` guards its own division. A counting
+loop is `i=$((i+1))`.
 
 Parameter expansion: `${X:-default}`, `${X:=assign}`, `${X:?message}`,
 `${X:+alternative}` and their colonless forms (which treat a null value as
