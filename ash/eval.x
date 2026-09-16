@@ -94,8 +94,21 @@
 ; A set of words is a LIST of words.  Written as a chain of string=? it reads
 ; as logic when it is data, and every addition means editing the shape rather
 ; than the contents.
+;
+; A pair walk, not (List index-of): the tokenizer asks this of every word and
+; the arithmetic parser of every operator at every precedence level, and the
+; class method is tens of thousands of heap objects a call.  string=? is
+; unchecked -- a nil argument crashes it -- so anything but a string is simply
+; not in the set.
 (def %sh-word-in?
-  (fn (_ word words) (not (null? (List index-of word words)))))
+  (fn (_ word words) (if (string? word) (%sh-word-walk word words) ())))
+
+(def %sh-word-walk
+  (fn (self word words)
+    (match
+      ((null? words) ())
+      ((string=? word (first words)) #t)
+      (#t (self word (rest words))))))
 
 ; A TABLE is an alist of (key . value) keyed by string; %sh-table-get is the
 ; only thing that knows that.  Dispatch throughout this file is a table plus
@@ -589,7 +602,7 @@
 
 ; The field in hand, materialized.  Only the two closers below need it.
 (def %sh-acc-cur
-  (fn (_ a) (Str8 join "" (List reverse (%sh-acc-pieces a)))))
+  (fn (_ a) (Str8 join "" (reverse (%sh-acc-pieces a)))))
 
 ; One piece, and what it contributes to the field in hand.  Anything literal
 ; starts a field, which is what makes `cmd ""` an empty argument.  Both flags
@@ -718,7 +731,7 @@
       (def go
         (fn (self i out)
           (if (>= i n)
-            (Str8 join "" (List reverse out))
+            (Str8 join "" (reverse out))
             (let ((here (substring text i (+ i 1))))
               (self (+ i 1)
                 (pair (if (%sh-char-in? (string-ref text i) chars)
@@ -1129,7 +1142,7 @@
   (fn (self levels out)
     (if (null? levels)
       out
-      (self (rest levels) (List append out (first levels))))))
+      (self (rest levels) (append out (first levels))))))
 
 ; Every operator name, whatever its precedence, taken from the levels so the
 ; two cannot drift apart.  Below %sh-ar-flatten because this is a value read
@@ -1548,7 +1561,7 @@
         (def go
           (fn (self i out)
             (if (>= i n)
-              (Str8 join "" (List reverse out))
+              (Str8 join "" (reverse out))
               (if (and (= (string-ref text i) #\\) (< (+ i 1) n))
                 (self (+ i 2) (pair (substring text (+ i 1) (+ i 2)) out))
                 (self (+ i 1) (pair (substring text i (+ i 1)) out))))))
@@ -1710,7 +1723,7 @@
   (fn (self fields)
     (if (null? fields)
       ()
-      (List append (%sh-glob-field (first fields)) (self (rest fields))))))
+      (append (%sh-glob-field (first fields)) (self (rest fields))))))
 
 ; --- What the callers see ----------------------------------------------------
 ;
@@ -2574,7 +2587,7 @@
 (def %sh-escape-quotes
   (fn (self text i n out)
     (if (>= i n)
-      (Str8 join "" (List reverse out))
+      (Str8 join "" (reverse out))
       (self text (+ i 1) n
         (pair (if (= (string-ref text i) #\')
                 "'\\''"
@@ -4353,7 +4366,7 @@
       (def go
         (fn (self i mode out pending idx)
           (if (>= i n)
-            (list (Str8 join "" (List reverse out)) (reverse pending))
+            (list (Str8 join "" (reverse out)) (reverse pending))
             (let ((c (string-ref line i)))
               (cond
                 ; Quoted regions are copied through; `<<` inside them is text.
@@ -4390,12 +4403,12 @@
         (if (null? remaining)
           ; Unterminated: what is left is the body, which is what a shell does
           ; at end of input.
-          (list (Str8 join "" (List reverse acc)) ())
+          (list (Str8 join "" (reverse acc)) ())
           (let ((line (if strip?
                         (%sh-strip-tabs (first remaining))
                         (first remaining))))
             (if (string=? line delim)
-              (list (Str8 join "" (List reverse acc)) (rest remaining))
+              (list (Str8 join "" (reverse acc)) (rest remaining))
               (self (rest remaining)
                 (pair (string-append line "\n") acc)))))))
     (go lines ())))
@@ -4413,7 +4426,7 @@
 (def %sh-hd-walk
   (fn (self lines out bodies)
     (if (null? lines)
-      (list (Str8 join "\n" (List reverse out)) (reverse bodies))
+      (list (Str8 join "\n" (reverse out)) (reverse bodies))
       (let ((scanned (%sh-hd-scan-line (first lines) (length bodies))))
         (let ((collected (%sh-hd-collect (rest lines)
                            (first (rest scanned)) bodies)))
