@@ -31,7 +31,7 @@
   first-int set-first-int! convert buffer-token
   char->integer integer->char string-length string-ref substring string-append
   string=? string? make-string list->string length reverse append map filter
-  take drop nth last
+  take drop nth last fx<? fx+
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
@@ -120,6 +120,20 @@
 (def string? (fn (_ s) (str? s)))
 (def make-string (fn (_ n c) (Str8 make n c)))
 (def list->string (fn (_ l) (if (null? l) "" (%cvt l %string))))
+
+; Integer doors, for the scans the byte doors feed.  The platform's `<` is a
+; guarded wrapper and its `>=` a wrapper around that -- a few hundred heap
+; objects a comparison, asked per character -- where the primitive allocates
+; nothing.  A character compares as its code point, and a bignum still reaches
+; its own handler.
+;
+; They are unchecked: a nil operand crashes the process instead of raising.
+; They are for operands that cannot be nil -- a position, a length, a character
+; out of string-ref or handed to a reader hook -- and never for a value from
+; the script, which converts to nil when it is not a number.  `>=` is spelled
+; (not (fx<? a b)).
+(def fx<? (prim-ref (lit int) (lit <)))
+(def fx+ (prim-ref (lit int) (lit +)))
 
 ; REVERSE AND list->string RUN INSIDE READER CALLBACKS, so neither may be a
 ; class dispatch.  lib/x/reader/analyser.x states the rule outright: reader
