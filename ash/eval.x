@@ -423,6 +423,11 @@
     (let ((e (back (string-length out))))
       (if (= e (string-length out)) out (substring out 0 e)))))
 
+; The exit status of the last command substitution the command being expanded
+; has performed, or () while it has performed none.  A command with no command
+; name completes with it, which is what makes `if out=$(cmd)` test cmd.
+(def %sh-subst-status ())
+
 (def %sh-cmd-subst
   (fn (_ src)
     (let ((p (%sh-pipe-create)))
@@ -449,7 +454,7 @@
               (sh-close write-fd)
               (let ((out (sh-read-all-fd read-fd)))
                 (sh-close read-fd)
-                (sh-wait pid)
+                (set! %sh-subst-status (sh-wait pid))
                 (%sh-rstrip-newlines out)))))))))
 
 ; --- FIELD SPLITTING -------------------------------------------------------
@@ -3069,9 +3074,14 @@
     (let ((split (%sh-split-assignments wds ())))
       (let ((assigns (first split)) (remaining (rest split)))
         (if (null? remaining)
-          ; A bare assignment is a command that did nothing and succeeded, and
-          ; the values it set are the shell's from here on.
-          (do (%sh-apply-assignments assigns) (%sh-set-status 0))
+          ; A command with no command name: bare assignments, or words that
+          ; expanded to nothing.  The values it set are the shell's from here
+          ; on, and its status is its last command substitution's, or 0 when
+          ; it performed none.
+          (do
+            (%sh-apply-assignments assigns)
+            (%sh-set-status
+              (if (null? %sh-subst-status) 0 %sh-subst-status)))
           (do
             (unless (null? %sh-opt-xtrace)
               (%stderr "+ " (%sh-join-args remaining) "\n"))
@@ -3238,8 +3248,12 @@
                                  (%sh-declaration? val)))))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
+; A command's words are expanded as they are collected, so this is where the
+; command's substitutions start to count.
 (def %eval-simple-cmd
-  (fn (_ cur) (%collect-cmd-tokens cur () () #t)))
+  (fn (_ cur)
+    (set! %sh-subst-status ())
+    (%collect-cmd-tokens cur () () #t)))
 ; --- Compound commands: parse structure, evaluate directly ---
 ; if cond; then body [elif cond; then body]... [else body] fi
 
