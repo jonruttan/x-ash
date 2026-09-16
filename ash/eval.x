@@ -1425,6 +1425,17 @@
 (def %sh-mode-sq 1)            ; inside '...'
 (def %sh-mode-dq 2)            ; inside "..."
 
+; The run of plain text a word opens with, read as the walk below would read
+; it first: none unless the word is bare, and none when it opens with a `~`,
+; which the walk decides for itself.
+(def %sh-lead-run
+  (fn (_ s n mode0 assign?)
+    (match
+      ((not (= mode0 %sh-mode-bare)) (%sh-run 0 ()))
+      ((= n 0) (%sh-run 0 ()))
+      ((= (string-ref s 0) #\~) (%sh-run 0 ()))
+      (#t (%sh-plain-run s 0 n mode0 () assign?)))))
+
 ; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
 ; a redirection target (where more than one field is an ambiguous redirect).
 ;
@@ -1434,7 +1445,8 @@
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
     (let ((n (string-length s))
-          (eq (if assign? (%sh-first-eq s 0 (string-length s)) -1)))
+          (eq (if assign? (%sh-first-eq s 0 (string-length s)) -1))
+          (lead (%sh-lead-run s (string-length s) mode0 assign?)))
       (def go
         (fn (self i mode a)
           (if (>= i n)
@@ -1516,8 +1528,19 @@
                           (if (= mode %sh-mode-bare)
                             (%sh-acc-add a run meta?)
                             (%sh-acc-add-literal a run meta?))))))))))))
-      (go 0 mode0
-        (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))))
+      ; A bare word that is one plain run -- `true`, `-lt`, `*.c` -- is its own
+      ; single field, with no accumulator to build and join.  Any other word
+      ; starts the walk past its leading run, so no character is read twice.
+      (match
+        ((= (%sh-run-end lead) 0)
+          (go 0 mode0
+            (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
+        ((= (%sh-run-end lead) n)
+          (list (%sh-field s (%sh-run-meta? lead) ())))
+        (#t
+          (go (%sh-run-end lead) mode0
+            (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
+                         (%sh-run-meta? lead))))))))
 
 ; The `$` arm, lifted out so the walk above stays readable.  CONT is the
 ; walker's own continuation, resumed at an index with an accumulator.
