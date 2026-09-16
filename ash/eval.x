@@ -1080,11 +1080,17 @@
 ; The operators, by precedence: each level binds tighter than the one before.
 ; Adding one is adding it to a level and to the table -- the parser below reads
 ; both and knows nothing else about them.
+; Loosest binding first.  POSIX orders the bitwise operators between `&&` and
+; the equality tests, and the shifts between the comparisons and `+`.
 (def %sh-ar-levels
   (list (list "||")
         (list "&&")
+        (list "|")
+        (list "^")
+        (list "&")
         (list "==" "!=")
         (list "<=" ">=" "<" ">")
+        (list "<<" ">>")
         (list "+" "-")
         (list "*" "/" "%")))
 
@@ -1110,7 +1116,25 @@
                        (error "ash: arithmetic: division by 0")
                        (convert (/ a b) %int))))
         (pair "%"  (fn (_ a b)
-                     (if (= b 0) (error "ash: arithmetic: division by 0") (% a b))))))
+                     (if (= b 0) (error "ash: arithmetic: division by 0") (% a b))))
+        ; Int-only operators, which is all POSIX arithmetic has: the tower's
+        ; wider numbers never reach here because every operand is an integer.
+        (pair "&"  (fn (_ a b) (& a b)))
+        (pair "|"  (fn (_ a b) (| a b)))
+        (pair "^"  (fn (_ a b) (^ a b)))
+        (pair "<<" (fn (_ a b) (<< a b)))
+        (pair ">>" (fn (_ a b) (>> a b)))))
+
+(def %sh-ar-flatten
+  (fn (self levels out)
+    (if (null? levels)
+      out
+      (self (rest levels) (List append out (first levels))))))
+
+; Every operator name, whatever its precedence, taken from the levels so the
+; two cannot drift apart.  Below %sh-ar-flatten because this is a value read
+; as the file loads, not a body resolved when it is called.
+(def %sh-ar-op-names (%sh-ar-flatten %sh-ar-levels ()))
 
 (def %sh-ar-skip-ws
   (fn (self s i n)
@@ -1120,13 +1144,25 @@
 
 ; Which of this level's operators the text at I begins with, or nil.  The level
 ; lists put `<=` before `<` so the longer match is found first.
-(def %sh-ar-match-op
-  (fn (self s i n ops)
-    (if (null? ops)
-      ()
-      (if (%sh-str-starts? (substring s i n) (first ops))
-        (first ops)
-        (self s i n (rest ops))))))
+(def %sh-ar-op-here?
+  (fn (_ s i n name)
+    (let ((end (+ i (string-length name))))
+      (and (<= end n) (string=? (substring s i end) name)))))
+
+; The operator written at I, longest first, whatever its precedence.  Asking
+; one level at a time would read `a||b` as a bitwise or: `|` binds tighter, so
+; its level is tried first and would take only the first character.
+(def %sh-ar-op-at
+  (fn (self s i n names best)
+    (if (null? names)
+      best
+      (let ((name (first names)))
+        (self s i n (rest names)
+          (if (and (%sh-ar-op-here? s i n name)
+                   (or (null? best)
+                       (> (string-length name) (string-length best))))
+            name
+            best))))))
 
 (def %sh-ar-digits-end
   (fn (self s i n)
@@ -1165,6 +1201,11 @@
               (let ((r (%sh-ar-primary s (+ i 1) n)))
                 (%sh-ar (%sh-bool-int (not (%sh-truthy? (%sh-ar-val r))))
                         (%sh-ar-pos r))))
+            ; Two's complement, written as arithmetic so it needs no word
+            ; width: ~x is -(x + 1) for every integer.
+            ((= c #\~)
+              (let ((r (%sh-ar-primary s (+ i 1) n)))
+                (%sh-ar (- 0 (+ (%sh-ar-val r) 1)) (%sh-ar-pos r))))
             ((%sh-digit? c)
               (let ((e (%sh-ar-digits-end s i n)))
                 (%sh-ar (%sh-ar-num (substring s i e)) e)))
@@ -1185,8 +1226,8 @@
 (set! %sh-ar-level-loop
   (fn (_ s left n levels)
     (let ((i (%sh-ar-skip-ws s (%sh-ar-pos left) n)))
-      (let ((op (%sh-ar-match-op s i n (first levels))))
-        (if (null? op)
+      (let ((op (%sh-ar-op-at s i n %sh-ar-op-names ())))
+        (if (or (null? op) (not (%sh-word-in? op (first levels))))
           (%sh-ar (%sh-ar-val left) i)
           (let ((right (%sh-ar-level s (+ i (string-length op)) n (rest levels))))
             (%sh-ar-level-loop s
