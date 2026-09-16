@@ -137,16 +137,59 @@
   (fn (self l acc)
     (if (null? l) acc (self (rest l) (pair (first l) acc)))))
 
-(def length (fn (_ l) (List length l)))
-(def append (fn (_ a b) (List append a b)))
-(def map (fn (_ f l) (List map f l)))
-(def filter (fn (_ p l) (List filter p l)))
-(def take (fn (_ n l) (List take n l)))
-(def drop (fn (_ n l) (List drop n l)))
-(def nth (fn (_ n l) (List ref n l)))
-; %sh-run-builtin's `[` arm forwards `last` to the platform, so it must be
-; bound here or `[ x = x ]` raises Unbound.
-(def last (fn (_ l) (List last l)))
+; The rest of the list vocabulary walks pairs too, for cost.  A (List ...)
+; method enters through fold and from-seq -- 25,000 to 40,000 heap objects a
+; call before it reaches an element -- and the evaluator calls these for every
+; word and every command: `[ a = b ]` alone asked for a length, a take and a
+; last.  Every caller holds a proper list, so none needs the sequence
+; conversion the class exists to provide.
+(def length (fn (_ l) (%ash-len l 0)))
+(def %ash-len
+  (fn (self l n) (if (null? l) n (self (rest l) (+ n 1)))))
+
+(def append (fn (_ a b) (%ash-rev (%ash-rev a ()) b)))
+
+(def map (fn (_ f l) (%ash-rev (%ash-map f l ()) ())))
+(def %ash-map
+  (fn (self f l acc)
+    (if (null? l) acc (self f (rest l) (pair (f (first l)) acc)))))
+
+(def filter (fn (_ p l) (%ash-rev (%ash-filter p l ()) ())))
+(def %ash-filter
+  (fn (self p l acc)
+    (match
+      ((null? l) acc)
+      ((p (first l)) (self p (rest l) (pair (first l) acc)))
+      (#t (self p (rest l) acc)))))
+
+(def take (fn (_ n l) (%ash-rev (%ash-take n l ()) ())))
+(def %ash-take
+  (fn (self n l acc)
+    (match
+      ((<= n 0) acc)
+      ((null? l) acc)
+      (#t (self (- n 1) (rest l) (pair (first l) acc))))))
+
+(def drop
+  (fn (self n l)
+    (match
+      ((<= n 0) l)
+      ((null? l) l)
+      (#t (self (- n 1) (rest l))))))
+
+; Past the end is nil rather than a raise; every caller checks the length
+; first.
+(def nth
+  (fn (_ n l) (let ((tail (drop n l))) (if (null? tail) () (first tail)))))
+
+; %sh-run-builtin's `[` arm uses `last`, so it must be bound here or
+; `[ x = x ]` raises Unbound.
+(def last
+  (fn (self l)
+    (match
+      ((null? l) ())
+      ((null? (rest l)) (first l))
+      (#t (self (rest l))))))
 (def set-first! %set-first!)
 
 ; --- The shell's syscalls ----------------------------------------------------
@@ -206,9 +249,9 @@
       (fn (self acc)
         (let ((ch (%sh-read-char)))
           (if (null? ch)
-            (if (null? acc) () (bytes->str (List reverse acc)))
+            (if (null? acc) () (bytes->str (reverse acc)))
             (if (= ch 10)
-              (bytes->str (List reverse acc))
+              (bytes->str (reverse acc))
               (self (pair (integer->char ch) acc)))))))
     (go ())))
 
@@ -244,10 +287,10 @@
           (if (null? b)
             (do
               (set! sh-read-hit-eof #t)
-              (if (null? acc) () (bytes->str (List reverse acc))))
+              (if (null? acc) () (bytes->str (reverse acc))))
             (let ((c (first b)))
               (if (= c 10)
-                (bytes->str (List reverse acc))
+                (bytes->str (reverse acc))
                 (self (pair (integer->char c) acc))))))))
     (set! sh-read-hit-eof ())
     (go ())))
@@ -261,7 +304,7 @@
   (fn (self chunks acc)
     (if (null? chunks)
       acc
-      (self (rest chunks) (List append (first chunks) acc)))))
+      (self (rest chunks) (append (first chunks) acc)))))
 
 (def sh-read-all-fd
   (fn (_ fd)
