@@ -1819,19 +1819,90 @@
       (if suppress () (newline))
       0)))
 
+; The working directory as a path rather than as an inode: the route the
+; shell took to it, with any symlink on that route left as it was written.
+; POSIX folds `.` and `..` in a cd operand by text instead of by following the
+; link, so `cd /tmp` then `cd ..` arrives at `/` even where /tmp is a symlink
+; to /private/tmp.  getcwd can only answer the resolved path, so the shell
+; keeps its own and seeds it from getcwd once.
+(def %sh-pwd-logical ())
+
+(def %sh-cwd-logical
+  (fn (_)
+    (if (null? %sh-pwd-logical)
+      (do
+        (set! %sh-pwd-logical (let ((d (sh-getcwd))) (if (null? d) "/" d)))
+        %sh-pwd-logical)
+      %sh-pwd-logical)))
+
+; One component against the components kept so far, which are held reversed.
+; A `..` at the root stays at the root.
+(def %sh-path-step
+  (fn (_ kept part)
+    (match
+      ((= (string-length part) 0) kept)
+      ((string=? part ".") kept)
+      ((string=? part "..") (if (null? kept) kept (rest kept)))
+      (#t (pair part kept)))))
+
+; Fold `.` and `..` out of an absolute path by text.
+(def %sh-path-fold
+  (fn (_ path)
+    (let ((n (string-length path)))
+      (def walk
+        (fn (self i start kept)
+          (if (> i n)
+            kept
+            (if (or (= i n) (= (string-ref path i) #\/))
+              (self (+ i 1) (+ i 1)
+                (%sh-path-step kept (substring path start i)))
+              (self (+ i 1) start kept)))))
+      (let ((parts (reverse (walk 0 0 ()))))
+        (if (null? parts) "/" (string-append "/" (Str8 join "/" parts)))))))
+
+; Where an operand points, read against the logical directory rather than the
+; resolved one.
+(def %sh-cd-target
+  (fn (_ dir base)
+    (%sh-path-fold
+      (if (%sh-str-starts? dir "/")
+        dir
+        (string-append base (string-append "/" dir))))))
+
+; No operand means HOME.  `-` means OLDPWD, and answers () when there is none
+; to return to.
+(def %sh-cd-destination
+  (fn (_ wds)
+    (if (null? wds)
+      (let ((home (sh-getenv "HOME"))) (if (null? home) "/" home))
+      (let ((operand (first wds)))
+        (if (not (string=? operand "-"))
+          operand
+          (let ((old (sh-getenv "OLDPWD")))
+            (if (or (null? old) (= (string-length old) 0)) () old)))))))
+
 (def %sh-cd
   (fn (_ wds)
-    (let ((dir
-            (if (null? wds)
-              (let ((home (sh-getenv "HOME")))
-                (if (null? home) "/" home))
-              (first wds))))
-      (let ((result (sh-chdir dir)))
-        (if (= result -1)
-          (do
-            (%stderr "ash: cd: " dir ": No such file or directory\n")
-            1)
-          0)))))
+    (let ((dest (%sh-cd-destination wds)))
+      (if (null? dest)
+        (do (%stderr "ash: cd: OLDPWD not set\n") 1)
+        (let ((base (%sh-cwd-logical)))
+          (let ((target (%sh-cd-target dest base)))
+            (if (= (sh-chdir target) -1)
+              (do
+                (%stderr "ash: cd: " dest ": No such file or directory\n")
+                1)
+              (do
+                (sh-setenv "OLDPWD" base)
+                (sh-setenv "PWD" target)
+                (set! %sh-pwd-logical target)
+                ; `cd -` reports where it arrived, which is how a script can
+                ; use it without keeping its own copy of OLDPWD.
+                (unless (null? wds)
+                  (when (string=? (first wds) "-")
+                    (display target)
+                    (newline)))
+                0))))))))
 
 (def %sh-export
   (fn (_ wds)
@@ -1945,10 +2016,13 @@
 
 ; --- pwd / unset / read / . -----------------------------------------------
 
+; The logical directory, not getcwd's resolved one, and not $PWD either: a
+; plain assignment to PWD leaves the shell's own idea of where it is alone.
 (def %sh-pwd
   (fn (_ wds)
-    (let ((d (sh-getcwd)))
-      (if (null? d) 1 (do (display d) (newline) 0)))))
+    (display (%sh-cwd-logical))
+    (newline)
+    0))
 
 (def %sh-unset
   (fn (_ wds)
