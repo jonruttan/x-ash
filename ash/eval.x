@@ -504,6 +504,15 @@
 
 (def %sh-ifs-default " \t\n")
 
+; A shell starts with IFS set to that, whatever the environment held: POSIX
+; lets a shell ignore an inherited IFS, and dash and bash both do.  So `$IFS`
+; has a value to save, and `old=$IFS; IFS=:; ...; IFS=$old` puts splitting
+; back.  An image is written by another process, so a process that loads one
+; sets it again, the way $$ is read again.
+(sh-setenv "IFS" %sh-ifs-default)
+(set! %image-recache-hooks
+  (pair (fn (_) (sh-setenv "IFS" %sh-ifs-default)) %image-recache-hooks))
+
 (def %sh-ifs
   (fn (_)
     (let ((v (sh-getenv "IFS")))
