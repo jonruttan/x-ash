@@ -2969,17 +2969,11 @@
 (def %sh-declaration?
   (fn (_ word) (%sh-word-in? word %sh-declaration-utilities)))
 
+; A word whose first `=` comes after its first character.  One scan, and
+; nothing built: every word in assignment position is asked, the first word of
+; every command among them.
 (def %is-assignment?
-  (fn (_ word)
-    (def %has-eq ())
-    (set! %has-eq
-      (fn (_ i)
-        (if (= i (string-length word))
-          ()
-          (if (= (string-ref word i) (convert #\= %int))
-            (if (= i 0) () #t)
-            (%has-eq (+ i 1))))))
-    (if (= (string-length word) 0) () (%has-eq 0))))
+  (fn (_ word) (fx<? 0 (%sh-first-eq word 0 (string-length word)))))
 
 ; The leading NAME=value words, and the command left after them.  Answers
 ; (pair assignments remaining).
