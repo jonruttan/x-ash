@@ -1239,65 +1239,117 @@
 (def %sh-ar-primary ())
 
 (set! %sh-ar-primary
-  (fn (_ s i0 n)
+  (fn (_ s i0 n live?)
     (let ((i (%sh-ar-skip-ws s i0 n)))
       (if (>= i n)
         (%sh-ar 0 i)
         (let ((c (string-ref s i)))
           (cond
             ((= c #\()
-              (let ((inner (%sh-ar-level s (+ i 1) n %sh-ar-levels)))
+              (let ((inner (%sh-ar-conditional s (+ i 1) n live?)))
                 ; Step over the closing paren if it is there.
                 (let ((e (%sh-ar-skip-ws s (%sh-ar-pos inner) n)))
                   (%sh-ar (%sh-ar-val inner)
                           (if (and (< e n) (= (string-ref s e) #\))) (+ e 1) e)))))
             ((= c #\-)
-              (let ((r (%sh-ar-primary s (+ i 1) n)))
+              (let ((r (%sh-ar-primary s (+ i 1) n live?)))
                 (%sh-ar (- 0 (%sh-ar-val r)) (%sh-ar-pos r))))
-            ((= c #\+) (%sh-ar-primary s (+ i 1) n))
+            ((= c #\+) (%sh-ar-primary s (+ i 1) n live?))
             ((= c #\!)
-              (let ((r (%sh-ar-primary s (+ i 1) n)))
+              (let ((r (%sh-ar-primary s (+ i 1) n live?)))
                 (%sh-ar (%sh-bool-int (not (%sh-truthy? (%sh-ar-val r))))
                         (%sh-ar-pos r))))
             ; Two's complement, written as arithmetic so it needs no word
             ; width: ~x is -(x + 1) for every integer.
             ((= c #\~)
-              (let ((r (%sh-ar-primary s (+ i 1) n)))
+              (let ((r (%sh-ar-primary s (+ i 1) n live?)))
                 (%sh-ar (- 0 (+ (%sh-ar-val r) 1)) (%sh-ar-pos r))))
+            ; A literal is read whether or not its branch is taken, so a
+            ; digit its base does not have is still refused.  What a dead
+            ; branch skips is arithmetic, not spelling.
             ((%sh-digit? c)
               (let ((e (%sh-ar-number-end s i n)))
-                (%sh-ar (%sh-ar-num (substring s i e)) e)))
+                (let ((v (%sh-ar-num (substring s i e))))
+                  (%sh-ar (if live? v 0) e))))
             ((%sh-name-start? c)
               (let ((e (%sh-name-end s i n)))
-                (%sh-ar (%sh-ar-num (%sh-var-value (substring s i e))) e)))
+                (%sh-ar (if live? (%sh-ar-num (%sh-var-value (substring s i e))) 0)
+                        e)))
             ; Anything else is not arithmetic; step over it rather than loop.
             (else (%sh-ar 0 (+ i 1)))))))))
 
 (set! %sh-ar-level
-  (fn (_ s i n levels)
+  (fn (_ s i n levels live?)
     (if (null? levels)
-      (%sh-ar-primary s i n)
-      (%sh-ar-level-loop s (%sh-ar-level s i n (rest levels)) n levels))))
+      (%sh-ar-primary s i n live?)
+      (%sh-ar-level-loop s (%sh-ar-level s i n (rest levels) live?) n levels
+                         live?))))
 
 ; Left-associative: fold each further operator of this level onto what is
-; already built.
+; already built.  LIVE? says whether this side of the expression is one the
+; answer depends on; when it is not, the text is still walked so the position
+; comes out right, and nothing is computed.
 (set! %sh-ar-level-loop
-  (fn (_ s left n levels)
+  (fn (_ s left n levels live?)
     (let ((i (%sh-ar-skip-ws s (%sh-ar-pos left) n)))
       (let ((op (%sh-ar-op-at s i n %sh-ar-op-names ())))
         (if (or (null? op) (not (%sh-word-in? op (first levels))))
           (%sh-ar (%sh-ar-val left) i)
-          (let ((right (%sh-ar-level s (+ i (string-length op)) n (rest levels))))
-            (%sh-ar-level-loop s
-              (%sh-ar ((%sh-table-get op %sh-ar-ops)
-                        (%sh-ar-val left) (%sh-ar-val right))
-                      (%sh-ar-pos right))
-              n levels)))))))
+          (let ((known (%sh-ar-known op (%sh-ar-val left) live?)))
+            (let ((right (%sh-ar-level s (+ i (string-length op)) n (rest levels)
+                                       (and live? (null? known)))))
+              (%sh-ar-level-loop s
+                (%sh-ar (%sh-ar-combine op known (%sh-ar-val left)
+                                        (%sh-ar-val right) live?)
+                        (%sh-ar-pos right))
+                n levels live?))))))))
+
+; What `&&` and `||` answer from the left alone, or () when the right side is
+; still needed.  C settles this and POSIX defers to C: the side not taken is
+; not evaluated, which is what lets `$((n && total/n))` guard its own
+; division.
+(def %sh-ar-shorts
+  (list (pair "&&" (fn (_ a) (if (%sh-truthy? a) () 0)))
+        (pair "||" (fn (_ a) (if (%sh-truthy? a) 1 ())))))
+
+(def %sh-ar-known
+  (fn (_ op left live?)
+    (if (not live?)
+      ()
+      (let ((short (%sh-table-get op %sh-ar-shorts)))
+        (if (null? short) () (short left))))))
+
+(def %sh-ar-combine
+  (fn (_ op known left right live?)
+    (match
+      ((not live?) 0)
+      ((not (null? known)) known)
+      (#t ((%sh-table-get op %sh-ar-ops) left right)))))
+
+; `c ? a : b`, looser than every binary operator and grouping to the right.
+; Both branches are walked so the expression ends where it should; only the
+; one taken is evaluated.
+(def %sh-ar-conditional ())
+
+(set! %sh-ar-conditional
+  (fn (_ s i n live?)
+    (let ((test (%sh-ar-level s i n %sh-ar-levels live?)))
+      (let ((q (%sh-ar-skip-ws s (%sh-ar-pos test) n)))
+        (if (or (>= q n) (not (= (string-ref s q) #\?)))
+          test
+          (let ((taken (and live? (%sh-truthy? (%sh-ar-val test)))))
+            (let ((yes (%sh-ar-conditional s (+ q 1) n taken)))
+              (let ((c (%sh-ar-skip-ws s (%sh-ar-pos yes) n)))
+                (let ((no (%sh-ar-conditional s
+                            (if (and (< c n) (= (string-ref s c) #\:)) (+ c 1) c)
+                            n (and live? (not taken)))))
+                  (%sh-ar (if taken (%sh-ar-val yes) (%sh-ar-val no))
+                          (%sh-ar-pos no)))))))))))
 
 (def %sh-arith-eval
   (fn (_ text)
     (let ((n (string-length text)))
-      (convert (%sh-ar-val (%sh-ar-level text 0 n %sh-ar-levels)) %string))))
+      (convert (%sh-ar-val (%sh-ar-conditional text 0 n #t)) %string))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
 (def %sh-arith?
