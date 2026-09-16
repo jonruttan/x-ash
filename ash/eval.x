@@ -2769,15 +2769,56 @@
             (%has-eq (+ i 1))))))
     (if (= (string-length word) 0) () (%has-eq 0))))
 
-(def %process-assignments
-  (fn (_ wds)
-    (if (null? wds)
-      ()
-      (if (%is-assignment? (first wds))
-        (do
-          (%sh-export (list (first wds)))
-          (%process-assignments (rest wds)))
-        wds))))
+; The leading NAME=value words, and the command left after them.  Answers
+; (pair assignments remaining).
+(def %sh-split-assignments
+  (fn (self wds assigns)
+    (if (and (not (null? wds)) (%is-assignment? (first wds)))
+      (self (rest wds) (pair (first wds) assigns))
+      (pair (reverse assigns) wds))))
+
+(def %sh-apply-assignments
+  (fn (self assigns)
+    (unless (null? assigns)
+      (%sh-export (list (first assigns)))
+      (self (rest assigns)))))
+
+(def %sh-assignment-name
+  (fn (_ word)
+    (let ((n (string-length word)))
+      (def find
+        (fn (self i)
+          (if (or (>= i n) (= (string-ref word i) #\=))
+            (substring word 0 i)
+            (self (+ i 1)))))
+      (find 0))))
+
+; What the named variables hold now, as (name . value) with () for unset, so
+; that what a prefix assignment covered can be put back exactly.
+(def %sh-save-values
+  (fn (self assigns saved)
+    (if (null? assigns)
+      saved
+      (let ((name (%sh-assignment-name (first assigns))))
+        (self (rest assigns) (pair (pair name (sh-getenv name)) saved))))))
+
+(def %sh-restore-values
+  (fn (self saved)
+    (unless (null? saved)
+      (let ((row (first saved)))
+        (if (null? (rest row))
+          (sh-unsetenv (first row))
+          (sh-setenv (first row) (rest row))))
+      (self (rest saved)))))
+
+; The builtins POSIX calls special.  A prefix assignment on one of them
+; outlives the command; on anything else it covers that command only.
+(def %sh-special-builtins
+  (list ":" "." "break" "continue" "eval" "exec" "exit" "export"
+        "readonly" "return" "set" "shift" "times" "trap" "unset"))
+
+(def %sh-special-builtin?
+  (fn (_ name) (%sh-word-in? name %sh-special-builtins)))
 ; --- Execute collected command ---
 
 ; Every arm of the dispatch below ended `(set! %sh-status status) status`, so
@@ -2790,26 +2831,50 @@
     ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
     ; would expand a variable's value -- `X='$Y'; echo $X` would print $Y's
     ; contents rather than the two characters it holds.
-    (let ((remaining (%process-assignments wds)))
-      (if (null? remaining)
-        ; A bare assignment is a command that did nothing and succeeded.
-        (%sh-set-status 0)
-        (let ((name (first remaining))
-              (args (rest remaining)))
-          (unless (null? %sh-opt-xtrace)
-            (%stderr "+ " (%sh-join-args remaining) "\n"))
-          (let ((body (%sh-fn-lookup name %sh-functions)))
+    (let ((split (%sh-split-assignments wds ())))
+      (let ((assigns (first split)) (remaining (rest split)))
+        (if (null? remaining)
+          ; A bare assignment is a command that did nothing and succeeded, and
+          ; the values it set are the shell's from here on.
+          (do (%sh-apply-assignments assigns) (%sh-set-status 0))
+          (do
+            (unless (null? %sh-opt-xtrace)
+              (%stderr "+ " (%sh-join-args remaining) "\n"))
             (%sh-exit-on-error
              (%sh-set-status
-              (cond
-                ; A function wins over an external and loses to a builtin, the
-                ; POSIX order.
-                ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
-                ; Redirections on a function call apply for the whole body, and
-                ; the shell's own descriptors must survive it -- the same
-                ; save/apply/restore a builtin gets.
-                ((not (null? body)) (%sh-run-fn-redir body args redirs))
-                (else (%sh-run-external name args redirs)))))))))))
+              (%sh-run-scoped assigns remaining redirs)))))))))
+
+; A prefix assignment covers one command: it is in the environment the command
+; runs in, and the shell's own value comes back afterwards, whether the
+; command returned or raised.  A special builtin keeps it instead, which is
+; what POSIX asks and what makes `X=1 export Y=2` leave X set.
+(def %sh-run-scoped
+  (fn (_ assigns remaining redirs)
+    (if (or (null? assigns) (%sh-special-builtin? (first remaining)))
+      (do
+        (%sh-apply-assignments assigns)
+        (%sh-dispatch remaining redirs))
+      (let ((saved (%sh-save-values assigns ())))
+        (%sh-apply-assignments assigns)
+        (guard (e (do (%sh-restore-values saved) (error e)))
+          (let ((status (%sh-dispatch remaining redirs)))
+            (%sh-restore-values saved)
+            status))))))
+
+(def %sh-dispatch
+  (fn (_ remaining redirs)
+    (let ((name (first remaining))
+          (args (rest remaining)))
+      (let ((body (%sh-fn-lookup name %sh-functions)))
+        (cond
+          ; A function wins over an external and loses to a builtin, the
+          ; POSIX order.
+          ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
+          ; Redirections on a function call apply for the whole body, and
+          ; the shell's own descriptors must survive it -- the same
+          ; save/apply/restore a builtin gets.
+          ((not (null? body)) (%sh-run-fn-redir body args redirs))
+          (else (%sh-run-external name args redirs)))))))
 
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error
