@@ -1138,16 +1138,24 @@
         (pair "<<" (fn (_ a b) (<< a b)))
         (pair ">>" (fn (_ a b) (>> a b)))))
 
-(def %sh-ar-flatten
-  (fn (self levels out)
+(def %sh-ar-rank-names
+  (fn (self names rank out)
+    (if (null? names)
+      out
+      (self (rest names) rank (pair (pair (first names) rank) out)))))
+
+(def %sh-ar-rank-levels
+  (fn (self levels rank out)
     (if (null? levels)
       out
-      (self (rest levels) (append out (first levels))))))
+      (self (rest levels) (+ rank 1)
+            (%sh-ar-rank-names (first levels) rank out)))))
 
-; Every operator name, whatever its precedence, taken from the levels so the
-; two cannot drift apart.  Below %sh-ar-flatten because this is a value read
-; as the file loads, not a body resolved when it is called.
-(def %sh-ar-op-names (%sh-ar-flatten %sh-ar-levels ()))
+; Every binary operator as (name . rank), its rank being its level's place in
+; %sh-ar-levels counted from 1 at the loosest -- taken from the levels so the
+; two cannot drift apart.  Below the walks that build it because this is a
+; value read as the file loads, not a body resolved when it is called.
+(def %sh-ar-ranks (%sh-ar-rank-levels %sh-ar-levels 1 ()))
 
 (def %sh-ar-skip-ws
   (fn (self s i n)
@@ -1155,27 +1163,37 @@
       (self s (+ i 1) n)
       i)))
 
-; Which of this level's operators the text at I begins with, or nil.  The level
-; lists put `<=` before `<` so the longer match is found first.
+; Does the text from K spell NAME from J?  It is asked of every operator name
+; wherever an operator could stand and nearly always answers no, so it builds
+; nothing and tests only with `=`: the ordering comparisons go through the
+; numeric tower and cost hundreds of heap objects each.  J counts up to LEN
+; and K up to N exactly, which is what lets equality stand in for them.
+(def %sh-ar-spells?
+  (fn (self s k n name j len)
+    (match
+      ((= j len) #t)
+      ((= k n) ())
+      ((= (string-ref s k) (string-ref name j))
+        (self s (+ k 1) n name (+ j 1) len))
+      (#t ()))))
+
 (def %sh-ar-op-here?
   (fn (_ s i n name)
-    (let ((end (+ i (string-length name))))
-      (and (<= end n) (string=? (substring s i end) name)))))
+    (%sh-ar-spells? s i n name 0 (string-length name))))
 
-; The operator written at I, longest first, whatever its precedence.  Asking
-; one level at a time would read `a||b` as a bitwise or: `|` binds tighter, so
-; its level is tried first and would take only the first character.
+; The operator written at I as its (name . rank) entry, or nil: the longest
+; spelling, whatever its rank.  Asking one level at a time would read `a||b` as
+; a bitwise or, because `|` binds tighter and would be found first.
 (def %sh-ar-op-at
-  (fn (self s i n names best)
-    (if (null? names)
-      best
-      (let ((name (first names)))
-        (self s i n (rest names)
-          (if (and (%sh-ar-op-here? s i n name)
-                   (or (null? best)
-                       (> (string-length name) (string-length best))))
-            name
-            best))))))
+  (fn (self s i n entries best)
+    (match
+      ((null? entries) best)
+      ((not (%sh-ar-op-here? s i n (first (first entries))))
+        (self s i n (rest entries) best))
+      ((null? best) (self s i n (rest entries) (first entries)))
+      ((> (string-length (first (first entries))) (string-length (first best)))
+        (self s i n (rest entries) (first entries)))
+      (#t (self s i n (rest entries) best)))))
 
 (def %sh-ar-digits-end
   (fn (self s i n)
@@ -1247,8 +1265,8 @@
         (#t (let ((v (guard (_ ()) (convert text %int))))
               (if (null? v) 0 v)))))))
 
-(def %sh-ar-level ())
-(def %sh-ar-level-loop ())
+(def %sh-ar-binary ())
+(def %sh-ar-climb ())
 (def %sh-ar-primary ())
 
 (set! %sh-ar-primary
@@ -1291,31 +1309,44 @@
             ; Anything else is not arithmetic; step over it rather than loop.
             (else (%sh-ar 0 (+ i 1)))))))))
 
-(set! %sh-ar-level
-  (fn (_ s i n levels live?)
-    (if (null? levels)
-      (%sh-ar-primary s i n live?)
-      (%sh-ar-level-loop s (%sh-ar-level s i n (rest levels) live?) n levels
-                         live?))))
+; Operands joined by binary operators, read by rank.  An operator ranked below
+; LOWEST belongs to an enclosing call and ends this one.  The right operand of
+; a rank-R operator is read with LOWEST at R+1, which takes tighter operators
+; into it and leaves equal ones to this loop, so every level is
+; left-associative.  The operator after an operand is read once for each call
+; still open there, not once for every level.
+(set! %sh-ar-binary
+  (fn (_ s i n lowest live?)
+    (%sh-ar-climb s (%sh-ar-primary s i n live?) n lowest live?)))
 
-; Left-associative: fold each further operator of this level onto what is
-; already built.  LIVE? says whether this side of the expression is one the
-; answer depends on; when it is not, the text is still walked so the position
-; comes out right, and nothing is computed.
-(set! %sh-ar-level-loop
-  (fn (_ s left n levels live?)
+; Does this operator entry carry on an expression whose operators rank LOWEST
+; or above?
+(def %sh-ar-binds?
+  (fn (_ entry lowest)
+    (match
+      ((null? entry) ())
+      ((< (rest entry) lowest) ())
+      (#t #t))))
+
+; Fold each further operator onto what is already built.  LIVE? says whether
+; this side of the expression is one the answer depends on; when it is not, the
+; text is still walked so the position comes out right, and nothing is
+; computed.
+(set! %sh-ar-climb
+  (fn (self s left n lowest live?)
     (let ((i (%sh-ar-skip-ws s (%sh-ar-pos left) n)))
-      (let ((op (%sh-ar-op-at s i n %sh-ar-op-names ())))
-        (if (or (null? op) (not (%sh-word-in? op (first levels))))
+      (let ((entry (if (< i n) (%sh-ar-op-at s i n %sh-ar-ranks ()) ())))
+        (if (not (%sh-ar-binds? entry lowest))
           (%sh-ar (%sh-ar-val left) i)
-          (let ((known (%sh-ar-known op (%sh-ar-val left) live?)))
-            (let ((right (%sh-ar-level s (+ i (string-length op)) n (rest levels)
-                                       (and live? (null? known)))))
-              (%sh-ar-level-loop s
-                (%sh-ar (%sh-ar-combine op known (%sh-ar-val left)
-                                        (%sh-ar-val right) live?)
-                        (%sh-ar-pos right))
-                n levels live?))))))))
+          (let ((op (first entry)))
+            (let ((known (%sh-ar-known op (%sh-ar-val left) live?)))
+              (let ((right (%sh-ar-binary s (+ i (string-length op)) n
+                             (+ (rest entry) 1) (and live? (null? known)))))
+                (self s
+                  (%sh-ar (%sh-ar-combine op known (%sh-ar-val left)
+                                          (%sh-ar-val right) live?)
+                          (%sh-ar-pos right))
+                  n lowest live?)))))))))
 
 ; What `&&` and `||` answer from the left alone, or () when the right side is
 ; still needed.  C settles this and POSIX defers to C: the side not taken is
@@ -1346,7 +1377,7 @@
 
 (set! %sh-ar-conditional
   (fn (_ s i n live?)
-    (let ((test (%sh-ar-level s i n %sh-ar-levels live?)))
+    (let ((test (%sh-ar-binary s i n 1 live?)))
       (let ((q (%sh-ar-skip-ws s (%sh-ar-pos test) n)))
         (if (or (>= q n) (not (= (string-ref s q) #\?)))
           test
