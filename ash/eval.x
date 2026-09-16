@@ -202,16 +202,19 @@
 ;
 ; An unset variable expands to the empty string unless `set -u` is on.
 
-(def %sh-digit? (fn (_ c) (and (>= c #\0) (<= c #\9))))
-
+; %sh-digit? is tokens.x's.  These classify characters out of string-ref, so
+; they compare with the unchecked integer door -- see ash/prims.x.
 (def %sh-name-start?
   (fn (_ c)
-    (or (and (>= c #\A) (<= c #\Z))
-        (and (>= c #\a) (<= c #\z))
-        (= c #\_))))
+    (match
+      ((fx<? c #\A) ())
+      ((not (fx<? #\Z c)) #t)
+      ((= c #\_) #t)
+      ((fx<? c #\a) ())
+      (#t (not (fx<? #\z c))))))
 
 (def %sh-name-char?
-  (fn (_ c) (or (%sh-name-start? c) (%sh-digit? c))))
+  (fn (_ c) (match ((%sh-name-start? c) #t) (#t (%sh-digit? c)))))
 
 ; `set -u`: a plain `$X` on an unset name is an error.  ONLY the plain form --
 ; `${X:-default}` and `${X+alt}` exist precisely to ask about an unset
@@ -322,11 +325,10 @@
 ; The end of the name run starting at I.
 (def %sh-name-end
   (fn (self s i n)
-    (if (>= i n)
-      i
-      (if (%sh-name-char? (string-ref s i))
-        (self s (+ i 1) n)
-        i))))
+    (match
+      ((not (fx<? i n)) i)
+      ((%sh-name-char? (string-ref s i)) (self s (fx+ i 1) n))
+      (#t i))))
 
 ; The index of the closing brace at or after I, or -1.
 ; The `}` closing a `${` opened before I, or -1.  Depth-aware, so a default
@@ -1013,7 +1015,7 @@
 
 (def %sh-plain-run
   (fn (self s i n mode meta? tilde?)
-    (if (>= i n)
+    (if (not (fx<? i n))
       (%sh-run i meta?)
       (let ((c (string-ref s i)))
         ; `~` ends a plain run only where one could expand; otherwise it is
@@ -1021,7 +1023,7 @@
         ; test per run, not per character.
         (if (and (%sh-plain-char? c mode)
                  (not (and tilde? (= c #\~))))
-          (self s (+ i 1) n mode (or meta? (%sh-glob-meta-char? c)) tilde?)
+          (self s (fx+ i 1) n mode (or meta? (%sh-glob-meta-char? c)) tilde?)
           (%sh-run i meta?))))))
 
 ; --- Tilde expansion --------------------------------------------------------
@@ -1045,9 +1047,10 @@
 ; are not implemented.
 (def %sh-first-eq
   (fn (self s i n)
-    (if (>= i n)
-      -1
-      (if (= (string-ref s i) #\=) i (self s (+ i 1) n)))))
+    (match
+      ((not (fx<? i n)) -1)
+      ((= (string-ref s i) #\=) i)
+      (#t (self s (fx+ i 1) n)))))
 
 (def %sh-tilde-pos?
   (fn (_ s i assign? eq)
@@ -1159,9 +1162,10 @@
 
 (def %sh-ar-skip-ws
   (fn (self s i n)
-    (if (and (< i n) (%sh-ws-char? (string-ref s i)))
-      (self s (+ i 1) n)
-      i)))
+    (match
+      ((not (fx<? i n)) i)
+      ((%sh-ws-char? (string-ref s i)) (self s (fx+ i 1) n))
+      (#t i))))
 
 ; Does the text from K spell NAME from J?  It is asked of every operator name
 ; wherever an operator could stand and nearly always answers no, so it builds
@@ -1197,13 +1201,19 @@
 
 (def %sh-ar-digits-end
   (fn (self s i n)
-    (if (and (< i n) (%sh-digit? (string-ref s i))) (self s (+ i 1) n) i)))
+    (match
+      ((not (fx<? i n)) i)
+      ((%sh-digit? (string-ref s i)) (self s (fx+ i 1) n))
+      (#t i))))
 
 (def %sh-hex-digit?
   (fn (_ c)
-    (or (%sh-digit? c)
-        (and (>= c #\a) (<= c #\f))
-        (and (>= c #\A) (<= c #\F)))))
+    (match
+      ((%sh-digit? c) #t)
+      ((fx<? c #\A) ())
+      ((not (fx<? #\F c)) #t)
+      ((fx<? c #\a) ())
+      (#t (not (fx<? #\f c))))))
 
 (def %sh-digit-value
   (fn (_ c)
@@ -1215,7 +1225,10 @@
 
 (def %sh-ar-hex-end
   (fn (self s i n)
-    (if (and (< i n) (%sh-hex-digit? (string-ref s i))) (self s (+ i 1) n) i)))
+    (match
+      ((not (fx<? i n)) i)
+      ((%sh-hex-digit? (string-ref s i)) (self s (fx+ i 1) n))
+      (#t i))))
 
 ; A leading `0x` is hexadecimal; everything else is digits, and whether those
 ; read as octal or decimal is settled by the leading zero when the text is
@@ -1843,20 +1856,16 @@
           op
           ())))))
 
+(def %all-digits-from?
+  (fn (self s i len)
+    (match
+      ((= i len) #t)
+      ((%sh-digit? (string-ref s i)) (self s (fx+ i 1) len))
+      (#t ()))))
+
 (def %all-digits?
   (fn (_ s)
-    (def %check ())
-    (set! %check
-      (fn (_ i len)
-        (if (= i len)
-          #t
-          (let ((c (string-ref s i)))
-            (if (and (>= c (convert #\0 %int)) (<= c (convert #\9 %int)))
-              (%check (+ i 1) len)
-              ())))))
-    (if (= (string-length s) 0)
-      ()
-      (%check 0 (string-length s)))))
+    (if (= (string-length s) 0) () (%all-digits-from? s 0 (string-length s)))))
 
 ; Which descriptor an operator redirects when the script names none.
 (def %sh-input-ops (list "<" "<>" "<&" "<<" "<<-"))
