@@ -2030,47 +2030,136 @@
       0
       (do (sh-unsetenv (first wds)) (%sh-unset (rest wds))))))
 
-; `read VAR...` -- one line from stdin, split on whitespace across the names,
-; with the LAST name taking everything that is left (POSIX).  A bare `read`
-; with no names still consumes the line, and EOF answers 1, which is what
-; `while read line` needs to terminate.
-(def %sh-read-split
-  (fn (self s i n)
-    ; index of the first non-space at or after i
-    (if (>= i n)
-      i
-      (let ((c (string-ref s i)))
-        (if (or (= c #\space) (= c #\tab)) (self s (+ i 1) n) i)))))
+; `read [-r] VAR...` -- one line from stdin, split on IFS across the names,
+; with the LAST name taking everything that is left, separators and all.  A
+; bare `read` with no names still consumes the line.
+;
+; Without -r a backslash quotes the character after it: the backslash goes
+; away, the character keeps no special meaning, and a backslash at the end of
+; a line joins the next one.  With -r a backslash is an ordinary character,
+; which is what reading arbitrary data needs.
+;
+; The status is non-zero at end of input, including when a final line arrives
+; without a terminator -- the line is still assigned, but `while read line`
+; stops rather than seeing it twice.
+(def %sh-read-options
+  (fn (self wds raw?)
+    (if (null? wds)
+      (pair raw? ())
+      (let ((w (first wds)))
+        (match
+          ((string=? w "-r") (self (rest wds) #t))
+          ((string=? w "--") (pair raw? (rest wds)))
+          ((and (%sh-str-starts? w "-") (> (string-length w) 1)) ())
+          (#t (pair raw? wds)))))))
 
-(def %sh-read-word-end
-  (fn (self s i n)
-    (if (>= i n)
-      i
-      (let ((c (string-ref s i)))
-        (if (or (= c #\space) (= c #\tab)) i (self s (+ i 1) n))))))
+; A line, joined with the ones after it while it ends in a quoting backslash.
+(def %sh-read-logical-line
+  (fn (self raw?)
+    (let ((line (sh-read-line-fd 0)))
+      (if (or (null? line) raw? (not (%sh-read-continues? line)))
+        line
+        (let ((head (substring line 0 (- (string-length line) 1))))
+          (let ((tail (self raw?)))
+            (if (null? tail) head (string-append head tail))))))))
+
+; A trailing backslash continues the line only when it is not itself quoted,
+; so an even number of them at the end is data.
+(def %sh-read-continues?
+  (fn (_ line)
+    (let ((n (string-length line)))
+      (def count
+        (fn (self i run)
+          (if (or (< i 0) (not (= (string-ref line i) #\\)))
+            run
+            (self (- i 1) (+ run 1)))))
+      (and (> n 0) (not (= 0 (% (count (- n 1) 0) 2)))))))
+
+; One field from I, stopping at the first delimiter that a backslash has not
+; quoted.  Answers (pair field next-index).
+(def %sh-read-field
+  (fn (_ line i n ifs raw?)
+    (def walk
+      (fn (self j pieces)
+        (if (>= j n)
+          (pair (Str8 join "" (reverse pieces)) j)
+          (let ((c (string-ref line j)))
+            (match
+              ((and (not raw?) (= c #\\) (< (+ j 1) n))
+                (self (+ j 2) (pair (substring line (+ j 1) (+ j 2)) pieces)))
+              ((%sh-in-ifs? c ifs) (pair (Str8 join "" (reverse pieces)) j))
+              (#t (self (+ j 1) (pair (substring line j (+ j 1)) pieces))))))))
+    (walk i ())))
+
+; The rest of the line, backslashes resolved.  Trailing IFS whitespace the
+; line ended with is dropped; whitespace a backslash quoted is kept, so each
+; piece carries whether it was quoted.
+(def %sh-read-rest
+  (fn (_ line i n ifs raw?)
+    (def walk
+      (fn (self j kept)
+        (if (>= j n)
+          kept
+          (let ((c (string-ref line j)))
+            (if (and (not raw?) (= c #\\) (< (+ j 1) n))
+              (self (+ j 2)
+                (pair (pair (substring line (+ j 1) (+ j 2)) #t) kept))
+              (self (+ j 1) (pair (pair (substring line j (+ j 1)) ()) kept)))))))
+    (%sh-read-text (%sh-read-trim (walk i ()) ifs))))
+
+; KEPT is reversed, so what the line ended with is at its head.
+(def %sh-read-trim
+  (fn (self kept ifs)
+    (if (null? kept)
+      kept
+      (let ((head (first kept)))
+        (let ((c (string-ref (first head) 0)))
+          (if (and (null? (rest head)) (%sh-in-ifs? c ifs) (%sh-ws-char? c))
+            (self (rest kept) ifs)
+            kept))))))
+
+(def %sh-read-text
+  (fn (self kept)
+    (def texts
+      (fn (self rows out)
+        (if (null? rows) out (self (rest rows) (pair (first (first rows)) out)))))
+    (Str8 join "" (texts kept ()))))
 
 (def %sh-read-assign
-  (fn (self names line i n)
-    (if (null? names)
-      0
-      (let ((start (%sh-read-split line i n)))
-        (if (null? (rest names))
-          ; Last name: the rest of the line, verbatim.
-          (do (sh-setenv (first names) (substring line start n)) 0)
-          (let ((e (%sh-read-word-end line start n)))
-            (sh-setenv (first names) (substring line start e))
-            (self (rest names) line e n)))))))
+  (fn (self names line i n ifs raw?)
+    (let ((start (%sh-ifs-ws-end line i n ifs)))
+      (if (null? (rest names))
+        (do (sh-setenv (first names) (%sh-read-rest line start n ifs raw?)) 0)
+        (let ((got (%sh-read-field line start n ifs raw?)))
+          (sh-setenv (first names) (first got))
+          (self (rest names) line (%sh-read-past line (rest got) n ifs) n
+                ifs raw?))))))
+
+; Step over the delimiter between two fields: any IFS whitespace, and at most
+; one delimiter that is not whitespace.
+(def %sh-read-past
+  (fn (_ line i n ifs)
+    (let ((after (%sh-ifs-ws-end line i n ifs)))
+      (if (and (< after n) (%sh-in-ifs? (string-ref line after) ifs))
+        (%sh-ifs-ws-end line (+ after 1) n ifs)
+        after))))
 
 ; Reads fd 0 DIRECTLY, not the engine's reader -- see sh-read-line-fd in
 ; ash/prims.x for why the two are not interchangeable.
 (def %sh-read
   (fn (_ wds)
-    (let ((line (sh-read-line-fd 0)))
-      (if (null? line)
-        1
-        (if (null? wds)
-          0
-          (%sh-read-assign wds line 0 (string-length line)))))))
+    (let ((opts (%sh-read-options wds ())))
+      (if (null? opts)
+        (do (%stderr "ash: read: " (first wds) ": invalid option\n") 2)
+        (let ((raw? (first opts)) (names (rest opts)))
+          (let ((line (%sh-read-logical-line raw?)))
+            (if (null? line)
+              1
+              (do
+                (unless (null? names)
+                  (%sh-read-assign names line 0 (string-length line)
+                                   (%sh-ifs) raw?))
+                (if (null? sh-read-hit-eof) 0 1)))))))))
 
 (def %sh-return
   (fn (_ wds)

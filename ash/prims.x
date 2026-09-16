@@ -36,7 +36,7 @@
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
   sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd
-  sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
+  sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
 ; --- The tokenizer base ------------------------------------------------------
 ; (Base make-tok) is the isolated, type-free tokenizer base: ash's `;` is a
@@ -230,17 +230,26 @@
 ; that descriptor -- the engine's own, when input is a script.  A shell's read
 ; is specified to consume exactly the line it returns, and this is what that
 ; costs.
+; Set when the last read ended at end of input rather than at a newline.  The
+; `read` builtin answers a non-zero status in that case even though it has a
+; line to assign, which is what stops `while read line` on a file whose last
+; line has no terminator.
+(def sh-read-hit-eof ())
+
 (def sh-read-line-fd
   (fn (_ fd)
     (def go
       (fn (self acc)
         (let ((b (Sys fd-read fd 1)))
           (if (null? b)
-            (if (null? acc) () (bytes->str (List reverse acc)))
+            (do
+              (set! sh-read-hit-eof #t)
+              (if (null? acc) () (bytes->str (List reverse acc))))
             (let ((c (first b)))
               (if (= c 10)
                 (bytes->str (List reverse acc))
                 (self (pair (integer->char c) acc))))))))
+    (set! sh-read-hit-eof ())
     (go ())))
 
 ; --- Everything a descriptor has to give, to EOF -------------------------
