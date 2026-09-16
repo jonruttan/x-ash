@@ -169,7 +169,7 @@
 ### iterates and sets variable
 
 ```sh
-(do (sh-eval "for i in a b c; do :; done") (string=? (sh-getenv "i") "c"))
+(do (sh-eval "for i in a b c; do :; done") (string=? (%sh-var-get "i") "c"))
 ```
 ---
     #t
