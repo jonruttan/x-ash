@@ -1113,10 +1113,10 @@
         ; -10/3 -> -3).
         (pair "/"  (fn (_ a b)
                      (if (= b 0)
-                       (error "ash: arithmetic: division by 0")
+                       (error "arithmetic: division by 0")
                        (convert (/ a b) %int))))
         (pair "%"  (fn (_ a b)
-                     (if (= b 0) (error "ash: arithmetic: division by 0") (% a b))))
+                     (if (= b 0) (error "arithmetic: division by 0") (% a b))))
         ; Int-only operators, which is all POSIX arithmetic has: the tower's
         ; wider numbers never reach here because every operand is an integer.
         (pair "&"  (fn (_ a b) (& a b)))
@@ -1168,13 +1168,71 @@
   (fn (self s i n)
     (if (and (< i n) (%sh-digit? (string-ref s i))) (self s (+ i 1) n) i)))
 
-; An unset or non-numeric name is 0, which is POSIX.  `convert` ANSWERS NIL
+(def %sh-hex-digit?
+  (fn (_ c)
+    (or (%sh-digit? c)
+        (and (>= c #\a) (<= c #\f))
+        (and (>= c #\A) (<= c #\F)))))
+
+(def %sh-digit-value
+  (fn (_ c)
+    (let ((v (char->integer c)))
+      (match
+        ((%sh-digit? c) (- v (char->integer #\0)))
+        ((and (>= c #\a) (<= c #\f)) (+ 10 (- v (char->integer #\a))))
+        (#t (+ 10 (- v (char->integer #\A))))))))
+
+(def %sh-ar-hex-end
+  (fn (self s i n)
+    (if (and (< i n) (%sh-hex-digit? (string-ref s i))) (self s (+ i 1) n) i)))
+
+; A leading `0x` is hexadecimal; everything else is digits, and whether those
+; read as octal or decimal is settled by the leading zero when the text is
+; converted.
+(def %sh-ar-hex-prefix?
+  (fn (_ s i n)
+    (and (< (+ i 1) n)
+         (= (string-ref s i) #\0)
+         (let ((c (string-ref s (+ i 1)))) (or (= c #\x) (= c #\X))))))
+
+(def %sh-ar-number-end
+  (fn (_ s i n)
+    (if (%sh-ar-hex-prefix? s i n)
+      (%sh-ar-hex-end s (+ i 2) n)
+      (%sh-ar-digits-end s i n))))
+
+; The digits from I, read in BASE.  A digit the base does not have is an
+; error rather than a silent misreading: `08` is a typo for either 8 or 010,
+; and answering one of them would be a guess.
+(def %sh-ar-digits-value
+  (fn (self text i n base acc)
+    (if (>= i n)
+      acc
+      (let ((d (%sh-digit-value (string-ref text i))))
+        (if (>= d base)
+          (error (string-append "arithmetic: invalid number " text))
+          (self text (+ i 1) n base (+ (* acc base) d)))))))
+
+(def %sh-ar-hex?
+  (fn (_ text n) (and (> n 2) (%sh-ar-hex-prefix? text 0 n))))
+
+(def %sh-ar-octal?
+  (fn (_ text n)
+    (and (> n 1)
+         (= (string-ref text 0) #\0)
+         (%sh-digit? (string-ref text 1)))))
+
+; An unset or non-numeric name is 0, which is POSIX.  `convert` answers nil
 ; for both rather than raising, so a guard alone does not catch it -- that nil
 ; reached `+` as an operand and the whole expansion died.
 (def %sh-ar-num
   (fn (_ text)
-    (let ((v (guard (_ ()) (convert text %int))))
-      (if (null? v) 0 v))))
+    (let ((n (string-length text)))
+      (match
+        ((%sh-ar-hex? text n) (%sh-ar-digits-value text 2 n 16 0))
+        ((%sh-ar-octal? text n) (%sh-ar-digits-value text 1 n 8 0))
+        (#t (let ((v (guard (_ ()) (convert text %int))))
+              (if (null? v) 0 v)))))))
 
 (def %sh-ar-level ())
 (def %sh-ar-level-loop ())
@@ -1207,7 +1265,7 @@
               (let ((r (%sh-ar-primary s (+ i 1) n)))
                 (%sh-ar (- 0 (+ (%sh-ar-val r) 1)) (%sh-ar-pos r))))
             ((%sh-digit? c)
-              (let ((e (%sh-ar-digits-end s i n)))
+              (let ((e (%sh-ar-number-end s i n)))
                 (%sh-ar (%sh-ar-num (substring s i e)) e)))
             ((%sh-name-start? c)
               (let ((e (%sh-name-end s i n)))
