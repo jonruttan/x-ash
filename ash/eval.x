@@ -995,36 +995,42 @@
                       (substring tail (string-length op)
                         (string-length tail)))))))))))))
 
-; How far the ORDINARY text starting at I runs: up to the next character the
-; walk has an arm for.  In single quotes only the closing quote is special, so
-; a `'...'` region is one run.
-(def %sh-plain-char?
-  (fn (_ c mode)
-    (if (= mode %sh-mode-sq)
-      (not (= c #\'))
-      (not (or (= c #\') (= c #\") (= c #\\) (= c #\`) (= c #\$))))))
+; Does C end the ORDINARY text a run is reading?  The characters the walk has
+; an arm for do.  In single quotes only the closing quote is special, so a
+; `'...'` region is one run.  A `~` ends a run only where one could expand,
+; which is what TILDE? says; anywhere else it is ordinary text.
+;
+; One match on the character: an ordinary character, which is nearly every
+; character, is a handful of comparisons and builds nothing.
+(def %sh-run-stop?
+  (fn (_ c mode tilde?)
+    (match
+      ((= c #\') #t)
+      ((= c #\~) tilde?)
+      ((= mode %sh-mode-sq) ())
+      ((= c #\") #t)
+      ((= c #\\) #t)
+      ((= c #\`) #t)
+      ((= c #\$) #t)
+      (#t ()))))
 
 ; A plain run, and whether it holds a metacharacter, in one pass. Finding where
 ; the run ends looks at every character; the only other question about a run is
-; whether it contains `*`, `?`, `[` or `\`, so asking here costs one comparison
-; per character and saves two whole-field scans. The flag rides in through the
-; recursion so it accumulates, and `or` short-circuits once one is found.
+; whether it contains `*`, `?`, `[` or `\`, so asking here costs one test per
+; character and saves two whole-field scans.  The flag rides in through the
+; recursion, and once it is set the question is not asked again.
 (def %sh-run (fn (_ end meta?) (pair end meta?)))
 (def %sh-run-end (fn (_ r) (first r)))
 (def %sh-run-meta? (fn (_ r) (rest r)))
 
 (def %sh-plain-run
   (fn (self s i n mode meta? tilde?)
-    (if (not (fx<? i n))
-      (%sh-run i meta?)
-      (let ((c (string-ref s i)))
-        ; `~` ends a plain run only where one could expand; otherwise it is
-        ; ordinary text, so a word with no assignment pays one short-circuited
-        ; test per run, not per character.
-        (if (and (%sh-plain-char? c mode)
-                 (not (and tilde? (= c #\~))))
-          (self s (fx+ i 1) n mode (or meta? (%sh-glob-meta-char? c)) tilde?)
-          (%sh-run i meta?))))))
+    (match
+      ((not (fx<? i n)) (%sh-run i meta?))
+      ((%sh-run-stop? (string-ref s i) mode tilde?) (%sh-run i meta?))
+      (meta? (self s (fx+ i 1) n mode meta? tilde?))
+      (#t (self s (fx+ i 1) n mode (%sh-glob-meta-char? (string-ref s i))
+                tilde?)))))
 
 ; --- Tilde expansion --------------------------------------------------------
 ;
