@@ -264,10 +264,26 @@
       ((%sh-word-in? name %sh-export-marks) #t)
       (#t ()))))
 
+; The names `readonly` has marked.  The mark belongs to this process, as the
+; variables do, so a state image carries none.
+(def %sh-readonly-names ())
+(set! %image-transients (pair (lit %sh-readonly-names) %image-transients))
+
+(def %sh-readonly? (fn (_ name) (%sh-word-in? name %sh-readonly-names)))
+
+; An assignment to a marked name, or an unset of one, is refused here.  POSIX
+; makes it an error of the special builtin that tried it, which ends a shell
+; that is not interactive: the raise does that, and %sh-report says nothing
+; more, the refusal having been written here.
+(def %sh-readonly-refuse
+  (fn (_ name)
+    (do (%stderr "ash: " name ": is read only\n") (error (lit %sh-reported)))))
+
 ; Assign NAME where it already lives: the environment when it is exported,
 ; the table otherwise.
 (def %sh-var-set!
   (fn (_ name value)
+    (when (%sh-readonly? name) (%sh-readonly-refuse name))
     (if (%sh-var-exported? name)
       (do
         (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
@@ -277,6 +293,7 @@
 ; Unset NAME everywhere, the export attribute included.
 (def %sh-var-unset!
   (fn (_ name)
+    (when (%sh-readonly? name) (%sh-readonly-refuse name))
     (set! %sh-vars (%sh-table-without name %sh-vars))
     (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
     (sh-unsetenv name)))
@@ -2449,6 +2466,49 @@
             (#t ()))
           (self (rest wds)))))))
 
+; `readonly NAME[=VALUE]...` marks names that may not be assigned or unset
+; again, assigning first where a value is given -- the shape `export` has.
+; `readonly` and `readonly -p` write the marked names instead, each as the
+; command that would mark it again.
+(def %sh-readonly-mark!
+  (fn (_ name)
+    (unless (%sh-readonly? name)
+      (set! %sh-readonly-names (pair name %sh-readonly-names)))))
+
+(def %sh-readonly-names-each
+  (fn (self wds)
+    (if (null? wds)
+      0
+      (let ((word (first wds)))
+        (let ((eq (%sh-first-eq word 0 (string-length word))))
+          (match
+            ((fx<? 0 eq)
+              (do
+                (%sh-var-set! (substring word 0 eq)
+                              (substring word (fx+ eq 1) (string-length word)))
+                (%sh-readonly-mark! (substring word 0 eq))))
+            ((= eq -1) (%sh-readonly-mark! word))
+            (#t ()))
+          (self (rest wds)))))))
+
+(def %sh-readonly-list
+  (fn (self names)
+    (unless (null? names)
+      (let ((v (%sh-var-get (first names))))
+        (display "readonly ")
+        (display (first names))
+        (unless (null? v)
+          (display "=")
+          (display (%sh-single-quote v)))
+        (newline))
+      (self (rest names)))))
+
+(def %sh-readonly-builtin
+  (fn (_ wds)
+    (if (or (null? wds) (string=? (first wds) "-p"))
+      (do (%sh-readonly-list (reverse %sh-readonly-names)) 0)
+      (%sh-readonly-names-each wds))))
+
 ; A shell's truth is INVERTED: 0 is true.  %sh-bool turns a predicate's answer
 ; into that, once, instead of every arm spelling `(if p 0 1)`.
 (def %sh-bool (fn (_ p) (if p 0 1)))
@@ -2680,7 +2740,10 @@
             ; assigned, all empty, and the status is 1: that is what leaves
             ; `line` empty after `while read line; do ...; done`.
             (let ((text (if (null? line) "" line)))
-              (do
+              ; `read` is not a special builtin, so a name that may not be
+              ; assigned is this command's failure and not the shell's end:
+              ; the refusal has been written, and the status is 1.
+              (guard (e 1)
                 (unless (null? names)
                   (%sh-read-assign names text 0 (string-length text)
                                    (%sh-ifs) raw?))
@@ -3276,6 +3339,7 @@
         (pair "pwd"    %sh-pwd)
         (pair "export" %sh-export)
         (pair "unset"  %sh-unset)
+        (pair "readonly" %sh-readonly-builtin)
         (pair "read"   %sh-read)
         (pair "return" %sh-return)
         (pair "shift"  %sh-shift)
@@ -3356,9 +3420,9 @@
 ; --- Assignment handling ---
 
 ; The utilities whose arguments are assignments, so `export V=$(cmd)` reads the
-; way `V=$(cmd)` does. A list rather than a test for one name, so `readonly`
-; and `local` can join it.
-(def %sh-declaration-utilities (list "export"))
+; way `V=$(cmd)` does. A list rather than a test for one name, so `local` can
+; join it.
+(def %sh-declaration-utilities (list "export" "readonly"))
 
 (def %sh-declaration?
   (fn (_ word) (%sh-word-in? word %sh-declaration-utilities)))
