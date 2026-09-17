@@ -405,6 +405,7 @@
 (def %sh-opt-errexit ())
 (def %sh-opt-nounset ())
 (def %sh-opt-xtrace ())
+(def %sh-opt-noglob ())
 
 ; errexit must not fire in a condition. `if false; then`, `false || echo`,
 ; `! cmd` and a `while` test all run commands whose failure is the point; POSIX
@@ -2070,9 +2071,12 @@
 ; is scanned once more before the directory is read, because the walk saw a
 ; `[` before it could know whether a `]` closes it -- the `]` can arrive in a
 ; later piece -- and a word that is not a pattern must not reach the directory.
+; `set -f` turns pathname expansion off, so every field stands as written --
+; its escapes removed, the way a field that is no pattern stands.
 (def %sh-glob-field
   (fn (_ f)
-    (if (not (and (%sh-field-glob? f) (%sh-glob-pattern? (%sh-field-text f))))
+    (if (or %sh-opt-noglob
+            (not (and (%sh-field-glob? f) (%sh-glob-pattern? (%sh-field-text f)))))
       (list (%sh-field-plain f))
       (let ((field (%sh-field-text f))
             (absolute? (= (string-ref (%sh-field-text f) 0) #\/))
@@ -2763,7 +2767,15 @@
 (def %sh-set-opts
   (list (pair "e" (fn (_ on?) (set! %sh-opt-errexit on?)))
         (pair "u" (fn (_ on?) (set! %sh-opt-nounset on?)))
-        (pair "x" (fn (_ on?) (set! %sh-opt-xtrace on?)))))
+        (pair "x" (fn (_ on?) (set! %sh-opt-xtrace on?)))
+        (pair "f" (fn (_ on?) (set! %sh-opt-noglob on?)))))
+
+; `set -o noglob` names the same option `set -f` does.  The letters are what
+; the table above is keyed by, so this says only which name belongs to which
+; letter.
+(def %sh-set-opt-names
+  (list (pair "errexit" "e") (pair "nounset" "u")
+        (pair "xtrace" "x") (pair "noglob" "f")))
 
 ; One `-abc` or `+abc` cluster.
 (def %sh-set-flags
@@ -2776,6 +2788,18 @@
                        ": unknown option\n") 2)
           (do (f on?) (self word on? (+ i 1))))))))
 
+; `set -o NAME` and `set +o NAME`, which turn the same option the letter does.
+; A `set -o` with no name would write the options; nothing here reads that, and
+; the format would be a contract invented rather than kept, so it answers 0.
+(def %sh-set-named
+  (fn (_ wds on?)
+    (if (null? wds)
+      0
+      (let ((letter (%sh-table-get (first wds) %sh-set-opt-names)))
+        (if (null? letter)
+          (do (%stderr "ash: set: " (first wds) ": unknown option\n") 2)
+          (do ((%sh-table-get letter %sh-set-opts) on?) 0))))))
+
 (def %sh-set
   (fn (self wds)
     (if (null? wds)
@@ -2783,6 +2807,12 @@
       (let ((w (first wds)))
         (cond
           ((string=? w "--") (do (set! %sh-args (rest wds)) 0))
+          ((string=? w "-o")
+            (let ((r (%sh-set-named (rest wds) #t)))
+              (if (= r 0) (self (rest (rest wds))) r)))
+          ((string=? w "+o")
+            (let ((r (%sh-set-named (rest wds) ())))
+              (if (= r 0) (self (rest (rest wds))) r)))
           ((%sh-str-starts? w "-")
             (let ((r (%sh-set-flags w #t 1)))
               (if (= r 0) (self (rest wds)) r)))
