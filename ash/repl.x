@@ -340,14 +340,9 @@
 
 ; --- error reporting ---------------------------------------------------------
 ;
-; A shell reports to STDERR and carries on; only the status changes.  Err
-; instances render through the platform writer -- (symbol->str err) on a
-; structured error reads its memory as a symbol name and prints garbage bytes.
-(def %ash-report
-  (fn (_ err)
-    (%stderr "ash: ")
-    (%stderr (if (str? err) err (%repl-write-to-str err)))
-    (%stderr "\n")))
+; A shell reports to STDERR and carries on; only the status changes.  The
+; report is the one a forked child makes too (%sh-report in ash/eval.x).
+(def %ash-report %sh-report)
 
 ; --- the loop ----------------------------------------------------------------
 ;
