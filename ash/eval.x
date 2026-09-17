@@ -1671,6 +1671,19 @@
            (and (= (string-ref inner 0) #\()
                 (= (string-ref inner (- n 1)) #\)))))))
 
+; The expression inside an arithmetic expansion's `(( ))`, with its parameters,
+; command substitutions and nested arithmetic expanded as in double quotes
+; before it is evaluated (POSIX 2.6.4): `$((i+$j))`, `$(( $(wc -l <f) + 1 ))`.
+; Most expressions are names, numbers and operators, and a plain run that
+; reaches the end says there is nothing to expand without building anything.
+(def %sh-arith-text
+  (fn (_ inner)
+    (let ((text (substring inner 1 (- (string-length inner) 1))))
+      (let ((n (string-length text)))
+        (if (= (%sh-run-end (%sh-plain-run text 0 n %sh-mode-dq #t ())) n)
+          text
+          (%sh-expand-str-dq text))))))
+
 ; --- The walk ---------------------------------------------------------------
 ;
 ; MODE says which kind of region the scan is in.  A word is not uniformly
@@ -1822,7 +1835,7 @@
                 (let ((inner (substring s (+ i 2) e)))
                   (substitute (+ e 1)
                     (if (%sh-arith? inner)
-                      (%sh-arith-eval (substring inner 1 (- (string-length inner) 1)))
+                      (%sh-arith-eval (%sh-arith-text inner))
                       (%sh-cmd-subst inner)))))))
           ; ${NAME}
           ((= d #\{)
