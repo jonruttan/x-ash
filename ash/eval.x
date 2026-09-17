@@ -44,14 +44,114 @@
       (eq? (first tok) (lit tok-sq))
       (eq? (first tok) (lit tok-dq)))))
 
-; A keyword check must exclude quoted words. %tok-is-word? is true of tok-sq
-; and tok-dq too -- right for "is this an argument", wrong for "is this the
-; word `done`". The if/while family uses the named predicate for the second
-; question, so a quoted "while" or "done" in a loop body is an argument, not a
-; nested opener. %at-stop-word?, %is-compound-start?, %skip-case-body and
-; %skip-to-esac spell the check out inline.
+; A reserved word is one only where the grammar can take one: `done` closes a
+; loop in `echo x; done` and is an argument in `echo done`, and a quoted "done"
+; is never one.  %sh-mark-keywords walks the tokens once, as they come from the
+; tokenizer, and marks each bare word that stands where a reserved word is
+; recognized; this reads the mark, so every later scan -- stop words, nesting,
+; skipped branches -- agrees on which words are syntax.
 (def %tok-is-keyword?
-  (fn (_ tok) (eq? (first tok) (lit tok-word))))
+  (fn (_ tok)
+    (if (eq? (first tok) (lit tok-word)) (not (null? (rest (rest tok)))) ())))
+
+; --- Reserved words, by position ---------------------------------------------
+;
+; A reserved word is recognized as the first word of a command, as the word
+; after a reserved word other than `case`, `for` or `in`, as the `in` of a case
+; and the `in` or `do` of a for, and as an `esac` where a case clause's pattern
+; would start.  The walk's state is what the next token may be:
+;
+;   cmd           where any reserved word is one
+;   arg           a word of a command already begun
+;   target        the word a redirection names
+;   for-name      the variable after `for`
+;   for-list      after that variable, where `in` and `do` are reserved
+;   case-subject  the word after `case`
+;   case-in       after the subject, where `in` is reserved
+;   pattern       where a clause's pattern starts, and `esac` may end the case
+;   pattern-word  inside a pattern, before its `)`; after a `|` as well, so
+;                 `a|esac)` is two patterns
+(def %sh-redirect-ops (list "<" ">" ">>" "<<" "<<-" "<&" ">&" "<>" ">|"))
+
+; Where a reserved word leaves the walk.  `for` and `case` wait for a name and
+; a subject, and the words after `in` are a list; after any other reserved
+; word, another may follow, as in `fi fi` or `} then`.
+(def %sh-keyword-next
+  (list (pair "for" (lit for-name)) (pair "case" (lit case-subject))
+        (pair "in" (lit arg))))
+
+(def %sh-for-list-words (list "in" "do"))
+
+(def %sh-mark-reserved?
+  (fn (_ val state)
+    (match
+      ((eq? state (lit cmd)) (%sh-word-in? val %sh-reserved-words))
+      ((eq? state (lit for-list)) (%sh-word-in? val %sh-for-list-words))
+      ((eq? state (lit case-in)) (string=? val "in"))
+      ((eq? state (lit pattern)) (string=? val "esac"))
+      (#t ()))))
+
+(def %sh-mark-after-keyword
+  (fn (_ val state)
+    (if (eq? state (lit case-in))
+      (lit pattern)
+      (let ((next (%sh-table-get val %sh-keyword-next)))
+        (if (null? next) (lit cmd) next)))))
+
+(def %sh-mark-after-word
+  (fn (_ state)
+    (match
+      ((eq? state (lit for-name)) (lit for-list))
+      ((eq? state (lit case-subject)) (lit case-in))
+      ((eq? state (lit pattern)) (lit pattern-word))
+      ((eq? state (lit pattern-word)) (lit pattern-word))
+      (#t (lit arg)))))
+
+(def %sh-mark-after-op
+  (fn (_ op state)
+    (match
+      ((%sh-word-in? op %sh-redirect-ops) (lit target))
+      ((string=? op ";;") (lit pattern))
+      ((eq? state (lit pattern)) (if (string=? op ")") (lit cmd) (lit pattern)))
+      ((eq? state (lit pattern-word)) (if (string=? op "|") state (lit cmd)))
+      (#t (lit cmd)))))
+
+; A newline ends a command, but a for or a case may wait across one for its
+; `in`, its `do` or its next pattern.
+(def %sh-mark-after-newline
+  (fn (_ state)
+    (match
+      ((eq? state (lit for-list)) state)
+      ((eq? state (lit case-in)) state)
+      ((eq? state (lit pattern)) state)
+      (#t (lit cmd)))))
+
+(def %sh-mark-keyword?
+  (fn (_ tok state)
+    (if (eq? (first tok) (lit tok-word))
+      (%sh-mark-reserved? (first (rest tok)) state)
+      ())))
+
+; Answers the tokens in order, each word that stands where a reserved word is
+; recognized given a third element, #t.
+(def %sh-mark-walk
+  (fn (self toks state acc)
+    (match
+      ((null? toks) (reverse acc))
+      ((eq? (first (first toks)) (lit tok-newline))
+        (self (rest toks) (%sh-mark-after-newline state) (pair (first toks) acc)))
+      ((eq? (first (first toks)) (lit tok-op))
+        (self (rest toks) (%sh-mark-after-op (first (rest (first toks))) state)
+              (pair (first toks) acc)))
+      ((%sh-mark-keyword? (first toks) state)
+        (self (rest toks)
+              (%sh-mark-after-keyword (first (rest (first toks))) state)
+              (pair (list (lit tok-word) (first (rest (first toks))) #t) acc)))
+      (#t (self (rest toks) (%sh-mark-after-word state)
+                (pair (first toks) acc))))))
+
+(def %sh-mark-keywords
+  (fn (_ tokens) (%sh-mark-walk tokens (lit cmd) ())))
 
 (def %tok-is-op?
   (fn (_ tok op)
@@ -199,12 +299,9 @@
         "while" "until" "for" "do" "done"
         "case" "in" "esac" "!" "{" "}"))
 
-; The subset that CLOSES a construct.  %sh-reserved-words is the full sixteen
-; and is right for asking "could this word be syntax"; these are the ones that
-; may terminate a command already in progress.  `if`, `while`, `for`, `case`,
-; `in`, `!` and `{` are all OPENERS -- no compound parser looks for one as a
-; terminator, so treating them as arguments costs nothing and is what a shell
-; does.
+; The reserved words that close a construct, and so end the command list in
+; front of them: `then` ends a condition, `done` a loop body.  The rest open
+; one or, like `in` and `!`, stand inside one.
 (def %sh-closing-words
   (list "then" "elif" "else" "fi" "do" "done" "esac" "}"))
 
@@ -220,10 +317,6 @@
 
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
-; The reserved words that close a construct: the subset of the fifteen that may
-; terminate a command already in progress. `if`, `while`, `for`, `case`, `in`,
-; `!` and `{` are openers, so treating them as arguments costs nothing.
-;
 ; %sh-compound-depth is how deep inside a compound the parser is. `done` closes
 ; something only when something is open, so at the top level it is an ordinary
 ; word. It is bumped for the whole of any compound (see %eval-compound), so the
@@ -247,7 +340,7 @@
           ; The word branch is gated on the compound depth (see
           ; %closing-word?); the OP branch is not -- `)` and `;;` are
           ; punctuation, never words a script means literally.
-          ((eq? (first tok) (lit tok-word)) (%closing-word? (first (rest tok))))
+          ((%tok-is-keyword? tok) (%closing-word? (first (rest tok))))
           ((eq? (first tok) (lit tok-op))
             (%sh-word-in? (first (rest tok)) %sh-stop-ops))
           (else ()))))))
@@ -2026,18 +2119,7 @@
     (if (not (eq? (first tok) (lit tok-op)))
       ()
       (let ((op (first (rest tok))))
-        (if (or
-              (string=? op "<")
-              (string=? op ">")
-              (string=? op ">>")
-              (string=? op "<<")
-              (string=? op "<&")
-              (string=? op ">&")
-              (string=? op "<>")
-              (string=? op ">|")
-              (string=? op "<<-"))
-          op
-          ())))))
+        (if (%sh-word-in? op %sh-redirect-ops) op ())))))
 
 (def %all-digits-from?
   (fn (self s i len)
@@ -3357,7 +3439,7 @@
     (if (%cursor-empty? cur)
       ()
       (let ((tok (%cursor-peek cur)))
-        (if (eq? (first tok) (lit tok-word))
+        (if (%tok-is-keyword? tok)
           ; The keys of %sh-compound-table, so the two cannot disagree.  A `(`
           ; opens a subshell, which is punctuation rather than a word.
           (not (null? (%sh-table-get (first (rest tok)) %sh-compound-table)))
@@ -3398,38 +3480,30 @@
                       (pair (%sh-read-redir-target cur rop fd) redirs)
                       assign?))))
               (if (%tok-is-word? tok)
+                ; Every word after the first is an argument, reserved or not:
+                ; a command already begun is not a place a reserved word is
+                ; recognized (see %sh-mark-keywords).
                 (let ((val (%tok-word-val tok)))
-                  ; A reserved word in argument position is an argument. POSIX
-                  ; recognises a reserved word only as the first word of a
-                  ; command, which %is-compound-start? handles before this loop.
-                  ; Only the stop words that close a construct keep their power
-                  ; here, so a body written without its `;` (`do echo x done`)
-                  ; still ends at `done` rather than swallowing it.
-                  (if (and
-                        (not (null? wds))
-                        (eq? (first tok) (lit tok-word))
-                        (%closing-word? val))
-                    (%sh-run-cmd (reverse wds) (reverse redirs))
-                    (do
-                      (%cursor-advance! cur)
-                      ; EXPANDED HERE, not in %sh-run-cmd, because this is the
-                      ; last place the token's QUOTING is still known.  `val`
-                      ; above stays raw: POSIX recognises reserved words before
-                      ; expansion, so a variable holding "then" must not become
-                      ; one.
-                      (%collect-cmd-tokens
-                        cur
-                        (%sh-push-fields
-                          (%sh-expand-tok tok
-                            (and assign?
-                                 (eq? (first tok) (lit tok-word))
-                                 (%is-assignment? val)))
-                          wds)
-                        redirs
-                        (and assign?
-                             (eq? (first tok) (lit tok-word))
-                             (or (%is-assignment? val)
-                                 (%sh-declaration? val)))))))
+                  (do
+                    (%cursor-advance! cur)
+                    ; EXPANDED HERE, not in %sh-run-cmd, because this is the
+                    ; last place the token's QUOTING is still known.  `val`
+                    ; above stays raw: POSIX recognises reserved words before
+                    ; expansion, so a variable holding "then" must not become
+                    ; one.
+                    (%collect-cmd-tokens
+                      cur
+                      (%sh-push-fields
+                        (%sh-expand-tok tok
+                          (and assign?
+                               (eq? (first tok) (lit tok-word))
+                               (%is-assignment? val)))
+                        wds)
+                      redirs
+                      (and assign?
+                           (eq? (first tok) (lit tok-word))
+                           (or (%is-assignment? val)
+                               (%sh-declaration? val))))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
 ; A command's words are expanded as they are collected, so this is where the
@@ -3925,7 +3999,7 @@
       (do (set! %sh-status 0) 0)
       (let ((tok (%cursor-peek cur)))
         (if (and
-              (eq? (first tok) (lit tok-word))
+              (%tok-is-keyword? tok)
               (string=? (first (rest tok)) "esac"))
           (do (%cursor-advance! cur) (set! %sh-status 0) 0)
           (let ((pats (%collect-case-patterns cur ())))
@@ -4160,7 +4234,8 @@
             (let ((a (first toks))
                   (b (first (rest toks)))
                   (c (first (rest (rest toks)))))
-              (if (not (%tok-is-keyword? a))
+              ; A name is an unquoted word that is not reserved.
+              (if (not (eq? (first a) (lit tok-word)))
                 ()
                 (if (%reserved-word? (%tok-word-val a))
                   ()
@@ -4766,7 +4841,7 @@
 ; goes through the full entry.
 (def sh-eval-extracted
   (fn (_ input)
-    (let ((tokens (sh-tokenize input)))
+    (let ((tokens (%sh-mark-keywords (sh-tokenize input))))
       (if (null? tokens)
         0
         (let ((cur (%mk-cursor tokens))) (%eval-list cur))))))
