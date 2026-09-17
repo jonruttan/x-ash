@@ -3648,12 +3648,26 @@
 ; --- Assignment handling ---
 
 ; The utilities whose arguments are assignments, so `export V=$(cmd)` reads the
-; way `V=$(cmd)` does. A list rather than a test for one name, so `local` can
-; join it.
-(def %sh-declaration-utilities (list "export" "readonly"))
+; way `V=$(cmd)` does -- unsplit and unglobbed, whatever the value holds.
+(def %sh-declaration-utilities (list "export" "readonly" "local"))
 
 (def %sh-declaration?
   (fn (_ word) (%sh-word-in? word %sh-declaration-utilities)))
+
+; Where the word after this one stands.  `#t` is the leading run, where a word
+; is an assignment while every word before it was one: `a=1 b=2 cmd x=3`
+; assigns the first two and passes the third.  A declaration utility's name
+; turns that into `decl`, which sticks: every argument of one is an assignment
+; word however many plain names come first, so `export x y=$v` assigns y
+; unsplit the way `y=$v` would.
+(def %sh-next-assign?
+  (fn (_ assign? tok val)
+    (match
+      ((eq? assign? (lit decl)) (lit decl))
+      ((not (and assign? (eq? (first tok) (lit tok-word)))) ())
+      ((%is-assignment? val) #t)
+      ((%sh-declaration? val) (lit decl))
+      (#t ()))))
 
 ; A word whose first `=` comes after its first character.  One scan, and
 ; nothing built: every word in assignment position is asked, the first word of
@@ -3874,10 +3888,10 @@
 
 (def %collect-cmd-tokens ())
 
-; Assignment position is the collector's to know: a word is in assignment position while
-; every word before it was an assignment -- `a=1 b=2 cmd x=3` assigns the first
-; two and passes the third -- a fact of where the word sits, not how it is
-; spelt. Decided on the raw token, before expansion, and never for a quoted one.
+; Assignment position is the collector's to know -- a fact of where the word
+; sits, not how it is spelt, decided on the raw token, before expansion, and
+; never for a quoted one.  %sh-next-assign? carries it from word to word: the
+; leading run of a command, and every argument of a declaration utility.
 (set! %collect-cmd-tokens
   (fn (_ cur wds redirs assign?)
     (if (%cursor-empty? cur)
@@ -3925,10 +3939,7 @@
                                (%is-assignment? val)))
                         wds)
                       redirs
-                      (and assign?
-                           (eq? (first tok) (lit tok-word))
-                           (or (%is-assignment? val)
-                               (%sh-declaration? val))))))
+                      (%sh-next-assign? assign? tok val))))
                 (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
 
 ; A command's words are expanded as they are collected, so this is where the
