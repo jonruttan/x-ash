@@ -318,6 +318,63 @@
     (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
     (sh-unsetenv name)))
 
+; --- Variables that belong to a call ----------------------------------------
+;
+; `local x` inside a function gives x a value for the call and puts the old
+; one back when the call ends.  %sh-call-fn pushes a frame for each call and
+; pops it on the way out, and `local` records a name's whole state there --
+; its value, and whether it was exported -- before changing it.
+;
+; The scope is dynamic: a function called from this one sees the local, which
+; is what every shell that has `local` does.
+;
+; A name is saved every time it is named, and the frame is restored
+; front-to-back, so the oldest state recorded is the one applied last.  Two
+; `local x` in one call need no lookup to sort out.
+;
+; The frame belongs to this process, as the variables do, so no state image
+; carries one.
+(def %sh-locals ())
+(set! %image-transients (pair (lit %sh-locals) %image-transients))
+
+(def %sh-var-state
+  (fn (_ name)
+    (let ((v (%sh-var-get name)))
+      (if (null? v) () (pair v (%sh-var-exported? name))))))
+
+(def %sh-local-save!
+  (fn (_ name)
+    (when (%sh-readonly? name) (%sh-readonly-refuse name))
+    (set! %sh-locals
+      (pair (pair (pair name (%sh-var-state name)) (first %sh-locals))
+            (rest %sh-locals)))))
+
+(def %sh-var-restore!
+  (fn (_ entry)
+    (let ((name (first entry)) (state (rest entry)))
+      ; A `readonly` on a local is the call's too: the name carried no mark
+      ; when it was saved, so it carries none afterwards.
+      (set! %sh-readonly-names (%sh-words-without name %sh-readonly-names))
+      (%sh-var-unset! name)
+      (unless (null? state)
+        (%sh-var-set! name (first state))
+        (when (rest state) (%sh-var-export! name))))))
+
+(def %sh-restore-frame
+  (fn (self frame)
+    (unless (null? frame)
+      (%sh-var-restore! (first frame))
+      (self (rest frame)))))
+
+(def %sh-push-locals!
+  (fn (_) (set! %sh-locals (pair () %sh-locals))))
+
+(def %sh-pop-locals!
+  (fn (_)
+    (let ((frame (first %sh-locals)))
+      (set! %sh-locals (rest %sh-locals))
+      (%sh-restore-frame frame))))
+
 ; Give NAME the export attribute: a value it holds in the table moves to the
 ; environment, and a name with no value is marked.
 (def %sh-var-export!
@@ -2549,6 +2606,35 @@
             (#t ()))
           (self (rest wds)))))))
 
+; `local NAME[=VALUE]...` -- the shape `export` has, saving each name into the
+; call's frame before it assigns.  A name given no value starts UNSET, which
+; is bash and ksh; dash leaves the outer value showing through it, and that is
+; the one thing the two disagree about.
+;
+; Outside a function there is no frame to record in, and nothing would ever
+; put the value back, so it is refused.
+(def %sh-local-names
+  (fn (self wds)
+    (if (null? wds)
+      0
+      (let ((word (first wds)))
+        (let ((eq (%sh-first-eq word 0 (string-length word))))
+          (match
+            ((fx<? 0 eq)
+              (let ((name (substring word 0 eq)))
+                (%sh-local-save! name)
+                (%sh-var-set! name
+                              (substring word (fx+ eq 1) (string-length word)))))
+            ((= eq -1) (do (%sh-local-save! word) (%sh-var-unset! word)))
+            (#t ()))
+          (self (rest wds)))))))
+
+(def %sh-local
+  (fn (_ wds)
+    (if (= %sh-fn-depth 0)
+      (do (%stderr "ash: local: not in a function\n") 1)
+      (%sh-local-names wds))))
+
 ; `readonly NAME[=VALUE]...` marks names that may not be assigned or unset
 ; again, assigning first where a value is given -- the shape `export` has.
 ; `readonly` and `readonly -p` write the marked names instead, each as the
@@ -3473,6 +3559,7 @@
         (pair "cd"     %sh-cd)
         (pair "pwd"    %sh-pwd)
         (pair "export" %sh-export)
+        (pair "local"  %sh-local)
         (pair "unset"  %sh-unset)
         (pair "readonly" %sh-readonly-builtin)
         (pair "read"   %sh-read)
@@ -4642,11 +4729,21 @@
 
 (def %sh-return? (fn (_ e) (%sh-signal? e "%sh-return")))
 
+; Everything a call is given back on the way out, however it leaves: its
+; locals, its parameters and the depth it was called at.
+(def %sh-leave-fn!
+  (fn (_ saved saved-depth)
+    (%sh-pop-locals!)
+    (set! %sh-args saved)
+    (set! %sh-compound-depth saved-depth)
+    (set! %sh-fn-depth (- %sh-fn-depth 1))))
+
 (def %sh-call-fn
   (fn (_ body args)
     (let ((saved %sh-args) (saved-depth %sh-compound-depth))
       (set! %sh-args args)
       (set! %sh-fn-depth (+ %sh-fn-depth 1))
+      (%sh-push-locals!)
       ; A body is a fresh top level: it is one whole compound command, so
       ; nothing in these tokens closes anything outside them, and a function
       ; called from inside an `if` does not read a bare `echo done` in its
@@ -4654,14 +4751,10 @@
       (set! %sh-compound-depth 0)
       (guard (e
           (do
-            (set! %sh-args saved)
-            (set! %sh-compound-depth saved-depth)
-            (set! %sh-fn-depth (- %sh-fn-depth 1))
+            (%sh-leave-fn! saved saved-depth)
             (if (%sh-return? e) %sh-return-status (error e))))
         (%sh-eval-body body)
-        (set! %sh-args saved)
-        (set! %sh-compound-depth saved-depth)
-        (set! %sh-fn-depth (- %sh-fn-depth 1))
+        (%sh-leave-fn! saved saved-depth)
         %sh-status))))
 
 ; --- A compound command's own redirections ----------------------------------
