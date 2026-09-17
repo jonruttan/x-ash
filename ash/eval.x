@@ -1383,7 +1383,7 @@
         (let ((c (string-ref s i)))
           (cond
             ((= c #\()
-              (let ((inner (%sh-ar-conditional s (+ i 1) n live?)))
+              (let ((inner (%sh-ar-assignment s (+ i 1) n live?)))
                 ; Step over the closing paren if it is there.
                 (let ((e (%sh-ar-skip-ws s (%sh-ar-pos inner) n)))
                   (%sh-ar (%sh-ar-val inner)
@@ -1488,7 +1488,9 @@
         (if (or (>= q n) (not (= (string-ref s q) #\?)))
           test
           (let ((taken (and live? (%sh-truthy? (%sh-ar-val test)))))
-            (let ((yes (%sh-ar-conditional s (+ q 1) n taken)))
+            ; The first branch is a whole expression, assignment included, as
+            ; in C; the second is only a conditional.
+            (let ((yes (%sh-ar-assignment s (+ q 1) n taken)))
               (let ((c (%sh-ar-skip-ws s (%sh-ar-pos yes) n)))
                 (let ((no (%sh-ar-conditional s
                             (if (and (< c n) (= (string-ref s c) #\:)) (+ c 1) c)
@@ -1496,10 +1498,72 @@
                   (%sh-ar (if taken (%sh-ar-val yes) (%sh-ar-val no))
                           (%sh-ar-pos no)))))))))))
 
+; The assignment operators, each with the binary operator it applies to the
+; variable's value first -- () for plain `=`.
+(def %sh-ar-assign-ops
+  (list (pair "=" ()) (pair "+=" "+") (pair "-=" "-") (pair "*=" "*")
+        (pair "/=" "/") (pair "%=" "%") (pair "<<=" "<<") (pair ">>=" ">>")
+        (pair "&=" "&") (pair "^=" "^") (pair "|=" "|")))
+
+; Does a binary operator longer than LEN start at K?  Then what looked like an
+; assignment operator is only the front of it: `==` against `=`.
+(def %sh-ar-longer-binary?
+  (fn (_ s k n len)
+    (let ((binary (%sh-ar-op-at s k n %sh-ar-ranks ())))
+      (if (null? binary) () (fx<? len (string-length (first binary)))))))
+
+; When the text at I is an assignment, its NAME, its operator entry and where
+; its right side starts; () when it is not one.
+(def %sh-ar-assign-target
+  (fn (_ s i n)
+    (if (if (fx<? i n) (%sh-name-start? (string-ref s i)) ())
+      (let ((e (%sh-name-end s i n)))
+        (let ((k (%sh-ar-skip-ws s e n)))
+          (let ((op (if (fx<? k n) (%sh-ar-op-at s k n %sh-ar-assign-ops ()) ())))
+            (match
+              ((null? op) ())
+              ((%sh-ar-longer-binary? s k n (string-length (first op))) ())
+              (#t (list (substring s i e) op
+                        (fx+ k (string-length (first op)))))))))
+      ())))
+
+; An assignment: the loosest expression, grouping to the right, so `x = y = 3`
+; sets both.  Its value is the value assigned, and in a branch that is not
+; taken it assigns nothing.
+(def %sh-ar-assignment ())
+
+(set! %sh-ar-assignment
+  (fn (_ s i0 n live?)
+    (let ((i (%sh-ar-skip-ws s i0 n)))
+      (let ((target (%sh-ar-assign-target s i n)))
+        (if (null? target)
+          (%sh-ar-conditional s i n live?)
+          (%sh-ar-assign s n target live?))))))
+
+(def %sh-ar-assign
+  (fn (_ s n target live?)
+    (let ((name (first target))
+          (op (first (rest target)))
+          (right (%sh-ar-assignment s (first (rest (rest target))) n live?)))
+      (if (not live?)
+        (%sh-ar 0 (%sh-ar-pos right))
+        (let ((value (if (null? (rest op))
+                       (%sh-ar-val right)
+                       ((%sh-table-get (rest op) %sh-ar-ops)
+                        (%sh-ar-num (%sh-var-value name))
+                        (%sh-ar-val right)))))
+          (%sh-var-set! name (convert value %string))
+          (%sh-ar value (%sh-ar-pos right)))))))
+
+; The whole text is one expression.  Anything left after it is an error rather
+; than text to skip, so `$((1 2))` and `$((1=2))` are refused.
 (def %sh-arith-eval
   (fn (_ text)
     (let ((n (string-length text)))
-      (convert (%sh-ar-val (%sh-ar-conditional text 0 n #t)) %string))))
+      (let ((r (%sh-ar-assignment text 0 n #t)))
+        (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
+          (error (string-append "arithmetic: syntax error in " text))
+          (convert (%sh-ar-val r) %string))))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
 (def %sh-arith?
