@@ -4832,32 +4832,32 @@
 ; rewritten text; the bodies land in %sh-heredocs.
 (def %sh-heredoc-extract
   (fn (_ input)
-    ; Nothing to do for the overwhelming majority of input, so ask the cheap
-    ; question first -- but ask it by SCANNING.  The first version built a list
-    ; of every character to hand to List index-of, which allocated a cons per
-    ; character of every command the shell ever runs: more than the pass it was
-    ; avoiding, and enough to take the spec suite over its allocation ceiling.
+    ; Nothing to do for the overwhelming majority of input, so the cheap
+    ; question is asked first.
     (if (not (%sh-str-has-heredoc-op? input))
       input
       (let ((r (%sh-hd-walk (%sh-split-lines input) () ())))
         (set! %sh-heredocs (first (rest r)))
         (first r)))))
 
+; Whether S holds the character A followed by B anywhere from I on.  Every text
+; the shell evaluates is asked this before a pass only some text needs, so it
+; builds nothing: a nested match with no `not`, which costs objects of its own.
+(def %sh-has-pair?
+  (fn (self s i n a b)
+    (match
+      ((fx<? (fx+ i 1) n)
+        (match
+          ((= (string-ref s i) a)
+            (if (= (string-ref s (fx+ i 1)) b) #t (self s (fx+ i 1) n a b)))
+          (#t (self s (fx+ i 1) n a b))))
+      (#t ()))))
+
 ; `<<`, not `<`.  A single `<` is far too common to gate on -- `$((3<5))` has
 ; one, and every arithmetic comparison was paying for the whole line-splitting
 ; pass because of it.
 (def %sh-str-has-heredoc-op?
-  (fn (_ text)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i)
-          (if (>= (+ i 1) n)
-            ()
-            (if (and (= (string-ref text i) #\<)
-                     (= (string-ref text (+ i 1)) #\<))
-              #t
-              (self (+ i 1))))))
-      (go 0))))
+  (fn (_ text) (%sh-has-pair? text 0 (string-length text) #\< #\<)))
 
 ; --- Line continuation -------------------------------------------------------
 ;
@@ -4866,16 +4866,6 @@
 ; inside double quotes, but not inside single quotes or a comment (POSIX 2.2.1).
 ; Here-documents are lifted out first, so a quoted body keeps its backslashes
 ; and an unquoted one has joined its lines already (%sh-hd-take).
-
-; Whether S holds a backslash before a newline anywhere, quoted or not.  Most
-; text holds none, so this is asked first, a character at a time.
-(def %sh-bs-newline?
-  (fn (self s i n)
-    (match
-      ((not (fx<? (fx+ i 1) n)) ())
-      ((not (= (string-ref s i) #\\)) (self s (fx+ i 1) n))
-      ((= (string-ref s (fx+ i 1)) #\newline) #t)
-      (#t (self s (fx+ i 1) n)))))
 
 ; A `#` opens a comment where a token could start: at the start of the text,
 ; or after a blank, a newline or an operator character.
@@ -4940,10 +4930,12 @@
       (self s (rest cuts) (first cuts)
             (pair (substring s (fx+ (first cuts) 2) end) acc)))))
 
+; Most text holds no backslash before a newline, quoted or not, so that is asked
+; before the walk.
 (def %sh-join-lines
   (fn (_ text)
     (let ((n (string-length text)))
-      (if (not (%sh-bs-newline? text 0 n))
+      (if (not (%sh-has-pair? text 0 n #\\ #\newline))
         text
         (%sh-cut-pairs text
           (%sh-continuations text 0 n %sh-mode-bare #t ())
