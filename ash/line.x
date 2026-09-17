@@ -16,6 +16,7 @@
 (import x/type/str)
 (import x/type/list)
 (import x/sys/file)
+(import x/sys/posix)
 ; The editor, when the platform has one.  Imported here rather than left to
 ; the launcher so that its Line class exists when the completer is installed
 ; below; a platform without it leaves the guard to answer.
@@ -29,6 +30,27 @@
 (def %ash-editor?
   (fn (_) (guard (_ #f) (Line available?))))
 
+; --- is this a session? -------------------------------------------------------
+;
+; A shell is interactive when its own input and its reports are both
+; terminals, and only then is there anyone to prompt: a script arriving down a
+; pipe gets no prompt and no banner, and stdout carries what the commands
+; wrote and nothing else.
+;
+; x.sh parks the user's stdin on fd 3 while the boot stream holds fd 0, and
+; %ash-repl takes it back before the first read, so whichever of the two is a
+; terminal is the shell's own input -- the question is asked on both sides of
+; that swap.
+(def %ash-interactive?
+  (fn (_)
+    (guard (_ ())
+      (and (or (Sys isatty 0) (Sys isatty 3)) (Sys isatty 2)))))
+
+; POSIX writes PS1 and PS2 to standard error.  On stdout they would land in
+; whatever a session's output was piped or redirected into.
+(def %ash-show-prompt
+  (fn (_ prompt) (when (%ash-interactive?) (%stderr prompt))))
+
 (def %ash-read-line
   (fn (_ prompt)
     (if (%ash-editor?)
@@ -37,7 +59,7 @@
           ((eq? r (lit eof)) ())
           ((eq? r (lit cancel)) (lit cancel))
           (#t r)))
-      (do (display prompt) (sh-read-line)))))
+      (do (%ash-show-prompt prompt) (sh-read-line)))))
 
 ; --- colour -------------------------------------------------------------------
 
@@ -222,4 +244,5 @@
 (guard (_ ())
   (set! %image-recache-hooks (pair (fn (_) (%ash-line-install!)) %image-recache-hooks)))
 
-(provide ash/line %ash-read-line %ash-paint %ash-complete %ash-word-at)
+(provide ash/line %ash-read-line %ash-interactive? %ash-show-prompt %ash-paint
+  %ash-complete %ash-word-at)

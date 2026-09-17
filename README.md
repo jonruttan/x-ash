@@ -109,6 +109,11 @@ unclosed quote, a trailing `|` or `&&` or backslash, an `if`/`for`/`while`/
 `until`/`case` whose closer has not been typed yet, or a function body whose
 closer is still to come.
 
+There is a prompt when there is someone to prompt: the banner and PS1 and PS2
+appear when the shell's own input and its reports are both terminals, and the
+prompts go to standard error. A script piped in or read from a file is run
+without either, so its stdout holds what its commands wrote and nothing else.
+
 x-ash is a **lang**: a surface syntax loaded over an x-lang dialect, so a
 spelling shared with x-lang can mean something different here — `;` separates
 commands rather than starting a comment, and `#` starts one rather than

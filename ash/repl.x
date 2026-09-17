@@ -327,16 +327,19 @@
 (def %ash-global
   (fn (_ form) (guard (%ash-e ()) (eval! form))))
 
+; Told to whoever is at the terminal; a script piped in is told nothing (see
+; %ash-interactive? in ash/line.x).
 (def %ash-banner
   (fn (_)
-    (display "ASH Shell v" ash-version " on x-lang")
-    (let ((rel (%ash-global (lit %platform-release))))
-      (unless (null? rel) (display " " rel)))
-    (let ((er (%ash-global (lit %param-release))))
-      (unless (null? er) (display ", engine " er)))
-    (newline)
-    (display "exit or ctrl-d to leave")
-    (newline)))
+    (when (%ash-interactive?)
+      (display "ASH Shell v" ash-version " on x-lang")
+      (let ((rel (%ash-global (lit %platform-release))))
+        (unless (null? rel) (display " " rel)))
+      (let ((er (%ash-global (lit %param-release))))
+        (unless (null? er) (display ", engine " er)))
+      (newline)
+      (display "exit or ctrl-d to leave")
+      (newline))))
 
 ; --- error reporting ---------------------------------------------------------
 ;
@@ -378,8 +381,13 @@
       (match
         ; ctrl-d leaves, with the last command's status -- `x -l ash -f x.sh`
         ; and an interactive session both answer $? to the caller.  Through
-        ; %sh-exit-shell, so an EXIT trap set at the prompt still fires.
-        ((null? line) (do (newline) (%sh-exit-shell %sh-status)))
+        ; %sh-exit-shell, so an EXIT trap set at the prompt still fires.  The
+        ; newline moves the cursor off the prompt ctrl-d was typed at, so it
+        ; belongs where the prompt went and happens only when there was one.
+        ((null? line)
+          (do
+            (when (%ash-interactive?) (%stderr "\n"))
+            (%sh-exit-shell %sh-status)))
         ; ctrl-c abandons the line being typed.
         ((eq? line (lit cancel)) (%ash-repl-loop))
         (#t
