@@ -2264,6 +2264,33 @@
     (let ((fs (%sh-expand-str text %sh-mode-dq () ())))
       (if (null? fs) "" (%sh-field-plain (first fs))))))
 
+; A redirection that cannot be made is reported here, and answers nil.  What
+; that does to the command is the caller's to say: a command's own redirection
+; only keeps the command from running, while a special builtin's ends the shell.
+(def %sh-redir-failed
+  (fn (_ verb target)
+    (do (%stderr "ash: cannot " verb " " target "\n") ())))
+
+; The opened descriptor onto FD, or nil when the file could not be opened: the
+; open answers -1 rather than raising.
+(def %sh-redir-onto
+  (fn (_ fh fd verb target)
+    (if (fx<? fh 0)
+      (%sh-redir-failed verb target)
+      (do (sh-dup2 fh fd) (sh-close fh) #t))))
+
+; `>&2` and `<&0` name a descriptor the shell already has.  A word that is not
+; a number, and a number nothing is open on, are both refusals.
+(def %sh-redir-dup
+  (fn (_ target fd)
+    (let ((from (convert target %int)))
+      (if (null? from)
+        (%sh-redir-failed "duplicate" target)
+        (if (fx<? (sh-dup2 from fd) 0)
+          (%sh-redir-failed "duplicate" target)
+          #t)))))
+
+; Answers whether the redirection was made.
 (def %sh-setup-redir
   (fn (_ redir)
     (let ((op (%sh-redir-op redir))
@@ -2272,34 +2299,38 @@
       (let ((fd (%sh-redir-fd redir)))
         (match
           ((or (string=? op "<<") (string=? op "<<-"))
-            (%sh-setup-heredoc target fd))
+            (do (%sh-setup-heredoc target fd) #t))
           ((string=? op "<")
-            (let ((fh (sh-open-read target)))
-              (sh-dup2 fh fd)
-              (sh-close fh)))
+            (%sh-redir-onto (sh-open-read target) fd "open" target))
           ((string=? op ">")
-            (let ((fh (sh-open-write target)))
-              (sh-dup2 fh fd)
-              (sh-close fh)))
+            (%sh-redir-onto (sh-open-write target) fd "create" target))
           ((string=? op ">>")
-            (let ((fh (sh-open-append target)))
-              (sh-dup2 fh fd)
-              (sh-close fh)))
+            (%sh-redir-onto (sh-open-append target) fd "create" target))
           ((string=? op "<>")
-            (let ((fh (sh-open-read target)))
-              (sh-dup2 fh fd)
-              (sh-close fh)))
-          ((string=? op ">&") (sh-dup2 (convert target %int) fd))
-          ((string=? op "<&") (sh-dup2 (convert target %int) fd))
-          (#t ()))))))
+            (%sh-redir-onto (sh-open-read target) fd "open" target))
+          ((string=? op ">&") (%sh-redir-dup target fd))
+          ((string=? op "<&") (%sh-redir-dup target fd))
+          (#t #t))))))
 
+; All of them, in order, and nil as soon as one could not be made.
 (def %sh-setup-redirs
-  (fn (_ redirs)
+  (fn (self redirs)
     (if (null? redirs)
-      ()
-      (do
-        (%sh-setup-redir (first redirs))
-        (%sh-setup-redirs (rest redirs))))))
+      #t
+      (if (%sh-setup-redir (first redirs)) (self (rest redirs)) ()))))
+
+; The status a command answers when its redirection could not be made.  dash
+; says 2 here and bash 1; POSIX leaves it to the shell.
+(def %sh-redir-status 2)
+
+; A command whose redirection could not be made does not run.  For a SPECIAL
+; builtin that ends a shell that is not interactive (POSIX 2.8.1), which the
+; raise does: the prompt reports nothing more and reads on, a script ends.
+(def %sh-redir-refused
+  (fn (_ name)
+    (if (%sh-special-builtin? name)
+      (error (lit %sh-reported))
+      %sh-redir-status)))
 
 ; A builtin's redirections are applied and then undone. A builtin runs in the
 ; shell itself, so `echo x > out.txt` must not leave the shell writing to
@@ -3089,7 +3120,10 @@
 (def %sh-write-to-str (prim-ref (lit io) (lit write-to-str)))
 (def %sh-report
   (fn (_ err)
-    (%stderr "ash: " (if (str? err) err (%sh-write-to-str err)) "\n")))
+    ; A raise carrying this sentinel was reported where it happened, and is
+    ; raised to end the shell rather than to say anything more.
+    (unless (%sh-signal? err "%sh-reported")
+      (%stderr "ash: " (if (str? err) err (%sh-write-to-str err)) "\n"))))
 
 ; What a forked child runs: THUNK answers the status the child exits with.  A
 ; raise ends the child here, since left to unwind it would carry on through the
@@ -3321,12 +3355,15 @@
       (if (%sh-word-in? name %sh-keeps-redirs)
         ; Set up and never put back: that is the whole of what `exec > log`
         ; means.  See %sh-exec-builtin.
-        (do (%sh-setup-redirs redirs) (%sh-run-builtin name wds))
+        (if (%sh-setup-redirs redirs)
+          (%sh-run-builtin name wds)
+          (%sh-redir-refused name))
         (do
           (%sh-save-fds redirs)
           (guard (e (do (%sh-restore-fds redirs) (error e)))
-            (%sh-setup-redirs redirs)
-            (let ((status (%sh-run-builtin name wds)))
+            (let ((status (if (%sh-setup-redirs redirs)
+                            (%sh-run-builtin name wds)
+                            (%sh-redir-refused name))))
               (%sh-restore-fds redirs)
               status)))))))
 
@@ -3343,15 +3380,18 @@
           (set! %sh-traps ())
           (%sh-in-child
             (fn (_)
-              (do
-                (%sh-setup-redirs redirs)
-                (sh-exec name wds)
-                ; A diagnostic goes to stderr: on stdout it would be captured
-                ; by `x=$(nosuchcmd)` as the command's output and `2>/dev/null`
-                ; could not silence it. The redirections are applied above, so
-                ; a script that asked for 2>/dev/null gets it.
-                (%stderr "ash: " name ": command not found\n")
-                127))))
+              (if (not (%sh-setup-redirs redirs))
+                ; Reported by the redirection itself; the program is not run.
+                %sh-redir-status
+                (do
+                  (sh-exec name wds)
+                  ; A diagnostic goes to stderr: on stdout it would be captured
+                  ; by `x=$(nosuchcmd)` as the command's output and
+                  ; `2>/dev/null` could not silence it. The redirections are
+                  ; applied above, so a script that asked for 2>/dev/null gets
+                  ; it.
+                  (%stderr "ash: " name ": command not found\n")
+                  127)))))
         (sh-wait pid)))))
 ; --- Assignment handling ---
 
@@ -3534,8 +3574,9 @@
       (do
         (%sh-save-fds redirs)
         (guard (e (do (%sh-restore-fds redirs) (error e)))
-          (%sh-setup-redirs redirs)
-          (let ((status (%sh-call-fn body wds)))
+          (let ((status (if (%sh-setup-redirs redirs)
+                          (%sh-call-fn body wds)
+                          %sh-redir-status)))
             (%sh-restore-fds redirs)
             status))))))
 ; Save C pipe primitive before we shadow it
@@ -4544,10 +4585,14 @@
             (do
               (%sh-save-fds redirs)
               (guard (e (do (%sh-restore-fds redirs) (error e)))
-                (%sh-setup-redirs redirs)
-                (let ((status (%eval-compound cur)))
-                  ; The construct stopped at its own end; step over the
-                  ; redirections that were read before it ran.
+                (let ((status (if (%sh-setup-redirs redirs)
+                                  (%eval-compound cur)
+                                  ; The construct is what sets the status when
+                                  ; it runs, so a construct that does not run
+                                  ; sets it here.
+                                  (%sh-set-status %sh-redir-status))))
+                  ; The construct stopped at its own end, or never ran; either
+                  ; way, step over it and the redirections read before it.
                   (set-first! cur after)
                   (%sh-restore-fds redirs)
                   status)))))))))
