@@ -1,9 +1,10 @@
 ## sh-eval where a plain run ends
 
 A plain run is the ordinary text the expansion walk takes in one step.  It ends
-at the first character the walk has an arm for: a quote, a backslash, a
-backtick or a `$` outside single quotes, only the closing quote inside them,
-and a `~` only where one could expand.  Along the way the run notes whether it
+at the first character the walk has an arm for: a `"`, a backslash, a backtick
+or a `$` outside single quotes; a `'` where it opens a region, which is outside
+quotes but not inside double ones, where it is text; only the closing quote
+inside single quotes; and a `~` only where one could expand.  Along the way the run notes whether it
 holds a metacharacter, `*`, `?`, `[` or `\`, which is what makes its field a
 pattern.
 
@@ -43,7 +44,10 @@ The characters are printable ASCII, shown by code.
 ---
     (34 36 39 92 96 126)
 
-### inside double quotes the same characters end it
+### inside double quotes a quote mark is not one of them
+
+A `'` is ordinary text there, so the run reads straight past it: `"it's"` is
+one word.
 
 ```sh
 (let ((stops (fn (self c mode tilde? acc)
@@ -56,7 +60,7 @@ The characters are printable ASCII, shown by code.
   (stops 32 %sh-mode-dq () ()))
 ```
 ---
-    (34 36 39 92 96)
+    (34 36 92 96)
 
 ### inside single quotes only the closing quote does
 

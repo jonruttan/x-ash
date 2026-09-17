@@ -1235,15 +1235,18 @@
 
 ; Does C end the ORDINARY text a run is reading?  The characters the walk has
 ; an arm for do.  In single quotes only the closing quote is special, so a
-; `'...'` region is one run.  A `~` ends a run only where one could expand,
-; which is what TILDE? says; anywhere else it is ordinary text.
+; `'...'` region is one run; inside double quotes a quote mark is ordinary
+; text, and the walk has no arm for it there -- a run that stopped at one would
+; hand the walk a character it reads as neither, and the field would stand
+; still.  A `~` ends a run only where one could expand, which is what TILDE?
+; says; anywhere else it is ordinary text.
 ;
 ; One match on the character: an ordinary character, which is nearly every
 ; character, is a handful of comparisons and builds nothing.
 (def %sh-run-stop?
   (fn (_ c mode tilde?)
     (match
-      ((= c #\') #t)
+      ((= c #\') (not (= mode %sh-mode-dq)))
       ((= c #\~) tilde?)
       ((= mode %sh-mode-sq) ())
       ((= c #\") #t)
