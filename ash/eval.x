@@ -2675,13 +2675,15 @@
         (do (%stderr "ash: read: " (first wds) ": invalid option\n") 2)
         (let ((raw? (first opts)) (names (rest opts)))
           (let ((line (%sh-read-logical-line raw?)))
-            (if (null? line)
-              1
+            ; At the end of the input with nothing read, the names are still
+            ; assigned, all empty, and the status is 1: that is what leaves
+            ; `line` empty after `while read line; do ...; done`.
+            (let ((text (if (null? line) "" line)))
               (do
                 (unless (null? names)
-                  (%sh-read-assign names line 0 (string-length line)
+                  (%sh-read-assign names text 0 (string-length text)
                                    (%sh-ifs) raw?))
-                (if (null? sh-read-hit-eof) 0 1)))))))))
+                (if (and (not (null? line)) (null? sh-read-hit-eof)) 0 1)))))))))
 
 (def %sh-return
   (fn (_ wds)
