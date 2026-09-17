@@ -511,9 +511,12 @@
               (sh-dup2 write-fd 1)
               (sh-close write-fd)
               ; The substituted text is its own script, so it starts at the
-              ; top level however deep the expansion was reached from -- and
-              ; with no traps, which a subshell does not inherit.
+              ; top level however deep the expansion was reached from -- with
+              ; no traps, which a subshell does not inherit, and outside any
+              ; condition: `v=$(false; echo x) || true` still stops at the
+              ; `false` under -e, in dash and bash alike.
               (set! %sh-compound-depth 0)
+              (set! %sh-cond-depth 0)
               (set! %sh-traps ())
               ; A failing substitution answers what it managed to print, the
               ; way a shell does -- the error has already gone to stderr.
@@ -4418,13 +4421,12 @@
                   (string=? (%tok-word-val (%cursor-peek cur)) "!"))
               (do (%cursor-advance! cur) (%skip-newlines cur) #t)
               ())))
-      ; `! cmd` inverts the status, so cmd's failure is expected -- and the
-      ; left operand of && / || is not the list's final command either.  POSIX
-      ; exempts both from -e.
-      ; Compound commands (if/while/for) contain internal ';' delimiters
-
-      ; that %collect-stage would incorrectly split on. Handle directly.
-
+      ; POSIX exempts two kinds of pipeline from -e: one that starts with `!`,
+      ; whose failure is what it is for, and one that is an operand of && or
+      ; || other than the last.  Once the stages are collected the cursor stands
+      ; after the pipeline, so the token there says which kind this is before
+      ; anything runs -- and an exempt pipeline runs as a condition, which is
+      ; what a subshell or a stage forked inside it inherits.
       (let ((result
               ; A definition is recognised here, beside the compounds:
               ; %collect-stages cuts the token run at the first `;` or newline,
@@ -4440,15 +4442,35 @@
               ; %eval-command, whose compound branch applies the construct's
               ; redirections.
               (let ((stages (%collect-stages cur ())))
-                (if (null? (rest stages))
-                  (let ((cur (%mk-cursor (first stages))))
-                    (%eval-command cur))
-                  (%sh-run-pipeline stages))))))
-        (if negate
-          (let ((neg-result (if (= result 0) 1 0)))
-            (set! %sh-status neg-result)
-            neg-result)
-          result)))))
+                (if (or negate (%sh-and-or-next? cur))
+                  (%sh-in-condition (fn (_) (%sh-run-stages stages)))
+                  (%sh-run-stages stages))))))
+        (match
+          (negate
+            (let ((neg-result (if (= result 0) 1 0)))
+              (set! %sh-status neg-result)
+              neg-result))
+          ((%sh-and-or-next? cur) result)
+          (#t (%sh-exit-on-error result)))))))
+
+(def %sh-run-stages
+  (fn (_ stages)
+    (if (null? (rest stages))
+      (%eval-command (%mk-cursor (first stages)))
+      (%sh-run-pipeline stages))))
+
+(def %sh-and-or-ops (list "&&" "||"))
+
+; Is the token at the cursor the && or || that makes what came before it an
+; operand?
+(def %sh-and-or-next?
+  (fn (_ cur)
+    (if (%cursor-empty? cur)
+      ()
+      (let ((tok (%cursor-peek cur)))
+        (if (eq? (first tok) (lit tok-op))
+          (%sh-word-in? (first (rest tok)) %sh-and-or-ops)
+          ())))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
 ; Skip an operand without running it -- what a short-circuit does with the side
@@ -4499,27 +4521,26 @@
 ; where it ends having skipped one.
 (def %eval-and-or-loop ())
 
+; Each pipeline applies -e itself, knowing from the token after it whether it
+; is an operand; the loop only chooses which operands run.
 (def %eval-and-or
   (fn (_ cur)
-    (%eval-and-or-loop cur
-      (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)))
+    (%eval-and-or-loop cur (%eval-pipeline cur))))
 
 (set! %eval-and-or-loop
-  (fn (self cur result evaluated-last?)
+  (fn (self cur result)
     (cond
-      ((%cursor-empty? cur)
-        (if evaluated-last? (%sh-exit-on-error result) result))
       ((%match-op cur "&&")
         (%skip-newlines cur)
         (if (= result 0)
-          (self cur (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)
-          (do (%sh-skip-operand cur 0) (self cur result ()))))
+          (self cur (%eval-pipeline cur))
+          (do (%sh-skip-operand cur 0) (self cur result))))
       ((%match-op cur "||")
         (%skip-newlines cur)
         (if (= result 0)
-          (do (%sh-skip-operand cur 0) (self cur result ()))
-          (self cur (%sh-in-condition (fn (_) (%eval-pipeline cur))) #t)))
-      (else (if evaluated-last? (%sh-exit-on-error result) result)))))
+          (do (%sh-skip-operand cur 0) (self cur result))
+          (self cur (%eval-pipeline cur))))
+      (else result))))
 
 ; list: and_or ((';'|'&'|newline) and_or)*
 
