@@ -80,9 +80,15 @@ does not leave the shell writing to `log`. A redirection written after a
 compound (`for ...; done > log`) applies to the whole construct. `exec` with
 redirections and no command applies them to the shell itself.
 
-Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `unset`, `read`, `set`,
-`test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `trap` (EXIT only),
-`return`, `shift`, `exit`, `true`, `false`, `:`.
+Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset`, `read`,
+`set`, `test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `trap` (EXIT
+only), `return`, `shift`, `exit`, `true`, `false`, `:`.
+
+`local NAME[=VALUE]...` in a function gives each name a value for the call and
+puts the old one back at the end — its value, its export attribute, and any
+`readonly` mark given to it inside. A function called from this one sees the
+local. A name given no value starts unset, which is bash's reading rather than
+dash's, and `local` outside a function is refused.
 
 `set -- a b c` replaces the positional parameters; `set -e` exits on a failed
 command, `-u` makes an unset parameter an error, `-x` traces to stderr, and
@@ -97,7 +103,7 @@ suppresses splitting entirely.
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-Not implemented: `local`, `command`, signal traps, and job control.
+Not implemented: `command`, signal traps, and job control.
 
 Subshells: `( ... )` forks, and the interpreter has no flush primitive, so a
 child's buffered output can be lost if the parent exits first. It prints
