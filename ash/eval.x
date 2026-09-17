@@ -54,6 +54,12 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-word)) (not (null? (rest (rest tok)))) ())))
 
+; The same mark on an operator: a paren the walk found where a case pattern
+; stands, which closes no subshell and is counted by nothing.
+(def %tok-pattern-paren?
+  (fn (_ tok)
+    (if (eq? (first tok) (lit tok-op)) (not (null? (rest (rest tok)))) ())))
+
 ; --- Reserved words, by position ---------------------------------------------
 ;
 ; A reserved word is recognized as the first word of a command, as the word
@@ -132,8 +138,18 @@
       (%sh-mark-reserved? (first (rest tok)) state)
       ())))
 
+; A case clause's parens are the case's: the `(` a pattern may open with and
+; the `)` that ends one close no subshell, so they are marked here and the
+; walks that count parens step over them.  Only where a pattern stands -- the
+; `)` of `$(cmd)` inside a clause's body is a paren like any other.
+(def %sh-mark-pattern-paren?
+  (fn (_ op state)
+    (and (or (string=? op "(") (string=? op ")"))
+         (or (eq? state (lit pattern)) (eq? state (lit pattern-word))))))
+
 ; Answers the tokens in order, each word that stands where a reserved word is
-; recognized given a third element, #t.
+; recognized, and each paren that belongs to a case pattern, given a third
+; element, #t.
 (def %sh-mark-walk
   (fn (self toks state acc)
     (match
@@ -141,8 +157,12 @@
       ((eq? (first (first toks)) (lit tok-newline))
         (self (rest toks) (%sh-mark-after-newline state) (pair (first toks) acc)))
       ((eq? (first (first toks)) (lit tok-op))
-        (self (rest toks) (%sh-mark-after-op (first (rest (first toks))) state)
-              (pair (first toks) acc)))
+        (let ((op (first (rest (first toks)))))
+          (self (rest toks) (%sh-mark-after-op op state)
+                (pair (if (%sh-mark-pattern-paren? op state)
+                        (list (lit tok-op) op #t)
+                        (first toks))
+                      acc))))
       ((%sh-mark-keyword? (first toks) state)
         (self (rest toks)
               (%sh-mark-after-keyword (first (rest (first toks))) state)
@@ -4252,9 +4272,13 @@
               (eq? (first tok) (lit tok-op))
               (string=? (first (rest tok)) ")"))
           (do (%cursor-advance! cur) (reverse pats))
-          (if (and
-                (eq? (first tok) (lit tok-op))
-                (string=? (first (rest tok)) "|"))
+          (if (or
+                (and (eq? (first tok) (lit tok-op))
+                     (string=? (first (rest tok)) "|"))
+                ; The `(` a clause may open with is punctuation, not a
+                ; pattern: `case "(" in (x)` matches the `x` clause for a
+                ; subject that is a parenthesis, and nothing else.
+                (%tok-pattern-paren? tok))
             (do
               (%cursor-advance! cur)
               (%collect-case-patterns cur pats))
@@ -4348,7 +4372,7 @@
       (error "parse error: expected )")
       (let ((tok (%cursor-peek cur)))
         (%cursor-advance! cur)
-        (if (eq? (first tok) (lit tok-op))
+        (if (and (eq? (first tok) (lit tok-op)) (not (%tok-pattern-paren? tok)))
           (let ((op (first (rest tok))))
             (if (string=? op "(")
               (self cur (+ depth 1) (pair tok toks))
@@ -4385,7 +4409,7 @@
       (error "parse error: expected )")
       (let ((tok (%cursor-peek cur)))
         (%cursor-advance! cur)
-        (if (eq? (first tok) (lit tok-op))
+        (if (and (eq? (first tok) (lit tok-op)) (not (%tok-pattern-paren? tok)))
           (let ((op (first (rest tok))))
             (if (string=? op "(")
               (%skip-to-close-paren cur (+ depth 1))
@@ -4649,7 +4673,7 @@
   (fn (_ tok paren?)
     (if (not paren?)
       (%sh-nest-delta tok)
-      (if (eq? (first tok) (lit tok-op))
+      (if (and (eq? (first tok) (lit tok-op)) (not (%tok-pattern-paren? tok)))
         (let ((op (first (rest tok))))
           (if (string=? op "(") 1 (if (string=? op ")") (- 0 1) 0)))
         0))))
@@ -4746,14 +4770,16 @@
       (%tok-is-op? tok "||")
       (and (%tok-is-word? tok) (%at-stop-word? cur)))))
 
-; A closing paren closes only when one is open: `case x in x) ...` ends its
-; pattern with a `)` that opens nothing, so counting every `)` would take the
-; depth negative and cut the stage inside the case.
+; A case pattern's parens are marked and counted by nothing (see
+; %tok-pattern-paren?).  The floor stays under the count: malformed input can
+; still hold a `)` that opens nothing, and a negative depth would cut the stage.
 (def %sh-paren-depth
   (fn (_ d tok)
-    (if (%tok-is-op? tok "(")
-      (+ d 1)
-      (if (and (%tok-is-op? tok ")") (> d 0)) (- d 1) d))))
+    (if (%tok-pattern-paren? tok)
+      d
+      (if (%tok-is-op? tok "(")
+        (+ d 1)
+        (if (and (%tok-is-op? tok ")") (> d 0)) (- d 1) d)))))
 
 ; Word nesting, floored: a stray `fi` in malformed input must not drive the
 ; count below zero and swallow the rest of the line.
@@ -4869,6 +4895,7 @@
 (def %sh-paren-delta
   (fn (_ tok)
     (cond
+      ((%tok-pattern-paren? tok) 0)
       ((%tok-is-op? tok "(") 1)
       ((%tok-is-op? tok ")") (- 0 1))
       (else 0))))
