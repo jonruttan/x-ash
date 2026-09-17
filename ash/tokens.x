@@ -399,14 +399,17 @@
 (def %sh-cs-sq ())
 (def %sh-cs-dq ())
 (def %sh-cs-dq-esc ())
+(def %sh-cs-esc ())
 
 ; Quotes INSIDE the substitution hide parens from the depth count, so
-; `$(echo ")")` closes where it should.
+; `$(echo ")")` closes where it should, and so does a backslash outside them:
+; `$(echo \))`.
 (set! %sh-cs-sq
   (fn (_ buffer score chr)
     (if (= chr (char->integer #\')) %sh-cs-body %sh-cs-sq)))
 
 (set! %sh-cs-dq-esc (fn (_ buffer score chr) %sh-cs-dq))
+(set! %sh-cs-esc (fn (_ buffer score chr) %sh-cs-body))
 
 (set! %sh-cs-dq
   (fn (_ buffer score chr)
@@ -430,6 +433,7 @@
           (do (set! %sh-cs-depth (- %sh-cs-depth 1)) %sh-cs-body)))
       ((= chr (char->integer #\')) %sh-cs-sq)
       ((= chr (char->integer #\")) %sh-cs-dq)
+      ((= chr (char->integer #\\)) %sh-cs-esc)
       (#t %sh-cs-body))))
 
 ; The older backtick substitution needs the same treatment as `$(`: a region
@@ -611,12 +615,14 @@
             (score-set score (- 0 1) buffer)
             ; A word may open with the substitution: `echo $(pwd)` puts the
             ; `$` first. Mid-word `$` reaches %sh-word-dollar from the body's
-            ; own arm; this is the same door for the first character.
-            (if (= chr (char->integer #\$))
-              %sh-word-dollar
-              (if (= chr #\`)
-                (do (set! %sh-cs-return 0) %sh-bt-scan)
-                %sh-word-body)))
+            ; own arm; this is the same door for the first character, and a
+            ; backslash likewise protects what follows it here, so `\;` is
+            ; the word `;` rather than a backslash and an operator.
+            (match
+              ((= chr (char->integer #\$)) %sh-word-dollar)
+              ((= chr #\`) (do (set! %sh-cs-return 0) %sh-bt-scan))
+              ((= chr (char->integer #\\)) %sh-word-esc)
+              (#t %sh-word-body)))
           ())))
     (pair (lit read) %sh-word-reader)))
 ; --- INTEGER: pre-register with shell-compatible reader (positive) ---
@@ -649,10 +655,10 @@
       ((%sh-digit? chr) %sh-int-body)
       ((%sh-word-break? chr)
         (do (buffer-unread buffer) (score-set score 1 buffer)))
-      ; Not a digit and not a break: the run is a word from here on.  The
-      ; character is consumed by returning the continuation, exactly as
-      ; %sh-word-body does.
-      (#t %sh-int-word-body))))
+      ; Not a digit and not a break: the run is a word from here on, and the
+      ; word's own scanner reads this character, so a `\`, `$` or backquote
+      ; here does what it does anywhere in a word -- `1\;2` is one word.
+      (#t (%sh-int-word-body buffer score chr)))))
 
 (%sh-tok-type!
   "INTEGER"

@@ -540,7 +540,8 @@
 ; `X=$(false); echo $?` reports 0 where a POSIX shell says 1.
 
 ; The index of the `)` closing a substitution opened before I, or -1.  Quoted
-; regions hide their parens, matching the tokenizer's own scan.
+; regions and escaped characters hide their parens, matching the tokenizer's
+; own scan.
 (def %sh-skip-quoted
   (fn (self s i n q)
     (if (>= i n)
@@ -562,6 +563,7 @@
             (self s (%sh-skip-quoted s (+ i 1) n #\') n depth))
           ((= c #\")
             (self s (%sh-skip-quoted s (+ i 1) n #\") n depth))
+          ((= c #\\) (self s (+ i 2) n depth))
           (#t (self s (+ i 1) n depth)))))))
 
 ; The index of the closing backtick, or -1.  A backslash escapes one character.
