@@ -4725,6 +4725,16 @@
           i
           (self line (+ i 1) n))))))
 
+; For a `$` at I that opens `$((`, the index of the `)` closing the arithmetic
+; expansion on this line, or -1.
+(def %sh-hd-arith-end
+  (fn (_ line i n)
+    (if (and (< (+ i 2) n)
+             (= (string-ref line (+ i 1)) #\()
+             (= (string-ref line (+ i 2)) #\())
+      (%sh-cs-end line (+ i 2) n 0)
+      (- 0 1))))
+
 ; Rewrite one line, collecting the here-documents it opens.  Answers
 ; (rewritten pending), where pending is a list of (delim strip? expand?) in the
 ; order the bodies must follow.
@@ -4744,6 +4754,14 @@
                 ((or (= c #\') (= c #\"))
                   (self (+ i 1) c (pair (substring line i (+ i 1)) out)
                         pending idx))
+                ; An arithmetic expansion is copied through whole, so the `<<`
+                ; in `$((a<<2))` stays a shift.
+                ((= c #\$)
+                  (let ((e (%sh-hd-arith-end line i n)))
+                    (if (< i e)
+                      (self (+ e 1) 0 (pair (substring line i (+ e 1)) out)
+                            pending idx)
+                      (self (+ i 1) 0 (pair "$" out) pending idx))))
                 ; `<<` but not `<<<`, and not `<&`
                 ((and (= c #\<)
                       (and (< (+ i 1) n) (= (string-ref line (+ i 1)) #\<)))
