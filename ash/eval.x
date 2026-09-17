@@ -467,6 +467,7 @@
 (def %sh-special-vars
   (list (pair "?" (fn (_) (convert %sh-status %string)))
         (pair "$" (fn (_) (convert %sh-pid %string)))
+        (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (convert %sh-bg-pid %string))))
         (pair "#" (fn (_) (convert (length %sh-args) %string)))
         ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
         ; same thing at all: `"$@"` is one field per parameter and never
@@ -1885,11 +1886,11 @@
           ; unquoted expansion does, which %sh-add-expansion already handles.
           ((and (= d #\@) (= mode %sh-mode-dq))
             (cont (+ i 2) mode (%sh-add-args a %sh-args)))
-          ; The one-character specials: $? $$ $# $@ $* and $1..$9.
+          ; The one-character specials: $? $$ $! $# $@ $* and $1..$9.
           ;
           ; A single digit only, per POSIX: `$10` is `$1` followed by a literal
           ; 0, and `${10}` is how the tenth is spelled.
-          ((or (= d #\?) (= d #\$) (= d #\#)
+          ((or (= d #\?) (= d #\$) (= d #\!) (= d #\#)
                (= d #\@) (= d #\*) (%sh-digit? d))
             (substitute (+ i 2) (%sh-var-value (substring s (+ i 1) (+ i 2)))))
           ; $NAME
@@ -2803,6 +2804,38 @@
 (def %sh-true  (fn (_ wds) 0))
 (def %sh-false (fn (_ wds) 1))
 
+; `wait` with no pid waits for every asynchronous list not yet waited for and
+; answers 0.  With pids it waits for each and answers the last one's status,
+; which is 127 for a pid that is not one of this shell's asynchronous lists.
+(def %sh-wait-all
+  (fn (self pids)
+    (unless (null? pids)
+      (do (sh-wait (first pids)) (self (rest pids))))))
+
+(def %sh-pids-without
+  (fn (self pid pids)
+    (match
+      ((null? pids) ())
+      ((= pid (first pids)) (self pid (rest pids)))
+      (#t (pair (first pids) (self pid (rest pids)))))))
+
+(def %sh-wait-pids
+  (fn (self wds status)
+    (if (null? wds)
+      status
+      (let ((pid (convert (first wds) %int)))
+        (if (and (not (null? pid)) (%sh-char-in? pid %sh-bg-pids))
+          (do
+            (set! %sh-bg-pids (%sh-pids-without pid %sh-bg-pids))
+            (self (rest wds) (sh-wait pid)))
+          (self (rest wds) 127))))))
+
+(def %sh-wait-builtin
+  (fn (_ wds)
+    (if (null? wds)
+      (do (%sh-wait-all %sh-bg-pids) (set! %sh-bg-pids ()) 0)
+      (%sh-wait-pids wds 0))))
+
 (def %sh-exit
   (fn (_ wds)
     (%sh-exit-shell
@@ -3212,6 +3245,7 @@
         (pair "exit"   %sh-exit)
         (pair "true"   %sh-true)
         (pair "false"  %sh-false)
+        (pair "wait"   %sh-wait-builtin)
         (pair ":"      %sh-true)))
 
 (def %sh-builtin?
@@ -4664,6 +4698,84 @@
           (self cur (%eval-pipeline cur))))
       (else result))))
 
+; --- Asynchronous lists ------------------------------------------------------
+;
+; An and-or list that ends with `&` runs in a child the shell does not wait
+; for.  The child's standard input is /dev/null before its own redirections,
+; since this shell has no job control; the shell carries on at once with status
+; 0, and `$!` is the child's pid until the next one.  `wait` collects them.
+;
+; Whether a list ends with `&` has to be known before any of it runs, so the
+; tokens are scanned ahead to where the list ends.
+
+; The asynchronous lists started and not yet waited for, and the latest one.
+(def %sh-bg-pids ())
+(def %sh-bg-pid ())
+
+; From a `case`, the tokens after the `esac` that closes it, or nil.  Its
+; patterns' `)` are not closing parentheses, so a scan passes over it whole.
+(def %sh-past-esac
+  (fn (self toks depth)
+    (match
+      ((null? toks) ())
+      ((%sh-word-is? (first toks) "case") (self (rest toks) (fx+ depth 1)))
+      ((%sh-word-is? (first toks) "esac")
+        (if (= depth 1) (rest toks) (self (rest toks) (- depth 1))))
+      (#t (self (rest toks) depth)))))
+
+; Where the and-or list at TOKS ends, when it ends with `&`: the tokens from
+; that `&` on.  Nil when it ends any other way -- at `;`, `;;`, a newline or
+; the end of the input, or at a `)` or a reserved word that belongs to a
+; command around it.  DEPTH counts the compound commands and subshells inside
+; the list, whose own lists do not end it.
+;
+; Every list is scanned before it runs, so an ordinary word costs one test of
+; its kind and one of its keyword mark, and an operator is told by its first
+; character; only a reserved word is looked up in the sets.
+(def %sh-async-end
+  (fn (self toks depth)
+    (match
+      ((null? toks) ())
+      ((eq? (first (first toks)) (lit tok-newline))
+        (if (= depth 0) () (self (rest toks) depth)))
+      ((eq? (first (first toks)) (lit tok-op))
+        (match
+          ((= (string-ref (first (rest (first toks))) 0) #\()
+            (self (rest toks) (fx+ depth 1)))
+          ((= (string-ref (first (rest (first toks))) 0) #\))
+            (if (= depth 0) () (self (rest toks) (- depth 1))))
+          ((fx<? 0 depth) (self (rest toks) depth))
+          ((= (string-ref (first (rest (first toks))) 0) #\;) ())
+          ((string=? (first (rest (first toks))) "&") toks)
+          (#t (self (rest toks) depth))))
+      ((null? (rest (rest (first toks)))) (self (rest toks) depth))
+      ((%sh-word-is? (first toks) "case") (self (%sh-past-esac toks 0) depth))
+      ((%sh-word-among? (first toks) %sh-block-openers)
+        (self (rest toks) (fx+ depth 1)))
+      ((%sh-word-among? (first toks) %sh-block-closers)
+        (if (= depth 0) () (self (rest toks) (- depth 1))))
+      ((fx<? 0 depth) (self (rest toks) depth))
+      ((%sh-word-among? (first toks) %sh-closing-words) ())
+      (#t (self (rest toks) depth)))))
+
+; Run the list at the cursor in a child and leave the cursor on its `&`.
+(def %sh-run-async
+  (fn (_ cur amp)
+    (let ((pid (sh-fork)))
+      (if (= pid 0)
+        (do
+          (set! %sh-traps ())
+          (%sh-setup-redir (%sh-redir "<" 0 "/dev/null"))
+          ; A raise must end the child here, not unwind into the shell that
+          ; forked it and carry on as a second copy of that shell.
+          (%sh-exit-shell (guard (e 2) (%eval-and-or cur))))
+        (do
+          (set-first! cur amp)
+          (set! %sh-bg-pid pid)
+          (set! %sh-bg-pids (pair pid %sh-bg-pids))
+          (set! %sh-status 0)
+          0)))))
+
 ; list: and_or ((';'|'&'|newline) and_or)*
 
 (set! %eval-list
@@ -4671,7 +4783,10 @@
     (%skip-newlines cur)
     (if (%at-stop-word? cur)
       (do (set! %sh-status 0) 0)
-      (let ((result (%eval-and-or cur)))
+      (let ((result (let ((amp (%sh-async-end (first cur) 0)))
+                      (if (null? amp)
+                        (%eval-and-or cur)
+                        (%sh-run-async cur amp)))))
         (if (%cursor-empty? cur)
           result
           (let ((tok (%cursor-peek cur)))
@@ -4680,19 +4795,11 @@
                 (%cursor-advance! cur)
                 (%skip-newlines cur)
                 (if (%at-stop-word? cur) result (%eval-list cur)))
-              (if (%match-op cur ";")
+              (if (or (%match-op cur ";") (%match-op cur "&"))
                 (do
                   (%skip-newlines cur)
                   (if (%at-stop-word? cur) result (%eval-list cur)))
-                (if (%match-op cur "&")
-                  (let ((pid (sh-fork)))
-                    (if (= pid 0)
-                      (do (set! %sh-traps ()) result (%sh-exit-shell 0))
-                      (do
-                        (set! %sh-status 0)
-                        (%skip-newlines cur)
-                        (if (%at-stop-word? cur) 0 (%eval-list cur)))))
-                  result)))))))))
+                result))))))))
 ; --- Here-documents ---------------------------------------------------------
 ;
 ;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
