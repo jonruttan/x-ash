@@ -426,6 +426,7 @@
 (def %sh-args ())
 (def %sh-functions ())
 (def %sh-fn-depth 0)
+(def %sh-dot-depth 0)
 (def %sh-return-status 0)
 
 (def %sh-join-with
@@ -2688,10 +2689,14 @@
 (def %sh-return
   (fn (_ wds)
     (let ((n (if (null? wds) %sh-status (convert (first wds) %int))))
-      (if (= %sh-fn-depth 0)
-        ; Outside a function POSIX leaves this unspecified; report and carry
-        ; on rather than unwinding to somewhere there is no frame for.
-        (do (%stderr "ash: return: can only `return' from a function\n") 1)
+      (if (and (= %sh-fn-depth 0) (= %sh-dot-depth 0))
+        ; Outside a function or a dot script POSIX leaves this unspecified;
+        ; report and carry on rather than unwinding to somewhere there is no
+        ; frame for.
+        (do
+          (%stderr "ash: return: can only `return' from a function"
+                   " or a dot script\n")
+          1)
         (do (set! %sh-return-status n) (error (lit %sh-return)))))))
 
 ; --- Loop control -----------------------------------------------------------
@@ -2788,15 +2793,34 @@
           (else (do (set! %sh-args wds) 0)))))))
 
 ; `.` / `source` FILE -- read the file and run it in THIS shell, so its
-; assignments and cd survive.  The status is the last command's.
+; assignments and cd survive.  The status is the last command's, or the one a
+; `return` in the file gives.  A file that cannot be read is an error of the
+; `.` itself, raised as any other error is, so a script ends there and the
+; prompt reports it and goes on.  What goes wrong while the file runs stays
+; that error, and `break` and `continue` reach the loop the `.` runs in.
 (def %sh-source
   (fn (_ wds)
     (if (null? wds)
       (do (%stderr "ash: .: filename argument required\n") 2)
       (let ((path (first wds)))
-        (guard (e (do (%stderr "ash: .: " path ": cannot read\n") 1))
-          (sh-eval (sh-read-file path))
-          %sh-status)))))
+        (let ((text (guard (e ()) (sh-read-file path))))
+          (if (null? text)
+            (error (string-append ".: " path ": cannot read"))
+            (%sh-run-dot text)))))))
+
+; A dot script is a place `return` may end, the way a function call is: the
+; innermost of the two catches it.
+(def %sh-run-dot
+  (fn (_ text)
+    (do
+      (set! %sh-dot-depth (+ %sh-dot-depth 1))
+      (guard (e
+          (do
+            (set! %sh-dot-depth (- %sh-dot-depth 1))
+            (if (%sh-return? e) %sh-return-status (error e))))
+        (sh-eval text)
+        (set! %sh-dot-depth (- %sh-dot-depth 1))
+        %sh-status))))
 
 ; Flat, via match, rather than a deep nested-if dispatch that is easy to
 ; miscount a paren in. One match arm per builtin.
