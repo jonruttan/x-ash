@@ -684,6 +684,38 @@
 (set! %image-recache-hooks
   (pair (fn (_) (%sh-var-set! "IFS" %sh-ifs-default)) %image-recache-hooks))
 
+; The prompts are shell variables with POSIX's defaults: PS1 before each
+; command, `# ` for the superuser and `$ ` for anyone else; PS2 before each line
+; that continues one; PS4 before each line `set -x` writes.  A value the
+; environment hands in is kept, and like IFS they are set again in a process
+; that loads an image.
+(def %sh-prompt-defaults!
+  (fn (_)
+    (do
+      (when (null? (%sh-var-get "PS1"))
+        (%sh-var-set! "PS1" (if (= (Sys geteuid) 0) "# " "$ ")))
+      (when (null? (%sh-var-get "PS2")) (%sh-var-set! "PS2" "> "))
+      (when (null? (%sh-var-get "PS4")) (%sh-var-set! "PS4" "+ ")))))
+(%sh-prompt-defaults!)
+(set! %image-recache-hooks
+  (pair (fn (_) (%sh-prompt-defaults!)) %image-recache-hooks))
+
+; What a prompt variable shows: its value expanded as double-quoted text is,
+; each time it is shown, or nothing when it is unset.  The expansion runs with
+; tracing off, so a substitution in PS4 is not itself traced -- which would
+; expand PS4 again -- and a value that fails to expand is shown as written, so
+; a bad PS1 cannot stop the shell from reading.
+(def %sh-prompt
+  (fn (_ name)
+    (let ((v (%sh-var-get name)) (trace %sh-opt-xtrace))
+      (if (null? v)
+        ""
+        (do
+          (set! %sh-opt-xtrace ())
+          (let ((text (guard (e v) (%sh-expand-str-dq v))))
+            (set! %sh-opt-xtrace trace)
+            text))))))
+
 (def %sh-ifs
   (fn (_)
     (let ((v (%sh-var-get "IFS")))
@@ -3352,7 +3384,7 @@
               (if (null? %sh-subst-status) 0 %sh-subst-status)))
           (do
             (unless (null? %sh-opt-xtrace)
-              (%stderr "+ " (%sh-join-args remaining) "\n"))
+              (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n"))
             (%sh-exit-on-error
              (%sh-set-status
               (%sh-run-scoped assigns remaining redirs)))))))))

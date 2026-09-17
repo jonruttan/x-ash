@@ -308,7 +308,7 @@
       (fn (self acc)
         (if (%ash-complete? acc)
           acc
-          (let ((line (%ash-read-line "> ")))
+          (let ((line (%ash-read-line (%sh-prompt "PS2"))))
             (match
               ; EOF mid-entry: hand back what there is and let sh-eval report
               ; the parse error, rather than looping on nil forever.
@@ -377,8 +377,9 @@
   (fn (_)
     (%ash-collect)
     ; Through the line editor when there is a terminal (ash/line.x), which
-    ; draws the prompt itself; through the byte reader otherwise.
-    (let ((line (%ash-read-line %repl-prompt)))
+    ; draws the prompt itself; through the byte reader otherwise.  The prompt
+    ; is PS1, expanded afresh for each command.
+    (let ((line (%ash-read-line (%sh-prompt "PS1"))))
       (match
         ; ctrl-d leaves, with the last command's status -- `x -l ash -f x.sh`
         ; and an interactive session both answer $? to the caller.  Through
