@@ -615,9 +615,9 @@
               (set! %sh-cond-depth 0)
               (set! %sh-traps ())
               ; A failing substitution answers what it managed to print, the
-              ; way a shell does -- the error has already gone to stderr.
-              (guard (e ()) (sh-eval-extracted src))
-              (%sh-exit-shell %sh-status))
+              ; way a shell does, and its error goes to stderr.
+              (%sh-in-child
+                (fn (_) (do (sh-eval-extracted src) %sh-status))))
             ; Read before wait: a child whose output exceeds the pipe buffer
             ; blocks in write() until someone drains it, so waiting first would
             ; deadlock on any substitution larger than a pipe.
@@ -3059,6 +3059,28 @@
     (%sh-run-exit-trap)
     (sh-exit status)))
 
+; Report an error the way the shell does: on stderr, after `ash: `.  A
+; structured error is rendered by the platform writer, since its memory read as
+; a symbol name would print garbage bytes.
+(def %sh-write-to-str (prim-ref (lit io) (lit write-to-str)))
+(def %sh-report
+  (fn (_ err)
+    (%stderr "ash: " (if (str? err) err (%sh-write-to-str err)) "\n")))
+
+; What a forked child runs: THUNK answers the status the child exits with.  A
+; raise ends the child here, since left to unwind it would carry on through the
+; code of the shell that forked it, as a second copy of that shell.  A `return`
+; or loop signal that nothing in the child caught ends it with the status the
+; signal carries; any other error is reported, and ends it with 2.
+(def %sh-in-child
+  (fn (_ thunk)
+    (%sh-exit-shell
+      (guard (e (match
+                  ((%sh-return? e) %sh-return-status)
+                  ((not (null? (%sh-loop-signal-kind e))) %sh-status)
+                  (#t (do (%sh-report e) 2))))
+        (thunk)))))
+
 ; --- getopts ------------------------------------------------------------------
 ;
 ; `getopts OPTSTRING NAME [ARG...]` reads one option per call, driven by a loop:
@@ -3295,14 +3317,17 @@
           ; A fork that exists to BECOME another program: no trap of the
           ; script's can belong to it, and its 127 is not the shell exiting.
           (set! %sh-traps ())
-          (%sh-setup-redirs redirs)
-          (sh-exec name wds)
-          ; A diagnostic goes to stderr: on stdout it would be captured by
-          ; `x=$(nosuchcmd)` as the command's output and `2>/dev/null` could
-          ; not silence it. The redirections are applied above, so a script
-          ; that asked for 2>/dev/null gets it.
-          (%stderr "ash: " name ": command not found\n")
-          (sh-exit 127))
+          (%sh-in-child
+            (fn (_)
+              (do
+                (%sh-setup-redirs redirs)
+                (sh-exec name wds)
+                ; A diagnostic goes to stderr: on stdout it would be captured
+                ; by `x=$(nosuchcmd)` as the command's output and `2>/dev/null`
+                ; could not silence it. The redirections are applied above, so
+                ; a script that asked for 2>/dev/null gets it.
+                (%stderr "ash: " name ": command not found\n")
+                127))))
         (sh-wait pid)))))
 ; --- Assignment handling ---
 
@@ -4159,8 +4184,11 @@
         (if (= pid 0)
           (do
             (set! %sh-traps ())
-            (unless (null? body) (%eval-list (%mk-cursor body)))
-            (%sh-exit-shell %sh-status))
+            (%sh-in-child
+              (fn (_)
+                (do
+                  (unless (null? body) (%eval-list (%mk-cursor body)))
+                  %sh-status))))
           (let ((status (sh-wait pid)))
             (set! %sh-status status)
             status))))))
@@ -4259,8 +4287,11 @@
               (sh-dup2 write-fd 1)
               (sh-close write-fd)
               (set! %sh-traps ())
-              (let ((cur (%mk-cursor left-tokens))) (%eval-command cur))
-              (%sh-exit-shell %sh-status))
+              (%sh-in-child
+                (fn (_)
+                  (do
+                    (%eval-command (%mk-cursor left-tokens))
+                    %sh-status))))
             ; Parent: stdin ← pipe, continue chain
 
             (do
@@ -4767,10 +4798,11 @@
       (if (= pid 0)
         (do
           (set! %sh-traps ())
-          (%sh-setup-redir (%sh-redir "<" 0 "/dev/null"))
-          ; A raise must end the child here, not unwind into the shell that
-          ; forked it and carry on as a second copy of that shell.
-          (%sh-exit-shell (guard (e 2) (%eval-and-or cur))))
+          (%sh-in-child
+            (fn (_)
+              (do
+                (%sh-setup-redir (%sh-redir "<" 0 "/dev/null"))
+                (%eval-and-or cur)))))
         (do
           (set-first! cur amp)
           (set! %sh-bg-pid pid)
