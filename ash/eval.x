@@ -487,6 +487,7 @@
   (list (pair "?" (fn (_) (convert %sh-status %string)))
         (pair "$" (fn (_) (convert %sh-pid %string)))
         (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (convert %sh-bg-pid %string))))
+        (pair "-" (fn (_) (%sh-flags)))
         (pair "#" (fn (_) (convert (length %sh-args) %string)))
         ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
         ; same thing at all: `"$@"` is one field per parameter and never
@@ -1905,11 +1906,11 @@
           ; unquoted expansion does, which %sh-add-expansion already handles.
           ((and (= d #\@) (= mode %sh-mode-dq))
             (cont (+ i 2) mode (%sh-add-args a %sh-args)))
-          ; The one-character specials: $? $$ $! $# $@ $* and $1..$9.
+          ; The one-character specials: $? $$ $! $- $# $@ $* and $1..$9.
           ;
           ; A single digit only, per POSIX: `$10` is `$1` followed by a literal
           ; 0, and `${10}` is how the tenth is spelled.
-          ((or (= d #\?) (= d #\$) (= d #\!) (= d #\#)
+          ((or (= d #\?) (= d #\$) (= d #\!) (= d #\-) (= d #\#)
                (= d #\@) (= d #\*) (%sh-digit? d))
             (substitute (+ i 2) (%sh-var-value (substring s (+ i 1) (+ i 2)))))
           ; $NAME
@@ -2858,11 +2859,34 @@
 ;
 ; `--` ends the options even when no parameters follow, which is how a script
 ; clears them: `set --`.
+; Each option's letter, what turns it, and what reads it.  `$-` asks the
+; readers, `set` the setters, and an option is one row rather than a row here
+; and an arm somewhere else.
 (def %sh-set-opts
-  (list (pair "e" (fn (_ on?) (set! %sh-opt-errexit on?)))
-        (pair "u" (fn (_ on?) (set! %sh-opt-nounset on?)))
-        (pair "x" (fn (_ on?) (set! %sh-opt-xtrace on?)))
-        (pair "f" (fn (_ on?) (set! %sh-opt-noglob on?)))))
+  (list (pair "e" (pair (fn (_ on?) (set! %sh-opt-errexit on?))
+                        (fn (_) %sh-opt-errexit)))
+        (pair "u" (pair (fn (_ on?) (set! %sh-opt-nounset on?))
+                        (fn (_) %sh-opt-nounset)))
+        (pair "x" (pair (fn (_ on?) (set! %sh-opt-xtrace on?))
+                        (fn (_) %sh-opt-xtrace)))
+        (pair "f" (pair (fn (_ on?) (set! %sh-opt-noglob on?))
+                        (fn (_) %sh-opt-noglob)))))
+
+(def %sh-set-opt-on! (fn (_ row on?) ((first row) on?)))
+(def %sh-set-opt-on? (fn (_ row) ((rest row))))
+
+; The letters of the options now set, which is what `$-` answers.  A shell
+; that is not interactive and has none set answers the empty string.
+(def %sh-flag-letters
+  (fn (self rows out)
+    (if (null? rows)
+      (Str8 join "" (reverse out))
+      (self (rest rows)
+            (if (%sh-set-opt-on? (rest (first rows)))
+              (pair (first (first rows)) out)
+              out)))))
+
+(def %sh-flags (fn (_) (%sh-flag-letters %sh-set-opts ())))
 
 ; `set -o noglob` names the same option `set -f` does.  The letters are what
 ; the table above is keyed by, so this says only which name belongs to which
@@ -2880,7 +2904,7 @@
         (if (null? f)
           (do (%stderr "ash: set: " (substring word i (+ i 1))
                        ": unknown option\n") 2)
-          (do (f on?) (self word on? (+ i 1))))))))
+          (do (%sh-set-opt-on! f on?) (self word on? (+ i 1))))))))
 
 ; `set -o NAME` and `set +o NAME`, which turn the same option the letter does.
 ; A `set -o` with no name would write the options; nothing here reads that, and
@@ -2892,7 +2916,7 @@
       (let ((letter (%sh-table-get (first wds) %sh-set-opt-names)))
         (if (null? letter)
           (do (%stderr "ash: set: " (first wds) ": unknown option\n") 2)
-          (do ((%sh-table-get letter %sh-set-opts) on?) 0))))))
+          (do (%sh-set-opt-on! (%sh-table-get letter %sh-set-opts) on?) 0))))))
 
 (def %sh-set
   (fn (self wds)
