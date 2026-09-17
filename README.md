@@ -63,9 +63,12 @@ pattern that matches nothing stands as written, which is POSIX's default. A
 leading dot is matched only by a pattern that starts with one, and quoting
 suppresses the whole thing: `"*"`, `'*'` and `\*` are all a literal star.
 
-Functions: `name() { ... }`, with `$1`…, `$#` and `$@` scoped to the call and
-restored afterwards, `return [n]` for an early exit, and `shift [n]`. A
-function shadows an external of the same name and is shadowed by a builtin.
+Functions: `name()` followed by any compound command — `{ ... }`, `( ... )`,
+`if`, `for`, `while`, `until` or `case` — and the redirections written after
+it, which are expanded at each call. `$1`…, `$#` and `$@` are scoped to the
+call and restored afterwards, `return [n]` leaves early, and `shift [n]`
+moves the arguments along. A function shadows an external of the same name
+and is shadowed by a builtin.
 
 Here-documents: `<<EOF` and `<<-EOF` (which strips leading tabs), with the body
 expanded unless the delimiter is quoted. Several on one line are taken in
@@ -104,7 +107,7 @@ correctly to a terminal and through a pipe; the spec suite asserts subshell
 At the prompt, an entry that is not finished continues on a `> ` line — an
 unclosed quote, a trailing `|` or `&&` or backslash, an `if`/`for`/`while`/
 `until`/`case` whose closer has not been typed yet, or a function body whose
-`}` is still to come.
+closer is still to come.
 
 x-ash is a **lang**: a surface syntax loaded over an x-lang dialect, so a
 spelling shared with x-lang can mean something different here — `;` separates

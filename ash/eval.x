@@ -4535,7 +4535,7 @@
 
 ; --- Function definitions ----------------------------------------------------
 ;
-;   name() { body; }
+;   name() compound-command [redirection...]
 ;
 ; A definition is the one command shape that cannot be recognised from its
 ; FIRST token: `name` is an ordinary word, and only the `()` after it says what
@@ -4543,9 +4543,17 @@
 ; compound-vs-simple split -- a reserved word is excluded, because `if()` is
 ; not a function definition, it is a syntax error somewhere else.
 ;
+; The body is any compound command, not only a brace group: `f() ( ... )` runs
+; in a subshell, `f() case x in ... esac` is a case.  What follows the `()` is
+; the rest of this command, which is one pipeline stage -- %collect-stage
+; counts both kinds of nesting, so the `;` inside the body belongs to the body
+; and the one after it ends the definition.
+;
 ; The body is stored as TOKENS, not text.  They have already been through the
 ; tokenizer once and re-tokenizing on every call would be both slower and a
-; second chance to disagree with the first parse.
+; second chance to disagree with the first parse.  Unparsed, too: a
+; redirection written after the body is expanded when the function runs, not
+; when it is defined.
 (def %is-fn-def?
   (fn (_ cur)
     (let ((toks (first cur)))
@@ -4567,23 +4575,6 @@
                     (%tok-is-op? c ")")
                     ()))))))))))
 
-(def %collect-fn-body
-  (fn (self cur depth toks)
-    (if (%cursor-empty? cur)
-      (error "parse error: unexpected EOF in function body")
-      (let ((tok (%cursor-peek cur)))
-        (%cursor-advance! cur)
-        (if (%tok-is-keyword? tok)
-          (let ((w (%tok-word-val tok)))
-            (if (string=? w "{")
-              (self cur (+ depth 1) (pair tok toks))
-              (if (string=? w "}")
-                (if (= depth 0)
-                  (reverse toks)
-                  (self cur (- depth 1) (pair tok toks)))
-                (self cur depth (pair tok toks)))))
-          (self cur depth (pair tok toks)))))))
-
 (def %eval-fn-def
   (fn (_ cur)
     (let ((name (%tok-word-val (%cursor-peek cur))))
@@ -4597,25 +4588,16 @@
       ; consume )
 
       (%skip-newlines cur)
-      (if (%cursor-empty? cur)
-        (error (string-append "parse error: no body for function " name))
-        (let ((tok (%cursor-peek cur)))
-          (if (not (if (%tok-is-keyword? tok)
-                     (string=? (%tok-word-val tok) "{")
-                     ()))
-            (error (string-append "parse error: expected { after " name "()"))
-            (do
-              (%cursor-advance! cur)
-              ; consume {
-
-              (%skip-newlines cur)
-              (let ((body (%collect-fn-body cur 0 ())))
-                ; A redefinition SHADOWS rather than replaces -- the lookup
-                ; walks from the front, so the newest wins and the list stays
-                ; append-free.
-                (set! %sh-functions (pair (pair name body) %sh-functions))
-                (set! %sh-status 0)
-                0))))))))
+      (if (not (%is-compound-start? cur))
+        (error (string-append "parse error: no compound command after "
+                              name "()"))
+        (let ((body (%collect-stage cur () 0 0)))
+          ; A redefinition SHADOWS rather than replaces -- the lookup walks
+          ; from the front, so the newest wins and the list stays
+          ; append-free.
+          (set! %sh-functions (pair (pair name body) %sh-functions))
+          (set! %sh-status 0)
+          0)))))
 
 (def %sh-fn-lookup
   (fn (self name fns)
@@ -4639,10 +4621,10 @@
     (let ((saved %sh-args) (saved-depth %sh-compound-depth))
       (set! %sh-args args)
       (set! %sh-fn-depth (+ %sh-fn-depth 1))
-      ; A body is a fresh top level: %collect-fn-body has taken the closing `}`
-      ; off, so nothing in these tokens closes anything outside them, and a
-      ; function called from inside an `if` does not read a bare `echo done` in
-      ; its body as a terminator.
+      ; A body is a fresh top level: it is one whole compound command, so
+      ; nothing in these tokens closes anything outside them, and a function
+      ; called from inside an `if` does not read a bare `echo done` in its
+      ; body as a terminator.
       (set! %sh-compound-depth 0)
       (guard (e
           (do
