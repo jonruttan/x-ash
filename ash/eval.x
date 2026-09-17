@@ -382,6 +382,30 @@
             (%sh-word-in? (first (rest tok)) %sh-stop-ops))
           (else ()))))))
 
+; Nothing may be left unread.  A parser that evaluates as it reads stops in
+; front of a token it cannot take -- a word after `fi`, a `)` that closes
+; nothing -- and what follows it would never run: POSIX makes that a syntax
+; error, where saying nothing turns a typo into a script that quietly ends
+; halfway.  Every bounded run of tokens is checked as it finishes: a pipeline
+; stage, a subshell body, a function body, and the whole input.
+(def %sh-refuse-leftover
+  (fn (_ cur)
+    (unless (%cursor-empty? cur)
+      (let ((tok (%cursor-peek cur)))
+        (error (string-append "parse error: unexpected "
+                              (if (%tok-is-newline? tok)
+                                "newline"
+                                (%tok-word-val tok))))))))
+
+; A body of its own -- a subshell's, a function's -- read to its end.  The
+; status is the shell's, which the commands in the body have set.
+(def %sh-eval-body
+  (fn (_ body)
+    (unless (null? body)
+      (let ((cur (%mk-cursor body)))
+        (%eval-list cur)
+        (%sh-refuse-leftover cur)))))
+
 (def %expect-word
   (fn (_ cur word)
     (if (%cursor-empty? cur)
@@ -4151,7 +4175,9 @@
 (set! %eval-for-body
   (fn (_ cur var words body-start)
     (if (null? words)
-      (do (set! %sh-status 0) 0)
+      ; No words is no iterations, and the body is still to be stepped over:
+      ; the cursor stands after the `do`, where nothing has read it.
+      (do (%skip-to-done cur 0) (set! %sh-status 0) 0)
       (do
         (%sh-var-set! var (first words))
         (set-first! cur body-start)
@@ -4397,7 +4423,7 @@
             (%sh-in-child
               (fn (_)
                 (do
-                  (unless (null? body) (%eval-list (%mk-cursor body)))
+                  (%sh-eval-body body)
                   %sh-status))))
           (let ((status (sh-wait pid)))
             (set! %sh-status status)
@@ -4632,7 +4658,7 @@
             (set! %sh-compound-depth saved-depth)
             (set! %sh-fn-depth (- %sh-fn-depth 1))
             (if (%sh-return? e) %sh-return-status (error e))))
-        (unless (null? body) (%eval-list (%mk-cursor body)))
+        (%sh-eval-body body)
         (set! %sh-args saved)
         (set! %sh-compound-depth saved-depth)
         (set! %sh-fn-depth (- %sh-fn-depth 1))
@@ -4726,9 +4752,11 @@
 
 (set! %eval-command
   (fn (_ cur)
-    (if (%is-compound-start? cur)
-      (%eval-compound-redir cur)
-      (%eval-simple-cmd cur))))
+    (let ((status (if (%is-compound-start? cur)
+                    (%eval-compound-redir cur)
+                    (%eval-simple-cmd cur))))
+      (%sh-refuse-leftover cur)
+      status)))
 ; --- Pipeline stage collection ---
 ; Collect tokens for one stage (until | or end of command)
 
@@ -5358,7 +5386,10 @@
     (let ((tokens (%sh-mark-keywords (sh-tokenize input))))
       (if (null? tokens)
         0
-        (let ((cur (%mk-cursor tokens))) (%eval-list cur))))))
+        (let ((cur (%mk-cursor tokens)))
+          (let ((status (%eval-list cur)))
+            (%sh-refuse-leftover cur)
+            status))))))
 
 (def sh-eval
   (fn (_ input)
