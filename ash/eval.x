@@ -4760,9 +4760,26 @@
                         pending idx)))))))
       (go 0 0 () () index))))
 
+; Whether S, up to I, ends in a backslash that escapes the newline after it: an
+; odd run of them, since each pair is one escaped backslash.
+(def %sh-line-continues?
+  (fn (self s i odd?)
+    (if (and (fx<? 0 i) (= (string-ref s (- i 1)) #\\))
+      (self s (- i 1) (not odd?))
+      odd?)))
+
+; An unquoted body is read as double-quoted text is, so a line that ends in a
+; backslash joins the next one before it is compared with the delimiter: `x\`
+; over `EOF` is the body line `xEOF`.  A quoted body keeps its backslashes.
+(def %sh-hd-joins?
+  (fn (_ line more expand?)
+    (and expand?
+         (not (null? more))
+         (%sh-line-continues? line (string-length line) ()))))
+
 ; Take a body off the front of LINES, to the terminator.
 (def %sh-hd-take
-  (fn (_ lines delim strip?)
+  (fn (_ lines delim strip? expand?)
     ; `remaining`, not `rest`: a parameter of that name shadows the list
     ; primitive, so the recursive step called a LIST.  Second time in this
     ; bundle -- see %sh-first-op.
@@ -4775,10 +4792,18 @@
           (let ((line (if strip?
                         (%sh-strip-tabs (first remaining))
                         (first remaining))))
-            (if (string=? line delim)
-              (list (Str8 join "" (reverse acc)) (rest remaining))
-              (self (rest remaining)
-                (pair (string-append line "\n") acc)))))))
+            (match
+              ((%sh-hd-joins? line (rest remaining) expand?)
+                (self (pair (string-append
+                              (substring line 0 (- (string-length line) 1))
+                              (first (rest remaining)))
+                            (rest (rest remaining)))
+                      acc))
+              ((string=? line delim)
+                (list (Str8 join "" (reverse acc)) (rest remaining)))
+              (#t
+                (self (rest remaining)
+                  (pair (string-append line "\n") acc))))))))
     (go lines ())))
 
 (def %sh-hd-collect
@@ -4786,7 +4811,8 @@
     (if (null? pending)
       (list lines bodies)
       (let ((p (first pending)))
-        (let ((taken (%sh-hd-take lines (first p) (first (rest p)))))
+        (let ((taken (%sh-hd-take lines (first p) (first (rest p))
+                                  (first (rest (rest p))))))
           (self (first (rest taken)) (rest pending)
             (pair (%sh-heredoc (first taken) (first (rest (rest p))))
                   bodies)))))))
@@ -4833,6 +4859,96 @@
               (self (+ i 1))))))
       (go 0))))
 
+; --- Line continuation -------------------------------------------------------
+;
+; A backslash before a newline joins the two lines: the pair is removed before
+; the text is tokenized, wherever a backslash is an escape -- outside quotes and
+; inside double quotes, but not inside single quotes or a comment (POSIX 2.2.1).
+; Here-documents are lifted out first, so a quoted body keeps its backslashes
+; and an unquoted one has joined its lines already (%sh-hd-take).
+
+; Whether S holds a backslash before a newline anywhere, quoted or not.  Most
+; text holds none, so this is asked first, a character at a time.
+(def %sh-bs-newline?
+  (fn (self s i n)
+    (match
+      ((not (fx<? (fx+ i 1) n)) ())
+      ((not (= (string-ref s i) #\\)) (self s (fx+ i 1) n))
+      ((= (string-ref s (fx+ i 1)) #\newline) #t)
+      (#t (self s (fx+ i 1) n)))))
+
+; A `#` opens a comment where a token could start: at the start of the text,
+; or after a blank, a newline or an operator character.
+(def %sh-comment-may-follow?
+  (fn (_ c)
+    (match
+      ((%sh-ws? c) #t)
+      ((= c #\newline) #t)
+      (#t (%sh-op-start? c)))))
+
+; For a `$` at I, the index of the `)` closing the `$(` it opens, or -1.
+(def %sh-subst-close
+  (fn (_ s i n)
+    (if (and (fx<? (fx+ i 1) n) (= (string-ref s (fx+ i 1)) #\())
+      (%sh-cs-end s (fx+ i 2) n 0)
+      (- 0 1))))
+
+(def %sh-mode-comment 3)
+
+; The index of each backslash that joins its line to the next, latest first.
+; MODE is bare, single-quoted, double-quoted or a comment, and START? is whether
+; a `#` here would open a comment.  A command substitution is walked as text of
+; its own, up to the parenthesis that closes it, so its quotes do not count
+; against the ones around it.
+(def %sh-continuations
+  (fn (self s i n mode start? cuts)
+    (if (not (fx<? i n))
+      cuts
+      (let ((c (string-ref s i)))
+        (match
+          ((= mode %sh-mode-sq)
+            (self s (fx+ i 1) n (if (= c #\') %sh-mode-bare mode) () cuts))
+          ((= mode %sh-mode-comment)
+            (if (= c #\newline)
+              (self s (fx+ i 1) n %sh-mode-bare #t cuts)
+              (self s (fx+ i 1) n mode () cuts)))
+          ((= c #\\)
+            (match
+              ((not (fx<? (fx+ i 1) n)) cuts)
+              ((= (string-ref s (fx+ i 1)) #\newline)
+                (self s (fx+ i 2) n mode start? (pair i cuts)))
+              (#t (self s (fx+ i 2) n mode () cuts))))
+          ((= c #\$)
+            (let ((e (%sh-subst-close s i n)))
+              (if (fx<? i e)
+                ; Past the `)`, still inside the word the substitution is in.
+                (self s (fx+ e 1) n mode ()
+                  (self s (fx+ i 2) e %sh-mode-bare #t cuts))
+                (self s (fx+ i 1) n mode () cuts))))
+          ((= mode %sh-mode-dq)
+            (self s (fx+ i 1) n (if (= c #\") %sh-mode-bare mode) () cuts))
+          ((= c #\') (self s (fx+ i 1) n %sh-mode-sq () cuts))
+          ((= c #\") (self s (fx+ i 1) n %sh-mode-dq () cuts))
+          ((and (= c #\#) start?) (self s (fx+ i 1) n %sh-mode-comment () cuts))
+          (#t (self s (fx+ i 1) n mode (%sh-comment-may-follow? c) cuts)))))))
+
+; S without the backslash-newline pair at each of CUTS, latest first.
+(def %sh-cut-pairs
+  (fn (self s cuts end acc)
+    (if (null? cuts)
+      (Str8 join "" (pair (substring s 0 end) acc))
+      (self s (rest cuts) (first cuts)
+            (pair (substring s (fx+ (first cuts) 2) end) acc)))))
+
+(def %sh-join-lines
+  (fn (_ text)
+    (let ((n (string-length text)))
+      (if (not (%sh-bs-newline? text 0 n))
+        text
+        (%sh-cut-pairs text
+          (%sh-continuations text 0 n %sh-mode-bare #t ())
+          n ())))))
+
 ; --- Public API ---
 
 ; Extraction happens once, at the top. A command substitution evaluates a
@@ -4840,7 +4956,8 @@
 ; still carries the `<<N` markers, and running the pass again would find `N`,
 ; consume no body, and overwrite %sh-heredocs. So the substitution path
 ; evaluates already-extracted text; reading a file (`.` / source) is fresh and
-; goes through the full entry.
+; goes through the full entry.  Lines are joined there as well, after the
+; extraction, so a fragment's continuations went with the text around it.
 (def sh-eval-extracted
   (fn (_ input)
     (let ((tokens (%sh-mark-keywords (sh-tokenize input))))
@@ -4849,4 +4966,5 @@
         (let ((cur (%mk-cursor tokens))) (%eval-list cur))))))
 
 (def sh-eval
-  (fn (_ input) (sh-eval-extracted (%sh-heredoc-extract input))))
+  (fn (_ input)
+    (sh-eval-extracted (%sh-join-lines (%sh-heredoc-extract input)))))
