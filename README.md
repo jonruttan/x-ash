@@ -81,8 +81,15 @@ compound (`for ...; done > log`) applies to the whole construct. `exec` with
 redirections and no command applies them to the shell itself.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset`, `read`,
-`set`, `test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `trap` (EXIT
-only), `return`, `shift`, `exit`, `true`, `false`, `:`.
+`set`, `test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `command`,
+`trap` (EXIT only), `return`, `shift`, `exit`, `true`, `false`, `:`.
+
+`command NAME [arg...]` runs NAME as though no function had that name, and
+`command -v NAME` answers what would run: a builtin, function or reserved word
+as written, a name holding a `/` as written, and anything else as the first
+file on PATH that could be executed. `-V` says what the name is rather than
+what would run. `-p` is refused rather than ignored, a script that asks for a
+trusted PATH not being one to hand the untrusted one to.
 
 `local NAME[=VALUE]...` in a function gives each name a value for the call and
 puts the old one back at the end — its value, its export attribute, and any
@@ -103,7 +110,8 @@ suppresses splitting entirely.
 `-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
 unknown operator is a usage error (status 2), not a silent false.
 
-Not implemented: `command`, signal traps, and job control.
+Not implemented: an action on a signal (`trap` takes one for EXIT alone), and
+job control.
 
 Subshells: `( ... )` forks, and the interpreter has no flush primitive, so a
 child's buffered output can be lost if the parent exits first. It prints

@@ -35,7 +35,7 @@
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
-  sh-path-kind sh-path-size sh-read-file sh-read-line sh-read-line-fd
+  sh-path-kind sh-path-size sh-path-mode sh-read-file sh-read-line sh-read-line-fd
   sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
 ; --- The tokenizer base ------------------------------------------------------
@@ -244,6 +244,11 @@
 
 (def sh-path-size
   (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit size) (File stat path))))))
+
+; The permission bits, or 0 for a path that is not there -- what `command -v`
+; asks to tell a program on PATH from a file of the same name.
+(def sh-path-mode
+  (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit mode) (File stat path))))))
 
 (def sh-read-file (fn (_ path) (File read-all path)))
 
