@@ -3674,7 +3674,11 @@
                     ; consume 'in'
 
                     (%collect-for-words cur ()))
-                  ())))
+                  ; No `in` means the positional parameters as they stand when
+                  ; the loop starts: `for i; do` is `for i in "$@"; do`.  A
+                  ; `set --` in the body rebinds %sh-args and leaves this list
+                  ; alone.
+                  %sh-args)))
           ; Skip separator
 
           (%skip-newlines cur)
