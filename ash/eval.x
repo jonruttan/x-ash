@@ -4484,21 +4484,27 @@
 ; `*` -- try the rest of the pattern at every position from here to the end.
 (set! %sh-glob-star
   (fn (self pat pi pn s si sn)
-    (if (%sh-glob-at pat pi pn s si sn)
-      #t
-      (if (>= si sn) () (self pat pi pn s (+ si 1) sn)))))
+    (match
+      ((%sh-glob-at pat pi pn s si sn) #t)
+      ((fx<? si sn) (self pat pi pn s (fx+ si 1) sn))
+      (#t ()))))
 
+; Every character of every comparison comes through here -- a case pattern, a
+; `${x#pat}`, a directory entry being globbed -- so the path an ordinary
+; character takes is matches and the integer doors, nothing else: no `let`,
+; no `and`, no `<` or `+`, each of which costs objects on every step.  The
+; indices are integers throughout, which is what the doors need.
 (set! %sh-glob-at
   (fn (self pat pi pn s si sn)
-    (if (>= pi pn)
-      ; Pattern exhausted: a match only if the word is exhausted too.
-      (if (>= si sn) #t ())
-      (let ((pc (string-ref pat pi)))
+    (match
+      ((fx<? pi pn)
         (match
-          ((= pc #\*) (%sh-glob-star pat (+ pi 1) pn s si sn))
-          ((= pc #\?)
-            (if (>= si sn) () (self pat (+ pi 1) pn s (+ si 1) sn)))
-          ((= pc #\[)
+          ((= (string-ref pat pi) #\*)
+            (%sh-glob-star pat (fx+ pi 1) pn s si sn))
+          ((= (string-ref pat pi) #\?)
+            (match ((fx<? si sn) (self pat (fx+ pi 1) pn s (fx+ si 1) sn))
+                   (#t ())))
+          ((= (string-ref pat pi) #\[)
             (let ((e (%sh-glob-class-end pat (+ pi 1) pn)))
               (if (< e 0)
                 ; Unterminated: a literal [
@@ -4508,16 +4514,33 @@
                 (if (and (< si sn) (%sh-glob-class-match? pat (+ pi 1) e s si))
                   (self pat (+ e 1) pn s (+ si 1) sn)
                   ()))))
-          ((and (= pc #\\) (< (+ pi 1) pn))
-            (if (and (< si sn)
-                     (= (string-ref pat (+ pi 1))
-                        (string-ref s si)))
-              (self pat (+ pi 2) pn s (+ si 1) sn)
-              ()))
-          (#t
-            (if (and (< si sn) (= pc (string-ref s si)))
-              (self pat (+ pi 1) pn s (+ si 1) sn)
-              ())))))))
+          ; A backslash makes the next character itself; a trailing one is
+          ; itself.
+          ((= (string-ref pat pi) #\\)
+            (match
+              ((fx<? (fx+ pi 1) pn)
+                (match
+                  ((fx<? si sn)
+                    (match
+                      ((= (string-ref pat (fx+ pi 1)) (string-ref s si))
+                        (self pat (fx+ pi 2) pn s (fx+ si 1) sn))
+                      (#t ())))
+                  (#t ())))
+              ((fx<? si sn)
+                (match
+                  ((= (string-ref s si) #\\)
+                    (self pat (fx+ pi 1) pn s (fx+ si 1) sn))
+                  (#t ())))
+              (#t ())))
+          ((fx<? si sn)
+            (match
+              ((= (string-ref pat pi) (string-ref s si))
+                (self pat (fx+ pi 1) pn s (fx+ si 1) sn))
+              (#t ())))
+          (#t ())))
+      ; Pattern exhausted: a match only if the word is exhausted too.
+      ((fx<? si sn) ())
+      (#t #t))))
 
 (def %sh-pattern-match?
   (fn (_ pat word)
