@@ -2457,16 +2457,20 @@
       (%sh-redir-failed verb target)
       (do (sh-dup2 fh fd) (sh-close fh) #t))))
 
-; `>&2` and `<&0` name a descriptor the shell already has.  A word that is not
-; a number, and a number nothing is open on, are both refusals.
+; `>&2` and `<&0` name a descriptor the shell already has; `>&-` and `<&-`
+; close FD instead, and closing one that is not open is no failure, as in
+; both reference shells.  A word that is neither a number nor `-`, and a
+; number nothing is open on, are both refusals.
 (def %sh-redir-dup
   (fn (_ target fd)
-    (let ((from (convert target %int)))
-      (if (null? from)
-        (%sh-redir-failed "duplicate" target)
-        (if (fx<? (sh-dup2 from fd) 0)
+    (if (string=? target "-")
+      (do (sh-close fd) #t)
+      (let ((from (convert target %int)))
+        (if (null? from)
           (%sh-redir-failed "duplicate" target)
-          #t)))))
+          (if (fx<? (sh-dup2 from fd) 0)
+            (%sh-redir-failed "duplicate" target)
+            #t))))))
 
 ; Answers whether the redirection was made.
 (def %sh-setup-redir
