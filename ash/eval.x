@@ -2269,6 +2269,18 @@
         ; and a case subject are literal strings.
         (if (null? fs) "" (%sh-field-plain (first fs)))))))
 
+; A case pattern is expanded like any word -- a parameter, a substitution,
+; arithmetic -- but it is a PATTERN afterwards, so the escapes stay on: what
+; quoting made literal must stay literal to the matcher, and `case x in "*")`
+; is a star to look for rather than a star to match anything with.  Neither
+; split nor globbed, being one pattern rather than a list of filenames.
+(def %sh-expand-pattern
+  (fn (_ tok)
+    (if (eq? (first tok) (lit tok-sq))
+      (%sh-glob-escape-all (%tok-word-val tok))
+      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ())))
+        (if (null? fs) "" (%sh-field-text (first fs)))))))
+
 ; Still string-in, string-out, for the sites that hold a value rather than a
 ; token.  Unsplit by construction.
 (def %sh-expand-word
@@ -4525,15 +4537,15 @@
               (%collect-case-patterns cur pats))
             (do
               (%cursor-advance! cur)
-              (%collect-case-patterns
-                cur
-                (pair (%tok-word-val tok) pats)))))))))
+              (%collect-case-patterns cur (pair tok pats)))))))))
 
+; Each pattern is expanded when its turn comes, and the first that matches
+; ends it: in `a|$(cmd))` the substitution runs only when `a` did not match.
 (def %case-match?
   (fn (_ pats word)
     (if (null? pats)
       ()
-      (if (%sh-pattern-match? (first pats) word)
+      (if (%sh-pattern-match? (%sh-expand-pattern (first pats)) word)
         #t
         (%case-match? (rest pats) word)))))
 
