@@ -84,14 +84,15 @@ redirections and no command applies them to the shell itself.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset`, `read`,
 `set`, `test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `command`,
-`trap` (EXIT only), `return`, `shift`, `exit`, `true`, `false`, `:`.
+`type`, `trap` (EXIT only), `return`, `shift`, `exit`, `true`, `false`, `:`.
 
 `command NAME [arg...]` runs NAME as though no function had that name, and
 `command -v NAME` answers what would run: a builtin, function or reserved word
 as written, a name holding a `/` as written, and anything else as the first
 file on PATH that could be executed. `-V` says what the name is rather than
 what would run. `-p` is refused rather than ignored, a script that asks for a
-trusted PATH not being one to hand the untrusted one to.
+trusted PATH not being one to hand the untrusted one to. `type NAME...` says
+what each name is the way `-V` does, and answers 1 when any is found nowhere.
 
 `local NAME[=VALUE]...` in a function gives each name a value for the call and
 puts the old one back at the end — its value, its export attribute, and any

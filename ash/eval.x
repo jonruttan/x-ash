@@ -3650,11 +3650,13 @@
     (let ((w (%sh-where name)))
       (if (null? w) 1 (do (display (rest w)) (newline) 0)))))
 
-(def %sh-command-verbose
-  (fn (_ name)
+; What NAME is, for `command -V` and for `type`.  WHO is the utility a name
+; found nowhere is reported in the name of.
+(def %sh-describe
+  (fn (_ who name)
     (let ((w (%sh-where name)))
       (if (null? w)
-        (do (%stderr "ash: command: " name ": not found\n") 1)
+        (do (%stderr "ash: " who ": " name ": not found\n") 1)
         (do (display name " is " (%sh-where-said w)) (newline) 0)))))
 
 ; `command [-v|-V] name [arg...]` -- run NAME as though no function had that
@@ -3687,7 +3689,7 @@
       0
       (match
         ((eq? mode (lit v)) (%sh-command-v (first wds)))
-        ((eq? mode (lit verbose)) (%sh-command-verbose (first wds)))
+        ((eq? mode (lit verbose)) (%sh-describe "command" (first wds)))
         ; The redirections are already in force around this builtin, so the
         ; command inherits them rather than being given them again.
         (#t (%sh-dispatch wds () ()))))))
@@ -3708,6 +3710,17 @@
 
 (def %sh-command (fn (_ wds) (%sh-command-opts wds ())))
 
+; `type NAME...` -- what each name is, as `command -V` says it, and 1 when any
+; of them is found nowhere.  POSIX gives it no options, so a word that starts
+; with `-` is a name like any other, which is how dash reads it.
+(def %sh-type
+  (fn (self wds)
+    (if (null? wds)
+      0
+      (let ((s (%sh-describe "type" (first wds))))
+        (let ((r (self (rest wds))))
+          (if (= s 0) r 1))))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
@@ -3719,6 +3732,7 @@
         (pair "pwd"    %sh-pwd)
         (pair "export" %sh-export)
         (pair "command" %sh-command)
+        (pair "type"   %sh-type)
         (pair "local"  %sh-local)
         (pair "unset"  %sh-unset)
         (pair "readonly" %sh-readonly-builtin)
