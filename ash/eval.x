@@ -1038,12 +1038,6 @@
 (def %sh-glob-inert
   (filter (fn (_ c) (not (%sh-char-in? c %sh-glob-active))) %sh-glob-meta))
 
-; One character against one set.  The expansion walk asks this per character
-; of a plain run (see %sh-plain-run), which is how a finished field can say
-; whether it holds a metacharacter without being scanned again to find out.
-(def %sh-glob-meta-char?
-  (fn (_ c) (%sh-char-in? c %sh-glob-meta)))
-
 ; Scan first, build only if needed: text out of an expansion has not been
 ; through the walk, so it is the one thing still worth scanning -- for escaping
 ; if it goes in quoted, or for a pattern if bare.
@@ -1334,28 +1328,6 @@
                       (substring tail (string-length op)
                         (string-length tail)))))))))))))
 
-; Does C end the ORDINARY text a run is reading?  The characters the walk has
-; an arm for do.  In single quotes only the closing quote is special, so a
-; `'...'` region is one run; inside double quotes a quote mark is ordinary
-; text, and the walk has no arm for it there -- a run that stopped at one would
-; hand the walk a character it reads as neither, and the field would stand
-; still.  A `~` ends a run only where one could expand, which is what TILDE?
-; says; anywhere else it is ordinary text.
-;
-; One match on the character: an ordinary character, which is nearly every
-; character, is a handful of comparisons and builds nothing.
-(def %sh-run-stop?
-  (fn (_ c mode tilde?)
-    (match
-      ((= c #\') (not (= mode %sh-mode-dq)))
-      ((= c #\~) tilde?)
-      ((= mode %sh-mode-sq) ())
-      ((= c #\") #t)
-      ((= c #\\) #t)
-      ((= c #\`) #t)
-      ((= c #\$) #t)
-      (#t ()))))
-
 ; A plain run, and whether it holds a metacharacter, in one pass. Finding where
 ; the run ends looks at every character; the only other question about a run is
 ; whether it contains `*`, `?`, `[` or `\`, so asking here costs one test per
@@ -1365,14 +1337,40 @@
 (def %sh-run-end (fn (_ r) (first r)))
 (def %sh-run-meta? (fn (_ r) (rest r)))
 
+; A run stops at a character the walk has an arm for.  In single quotes only
+; the closing quote is special, so a `'...'` region is one run; inside double
+; quotes a quote mark is ordinary text, and the walk has no arm for it there --
+; a run that stopped at one would hand the walk a character it reads as
+; neither, and the field would stand still.  A `~` ends a run only where one
+; could expand, which is what TILDE? says; anywhere else it is ordinary text.
+;
+; Every character of every word comes through here, so the loop calls nothing
+; but itself: the stop test and the metacharacter test are written out as
+; matches rather than asked of helpers, which cost a call each per character.
+; The four metacharacters are %sh-glob-meta's.
 (def %sh-plain-run
   (fn (self s i n mode meta? tilde?)
     (match
-      ((not (fx<? i n)) (%sh-run i meta?))
-      ((%sh-run-stop? (string-ref s i) mode tilde?) (%sh-run i meta?))
-      (meta? (self s (fx+ i 1) n mode meta? tilde?))
-      (#t (self s (fx+ i 1) n mode (%sh-glob-meta-char? (string-ref s i))
-                tilde?)))))
+      ((fx<? i n)
+        (match
+          ((match
+             ((= (string-ref s i) #\')
+               (match ((= mode %sh-mode-dq) ()) (#t #t)))
+             ((= (string-ref s i) #\~) tilde?)
+             ((= mode %sh-mode-sq) ())
+             ((= (string-ref s i) #\") #t)
+             ((= (string-ref s i) #\\) #t)
+             ((= (string-ref s i) #\`) #t)
+             ((= (string-ref s i) #\$) #t)
+             (#t ()))
+            (%sh-run i meta?))
+          (meta? (self s (fx+ i 1) n mode #t tilde?))
+          ((= (string-ref s i) #\*) (self s (fx+ i 1) n mode #t tilde?))
+          ((= (string-ref s i) #\?) (self s (fx+ i 1) n mode #t tilde?))
+          ((= (string-ref s i) #\[) (self s (fx+ i 1) n mode #t tilde?))
+          ((= (string-ref s i) #\\) (self s (fx+ i 1) n mode #t tilde?))
+          (#t (self s (fx+ i 1) n mode () tilde?))))
+      (#t (%sh-run i meta?)))))
 
 ; --- Tilde expansion --------------------------------------------------------
 ;
@@ -1861,17 +1859,13 @@
       ((= (string-ref s 0) #\~) (%sh-run 0 ()))
       (#t (%sh-plain-run s 0 n mode0 () assign?)))))
 
-; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
-; a redirection target (where more than one field is an ambiguous redirect).
-;
-; A tok-word starts bare.  A tok-dq starts in mode 2 -- its outer quotes were
-; already stripped by the reader, so there is no opening quote left to switch
-; on, and the field must start open or `cmd ""` passes no argument at all.
-(def %sh-expand-str
-  (fn (_ s mode0 split? assign?)
-    (let ((n (string-length s))
-          (eq (if assign? (%sh-first-eq s 0 (string-length s)) -1))
-          (lead (%sh-lead-run s (string-length s) mode0 assign?)))
+; The walk over a word that is not one plain run, from START with the
+; accumulator A0.  It is a function of its own so that a plain word, which
+; never walks, never builds the walker either: `go` is a closure over this
+; word, made on each call.
+(def %sh-expand-walk
+  (fn (_ s n mode0 split? assign? start a0)
+    (let ((eq (if assign? (%sh-first-eq s 0 n) -1)))
       (def go
         (fn (self i mode a)
           (if (>= i n)
@@ -1953,17 +1947,32 @@
                           (if (= mode %sh-mode-bare)
                             (%sh-acc-add a run meta?)
                             (%sh-acc-add-literal a run meta?))))))))))))
-      ; A bare word that is one plain run -- `true`, `-lt`, `*.c` -- is its own
-      ; single field, with no accumulator to build and join.  Any other word
-      ; starts the walk past its leading run, so no character is read twice.
+      (go start mode0 a0))))
+
+; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
+; a redirection target (where more than one field is an ambiguous redirect).
+;
+; A tok-word starts bare.  A tok-dq starts in mode 2 -- its outer quotes were
+; already stripped by the reader, so there is no opening quote left to switch
+; on, and the field must start open or `cmd ""` passes no argument at all.
+;
+; A bare word that is one plain run -- `true`, `-lt`, `*.c` -- is its own
+; single field, with no accumulator to build and join and no walk to make.
+; Any other word starts the walk past its leading run, so no character is read
+; twice.  An empty word walks too, because an empty bare word is no field at
+; all and an empty quoted one is one empty field, which the walk tells apart.
+(def %sh-expand-str
+  (fn (_ s mode0 split? assign?)
+    (let ((n (string-length s))
+          (lead (%sh-lead-run s (string-length s) mode0 assign?)))
       (match
         ((= (%sh-run-end lead) 0)
-          (go 0 mode0
+          (%sh-expand-walk s n mode0 split? assign? 0
             (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
         ((= (%sh-run-end lead) n)
           (list (%sh-field s (%sh-run-meta? lead) ())))
         (#t
-          (go (%sh-run-end lead) mode0
+          (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
             (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
                          (%sh-run-meta? lead))))))))
 
