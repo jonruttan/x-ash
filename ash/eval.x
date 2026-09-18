@@ -2750,12 +2750,48 @@
 ; level and fails only later at the first command. A flat match cannot do that.
 ; The operator tables. A test operator is a name and a predicate; the shell's
 ; inverted truth (0 is true) is applied once, by the caller.
+; One of the three bits above the permissions: setuid 0o4000, setgid 0o2000,
+; sticky 0o1000.  A path that is not there has none, its mode reading 0.
+(def %sh-mode-bit?
+  (fn (_ path bit) (not (= 0 (& (sh-path-mode path) bit)))))
+
+; `-L` and `-h` ask about the path itself, so they look without following a
+; link; every other test follows it, as `-e` on a dangling link answers false.
+; `-r`, `-w` and `-x` are not here: they are access(2)'s question, which asks
+; about the process as well as the file, and the platform has no door to it.
 (def %sh-file-ops
   (list (pair "-e" (fn (_ kind path) (not (null? kind))))
         (pair "-f" (fn (_ kind path) (eq? kind (lit file))))
         (pair "-d" (fn (_ kind path) (eq? kind (lit dir))))
         (pair "-s" (fn (_ kind path)
-                     (and (not (null? kind)) (> (sh-path-size path) 0))))))
+                     (and (not (null? kind)) (> (sh-path-size path) 0))))
+        (pair "-L" (fn (_ kind path) (eq? (sh-path-lkind path) (lit link))))
+        (pair "-h" (fn (_ kind path) (eq? (sh-path-lkind path) (lit link))))
+        (pair "-p" (fn (_ kind path) (eq? kind (lit fifo))))
+        (pair "-S" (fn (_ kind path) (eq? kind (lit socket))))
+        (pair "-b" (fn (_ kind path) (eq? kind (lit block))))
+        (pair "-c" (fn (_ kind path) (eq? kind (lit char))))
+        (pair "-u" (fn (_ kind path) (%sh-mode-bit? path 2048)))
+        (pair "-g" (fn (_ kind path) (%sh-mode-bit? path 1024)))
+        (pair "-k" (fn (_ kind path) (%sh-mode-bit? path 512)))))
+
+; `-t FD`: whether the descriptor is a terminal.  A word that is not a number
+; names no descriptor, and is none.
+(def %sh-tty?
+  (fn (_ word)
+    (let ((fd (convert word %int)))
+      (if (null? fd) () (Sys isatty fd)))))
+
+; Whether A was modified after B.  A path that is not there is older than any
+; that is, so `new -nt missing` is true: POSIX's reading, and bash's, where
+; dash answers false when either is missing.
+(def %sh-newer?
+  (fn (_ a b)
+    (let ((ta (sh-path-mtime a)) (tb (sh-path-mtime b)))
+      (match
+        ((null? ta) ())
+        ((null? tb) #t)
+        (#t (fx<? tb ta))))))
 
 ; Answers nil -- NOT 1 -- when the operator is not a file test, so the caller
 ; can tell "not a file operator" from "the test was false".
@@ -2787,6 +2823,7 @@
     (match
       ((string=? op "-n") (%sh-bool (> (string-length val) 0)))
       ((string=? op "-z") (%sh-bool (= (string-length val) 0)))
+      ((string=? op "-t") (%sh-bool (%sh-tty? val)))
       ((string=? op "!")  (%sh-bool (not (= (%sh-test (list val)) 0))))
       (#t
         (let ((r (%sh-test-file op val)))
@@ -2801,6 +2838,11 @@
     (match
       ((string=? op "=")  (%sh-bool (string=? left right)))
       ((string=? op "!=") (%sh-bool (not (string=? left right))))
+      ; By byte, the C locale's collation.
+      ((string=? op "<")  (%sh-bool (Str8 <? left right)))
+      ((string=? op ">")  (%sh-bool (Str8 <? right left)))
+      ((string=? op "-nt") (%sh-bool (%sh-newer? left right)))
+      ((string=? op "-ot") (%sh-bool (%sh-newer? right left)))
       (#t
         (let ((r (%sh-test-num left op right)))
           (if (null? r)

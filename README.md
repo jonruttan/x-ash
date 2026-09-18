@@ -115,9 +115,14 @@ after the cluster, so `set -euo pipefail` is the three.
 delimiter keeps empty fields (`IFS=:` over `a::b` is three), and an empty `IFS`
 suppresses splitting entirely.
 
-`test` knows `-n`, `-z`, `!`, `=`, `!=`, the file predicates `-e` `-f` `-d`
-`-s`, and the numeric comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An
-unknown operator is a usage error (status 2), not a silent false.
+`test` knows `-n`, `-z`, `!`, `=`, `!=`, `<` and `>` (by byte); the file
+predicates `-e` `-f` `-d` `-s`, `-L`/`-h` for a symbolic link, `-p` `-S` `-b`
+`-c` for the other kinds, and `-u` `-g` `-k` for the setuid, setgid and
+sticky bits; `-t FD`; `-nt` and `-ot` by modification time; and the numeric
+comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An unknown operator is a
+usage error (status 2), not a silent false. `-r`, `-w`, `-x` and `-ef` are not
+implemented: they need access(2) and device and inode numbers, which the
+platform does not yet reach.
 
 Not implemented: an action on a signal (`trap` takes one for EXIT alone), and
 job control.

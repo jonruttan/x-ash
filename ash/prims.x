@@ -35,7 +35,8 @@
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
-  sh-path-kind sh-path-size sh-path-mode sh-read-file sh-read-line sh-read-line-fd
+  sh-path-kind sh-path-size sh-path-mode sh-path-lkind sh-path-mtime
+  sh-read-file sh-read-line sh-read-line-fd
   sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
 ; --- The tokenizer base ------------------------------------------------------
@@ -249,6 +250,16 @@
 ; asks to tell a program on PATH from a file of the same name.
 (def sh-path-mode
   (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit mode) (File stat path))))))
+
+; The kind of the path itself, a symbolic link reporting 'link rather than
+; its target's kind -- what `test -L` asks -- or nil when nothing is there.
+(def sh-path-lkind
+  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit kind) (File lstat path))))))
+
+; The last modification, in whole seconds, or nil when nothing is there --
+; what `test -nt` and `-ot` compare.
+(def sh-path-mtime
+  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit mtime) (File stat path))))))
 
 (def sh-read-file (fn (_ path) (File read-all path)))
 
