@@ -660,15 +660,23 @@
       ; here does what it does anywhere in a word -- `1\;2` is one word.
       (#t (%sh-int-word-body buffer score chr)))))
 
+; A sign opens the same run.  The base's own number reader takes `-0`,
+; `+5` and `-007` otherwise, and gives each back as an integer that prints as
+; `0`, `5` and `-7` -- so `kill -0 $pid` became `kill 0 $pid`, which signals
+; the caller's whole process group.  Claimed here, the run is the word it is
+; spelt as; a sign that a digit does not follow (`-a`, `--x`, `-`) is read on
+; as a word by the same body, as a digit run that meets a letter is.
 (%sh-tok-type!
   "INTEGER"
   (list
     (pair
       (lit analyse)
       (fn (_ buffer score chr)
-        (if (%sh-digit? chr)
-          (do (score-set score 1 buffer) %sh-int-body)
-          ())))
+        (match
+          ((%sh-digit? chr) (do (score-set score 1 buffer) %sh-int-body))
+          ((= chr (char->integer #\-)) (do (score-set score 1 buffer) %sh-int-body))
+          ((= chr (char->integer #\+)) (do (score-set score 1 buffer) %sh-int-body))
+          (#t ()))))
     (pair (lit read) %sh-word-reader)))
 ; --- Convenience: tokenize a string ---
 
