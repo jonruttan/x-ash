@@ -659,6 +659,12 @@
         (cond
           ((= c #\{) (self s (+ i 1) n (+ depth 1)))
           ((= c #\}) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
+          ; A backslash and a quoted string hide a brace, as they do in
+          ; %sh-cs-end and in the tokenizer's reading of the same text:
+          ; `${x:-\}}` and `${x:-"}"}` each close at the last brace.
+          ((= c #\\) (self s (+ i 2) n depth))
+          ((= c #\') (self s (%sh-skip-quoted s (+ i 1) n #\') n depth))
+          ((= c #\") (self s (%sh-skip-quoted s (+ i 1) n #\") n depth))
           (else (self s (+ i 1) n depth)))))))
 
 ; Inside double quotes a backslash is literal EXCEPT before one of $ ` " \ and
@@ -1169,6 +1175,32 @@
           filled
           (self (%sh-acc-break filled) (rest args)))))))
 
+; Fields already built, each with what it holds, spliced in: the first joins
+; the field in hand and each later one begins its own.
+(def %sh-add-fields
+  (fn (self a fields)
+    (if (null? fields)
+      a
+      (let ((f (first fields)))
+        (let ((filled (%sh-acc-add-piece a (%sh-field-text f)
+                        (%sh-field-glob? f) (%sh-field-esc? f))))
+          (if (null? (rest fields))
+            filled
+            (self (%sh-acc-break filled) (rest fields))))))))
+
+; The word of `${x:-word}` or `${x:+word}` where the expansion stood.  Inside
+; double quotes it is one string with its own quotes taken off; outside them
+; its fields splice in as they were written, so a quoted part is neither split
+; nor globbed and an unquoted part is both.
+(def %sh-add-word
+  (fn (_ a mode word split?)
+    (if (= mode %sh-mode-dq)
+      (let ((fs (%sh-expand-str word %sh-mode-dq () ())))
+        (let ((text (if (null? fs) "" (%sh-field-plain (first fs)))))
+          (%sh-acc-add-literal a text (%sh-has-glob-meta? text))))
+      (%sh-add-fields a
+        (%sh-expand-str word %sh-mode-bare (if split? (lit fields) ()) ())))))
+
 ; One expansion's worth of text.  Split only when splitting is on AND we are
 ; outside quotes -- inside `"..."` a value keeps its spaces, which is the
 ; entire point of quoting it.
@@ -1204,26 +1236,42 @@
 
 ; Every value operator answers from the same four facts, so they share a
 ; signature: the name (for `=`), the current value, whether the operator FIRED,
-; and the already-expanded word.
+; and the word as written.  The word is expanded only when the operator fires,
+; so `${x:-$(cmd)}` runs nothing when x is set.
+;
+; For `-` and `+` the word stands where the expansion stood, with the quoting
+; it was written with, and the caller expands it there (see %sh-add-word).
+; `=` assigns the word's value and `?` reports it, so those two take it
+; expanded, its quotes and escapes off.
+(def %sh-in-place (fn (_ word) (pair (lit in-place) word)))
+
+(def %sh-word-value
+  (fn (_ word)
+    (let ((fs (%sh-expand-str word %sh-mode-bare () ())))
+      (if (null? fs) "" (%sh-field-plain (first fs))))))
+
 (def %sh-param-default
-  (fn (_ name val fired? word) (if fired? word val)))
+  (fn (_ name val fired? word) (if fired? (%sh-in-place word) val)))
 
 (def %sh-param-assign
   (fn (_ name val fired? word)
-    (if fired? (do (%sh-var-set! name word) word) val)))
+    (if fired?
+      (let ((v (%sh-word-value word))) (%sh-var-set! name v) v)
+      val)))
 
 (def %sh-param-error
   (fn (_ name val fired? word)
     (if fired?
-      (error (string-append name ": "
-               (if (= (string-length word) 0) "parameter not set" word)))
+      (let ((v (%sh-word-value word)))
+        (error (string-append name ": "
+                 (if (= (string-length v) 0) "parameter not set" v))))
       val)))
 
 ; `+` fires on the opposite condition to the other three: it wants the word
 ; when the parameter IS set.  The caller inverts before calling, so this stays
 ; the same shape as its neighbours.
 (def %sh-param-alt
-  (fn (_ name val fired? word) (if fired? word "")))
+  (fn (_ name val fired? word) (if fired? (%sh-in-place word) "")))
 
 (def %sh-param-value-ops
   (list (pair "-" %sh-param-default)
@@ -1332,7 +1380,7 @@
                 ; wants the word when the parameter is PRESENT.
                 (run name val
                   (if (string=? base "+") (not absent?) absent?)
-                  (%sh-expand-word word))))))))))
+                  word)))))))))
 
 ; ${...} in full.  Answers the expanded text.
 (def %sh-brace-expand
@@ -1975,9 +2023,15 @@
                         (error "internal: expansion made no progress"))
                       (let ((run (substring s i e)))
                         (self e mode
-                          (if (= mode %sh-mode-bare)
-                            (%sh-acc-add a run meta?)
-                            (%sh-acc-add-literal a run meta?))))))))))))
+                          (match
+                            ; The word of `${x:-word}` in place is split
+                            ; where it is not quoted, its literal text as
+                            ; well as its expansions (see %sh-add-word).
+                            ((= mode %sh-mode-bare)
+                              (if (eq? split? (lit fields))
+                                (%sh-add-split a run)
+                                (%sh-acc-add a run meta?)))
+                            (#t (%sh-acc-add-literal a run meta?)))))))))))))
       (go start mode0 a0))))
 
 ; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
@@ -1992,11 +2046,16 @@
 ; Any other word starts the walk past its leading run, so no character is read
 ; twice.  An empty word walks too, because an empty bare word is no field at
 ; all and an empty quoted one is one empty field, which the walk tells apart.
+; SPLIT? may also be `fields`, for the word of `${x:-word}` standing in place:
+; then its unquoted literal text is split as an expansion's would be, so that
+; word is always walked, its leading run included.
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
     (let ((n (string-length s))
           (lead (%sh-lead-run s (string-length s) mode0 assign?)))
       (match
+        ((eq? split? (lit fields))
+          (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty))
         ((= (%sh-run-end lead) 0)
           (%sh-expand-walk s n mode0 split? assign? 0
             (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
@@ -2044,7 +2103,12 @@
                   ; in the same place rather than joined into one field here.
                   (if (and (= mode %sh-mode-dq) (string=? inner "@"))
                     (cont (+ e 1) mode (%sh-add-args a %sh-args))
-                    (substitute (+ e 1) (%sh-brace-expand inner)))))))
+                    ; A value operator that fired answers its word to stand
+                    ; here, rather than text (see %sh-param-default).
+                    (let ((r (%sh-brace-expand inner)))
+                      (if (pair? r)
+                        (cont (+ e 1) mode (%sh-add-word a mode (rest r) split?))
+                        (substitute (+ e 1) r))))))))
           ; "$@" is the one special that is not a string -- see %sh-add-args.
           ; Unquoted it is not special at all: `$@` splits on IFS the way any
           ; unquoted expansion does, which %sh-add-expansion already handles.
