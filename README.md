@@ -100,9 +100,12 @@ local. A name given no value starts unset, which is bash's reading rather than
 dash's, and `local` outside a function is refused.
 
 `set -- a b c` replaces the positional parameters; `set -e` exits on a failed
-command, `-u` makes an unset parameter an error, `-x` traces to stderr, and
-`set +e` (etc.) turns each back off. `-e` is suppressed where a failure is the
-point — a condition, `!`, and any operand of an AND-OR list but the last.
+command, `-u` makes an unset parameter an error, `-x` traces to stderr, `-f`
+turns off pathname expansion, `-o pipefail` makes a pipeline fail when any
+stage does, and `set +e` (etc.) turns each back off. `-e` is suppressed where
+a failure is the point — a condition, `!`, and any operand of an AND-OR list
+but the last. An `o` among a cluster's letters takes its name from the words
+after the cluster, so `set -euo pipefail` is the three.
 
 `IFS` is honoured: whitespace runs collapse to one delimiter, a non-whitespace
 delimiter keeps empty fields (`IFS=:` over `a::b` is three), and an empty `IFS`
