@@ -4561,22 +4561,79 @@
 ; character), `[abc]`, `[a-z]`, `[!abc]` / `[^abc]` negation, and `\` escaping
 ; any of them. An unterminated `[` is a literal `[`.
 
+; POSIX's named classes, `[:alpha:]` and the rest, inside a bracket
+; expression: `[[:digit:]]` is one digit, `[[:alpha:]_]` a letter or an
+; underscore.  The locale is C's, so the classes are ASCII's.  A name that is
+; not one of the twelve matches nothing.
+(def %sh-char-class?
+  (fn (_ name c)
+    (match
+      ((string=? name "alpha") (%sh-name-start-letter? c))
+      ((string=? name "digit") (%sh-digit? c))
+      ((string=? name "alnum") (match ((%sh-digit? c) #t) (#t (%sh-name-start-letter? c))))
+      ((string=? name "upper") (match ((fx<? c #\A) ()) (#t (not (fx<? #\Z c)))))
+      ((string=? name "lower") (match ((fx<? c #\a) ()) (#t (not (fx<? #\z c)))))
+      ((string=? name "space")
+        (match ((= c #\space) #t) ((fx<? c 9) ()) (#t (not (fx<? 13 c)))))
+      ((string=? name "blank") (match ((= c #\space) #t) (#t (= c 9))))
+      ((string=? name "print") (match ((fx<? c 32) ()) (#t (fx<? c 127))))
+      ((string=? name "graph") (match ((fx<? c 33) ()) (#t (fx<? c 127))))
+      ((string=? name "cntrl") (match ((fx<? c 32) #t) (#t (= c 127))))
+      ((string=? name "punct")
+        (match
+          ((fx<? c 33) ())
+          ((fx<? 126 c) ())
+          ((%sh-digit? c) ())
+          (#t (not (%sh-name-start-letter? c)))))
+      ((string=? name "xdigit")
+        (match
+          ((%sh-digit? c) #t)
+          ((fx<? c #\A) ())
+          ((fx<? c #\G) #t)
+          ((fx<? c #\a) ())
+          (#t (fx<? c #\g))))
+      (#t ()))))
+
+; A letter, and only a letter: %sh-name-start? takes the underscore as well.
+(def %sh-name-start-letter?
+  (fn (_ c) (match ((= c #\_) ()) (#t (%sh-name-start? c)))))
+
+; Where the `[:name:]` opened at I ends: the index just past its `:]`, or -1
+; when there is none, which leaves the `[` an ordinary character.
+(def %sh-glob-named-end
+  (fn (self pat j hi)
+    (match
+      ((fx<? hi (fx+ j 2)) -1)
+      ((match ((= (string-ref pat j) #\:) (= (string-ref pat (fx+ j 1)) #\])) (#t ()))
+        (fx+ j 2))
+      (#t (self pat (fx+ j 1) hi)))))
+
 ; The character-class helpers, taking the class body as the half-open range
 ; [lo, hi) -- lo just after the `[`, hi at the `]`.
 (def %sh-glob-class-scan
   (fn (self pat i hi c)
     (if (>= i hi)
       ()
-      ; A range `a-b` needs its closing character inside the class.
-      (if (and (< (+ i 2) hi)
-               (= (string-ref pat (+ i 1)) #\-))
-        (if (and (>= c (string-ref pat i))
-                 (<= c (string-ref pat (+ i 2))))
-          #t
-          (self pat (+ i 3) hi c))
-        (if (= c (string-ref pat i))
-          #t
-          (self pat (+ i 1) hi c))))))
+      (let ((e (if (and (< (+ i 1) hi)
+                        (= (string-ref pat i) #\[)
+                        (= (string-ref pat (+ i 1)) #\:))
+                 (%sh-glob-named-end pat (+ i 2) hi)
+                 -1)))
+        (if (fx<? 0 e)
+          ; A named class, `[:alpha:]`: the name sits between the colons.
+          (if (%sh-char-class? (substring pat (+ i 2) (- e 2)) c)
+            #t
+            (self pat e hi c))
+          ; A range `a-b` needs its closing character inside the class.
+          (if (and (< (+ i 2) hi)
+                   (= (string-ref pat (+ i 1)) #\-))
+            (if (and (>= c (string-ref pat i))
+                     (<= c (string-ref pat (+ i 2))))
+              #t
+              (self pat (+ i 3) hi c))
+            (if (= c (string-ref pat i))
+              #t
+              (self pat (+ i 1) hi c))))))))
 
 (def %sh-glob-class-match?
   (fn (_ pat lo hi s si)
@@ -4589,14 +4646,22 @@
           (if neg (if hit () #t) (if hit #t ())))))))
 
 ; The index of the `]` closing a class opened at I, or -1.  A `!`/`^` and then
-; a `]` immediately after the opening bracket are both literal.
+; a `]` immediately after the opening bracket are both literal, and a named
+; class inside is stepped over whole, its own `]` being no end of this one.
 (def %sh-glob-class-end
   (fn (_ pat i pn)
     (def scan
       (fn (self j)
         (if (>= j pn)
           (- 0 1)
-          (if (= (string-ref pat j) #\]) j (self (+ j 1))))))
+          (if (= (string-ref pat j) #\])
+            j
+            (let ((e (if (and (< (+ j 1) pn)
+                              (= (string-ref pat j) #\[)
+                              (= (string-ref pat (+ j 1)) #\:))
+                       (%sh-glob-named-end pat (+ j 2) pn)
+                       -1)))
+              (self (if (fx<? 0 e) e (+ j 1))))))))
     (let ((a (if (and (< i pn)
                       (let ((c (string-ref pat i)))
                         (or (= c #\!) (= c #\^))))
