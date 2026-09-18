@@ -249,6 +249,14 @@
       ((string=? key (first (first table))) (rest table))
       (#t (pair (first table) (self key (rest table)))))))
 
+; Every entry for KEY gone, for a table that may hold several.
+(def %sh-table-without-all
+  (fn (self key table)
+    (match
+      ((null? table) ())
+      ((string=? key (first (first table))) (self key (rest table)))
+      (#t (pair (first table) (self key (rest table)))))))
+
 (def %sh-words-without
   (fn (self word words)
     (match
@@ -498,6 +506,27 @@
 
 (def %sh-name-char?
   (fn (_ c) (match ((%sh-name-start? c) #t) (#t (%sh-digit? c)))))
+
+; Is WORD a NAME: a letter or underscore, then letters, digits and
+; underscores?  What every variable and function is called.
+(def %sh-name?
+  (fn (_ word)
+    (match
+      ((= (string-length word) 0) ())
+      ((%sh-name-start? (string-ref word 0))
+        (= (%sh-name-end word 1 (string-length word)) (string-length word)))
+      (#t ()))))
+
+(def %sh-bad-name
+  (fn (_ who name) (%stderr "ash: " who ": " name ": bad variable name\n")))
+
+; A word a special builtin -- `export`, `readonly`, `unset` -- was to take as
+; a name, refused when it is not one.  POSIX ends a script over a special
+; builtin's error: the raise does, the report being written here.
+(def %sh-name-or-refuse!
+  (fn (_ who name)
+    (unless (%sh-name? name)
+      (do (%sh-bad-name who name) (error (lit %sh-reported))))))
 
 ; `set -u`: a plain `$X` on an unset name is an error.  ONLY the plain form --
 ; `${X:-default}` and `${X+alt}` exist precisely to ask about an unset
@@ -2619,14 +2648,14 @@
       0
       (let ((word (first wds)))
         (let ((eq (%sh-first-eq word 0 (string-length word))))
-          (match
-            ((fx<? 0 eq)
-              (do
-                (%sh-var-set! (substring word 0 eq)
-                              (substring word (fx+ eq 1) (string-length word)))
-                (%sh-var-export! (substring word 0 eq))))
-            ((= eq -1) (%sh-var-export! word))
-            (#t ()))
+          (%sh-name-or-refuse! "export"
+            (if (fx<? eq 0) word (substring word 0 eq)))
+          (if (fx<? eq 0)
+            (%sh-var-export! word)
+            (do
+              (%sh-var-set! (substring word 0 eq)
+                            (substring word (fx+ eq 1) (string-length word)))
+              (%sh-var-export! (substring word 0 eq))))
           (self (rest wds)))))))
 
 ; `local NAME[=VALUE]...` -- the shape `export` has, saving each name into the
@@ -2636,21 +2665,27 @@
 ;
 ; Outside a function there is no frame to record in, and nothing would ever
 ; put the value back, so it is refused.
+; `local` is not a special builtin, so a word that is not a name is reported
+; and answered with 1, and the words after it are still taken.
 (def %sh-local-names
   (fn (self wds)
     (if (null? wds)
       0
       (let ((word (first wds)))
         (let ((eq (%sh-first-eq word 0 (string-length word))))
-          (match
-            ((fx<? 0 eq)
-              (let ((name (substring word 0 eq)))
+          (let ((name (if (fx<? eq 0) word (substring word 0 eq))))
+            (if (%sh-name? name)
+              (do
                 (%sh-local-save! name)
-                (%sh-var-set! name
-                              (substring word (fx+ eq 1) (string-length word)))))
-            ((= eq -1) (do (%sh-local-save! word) (%sh-var-unset! word)))
-            (#t ()))
-          (self (rest wds)))))))
+                (if (fx<? eq 0)
+                  (%sh-var-unset! name)
+                  (%sh-var-set! name
+                                (substring word (fx+ eq 1) (string-length word))))
+                (self (rest wds)))
+              (do
+                (%sh-bad-name "local" name)
+                (self (rest wds))
+                1))))))))
 
 (def %sh-local
   (fn (_ wds)
@@ -2673,14 +2708,14 @@
       0
       (let ((word (first wds)))
         (let ((eq (%sh-first-eq word 0 (string-length word))))
-          (match
-            ((fx<? 0 eq)
-              (do
-                (%sh-var-set! (substring word 0 eq)
-                              (substring word (fx+ eq 1) (string-length word)))
-                (%sh-readonly-mark! (substring word 0 eq))))
-            ((= eq -1) (%sh-readonly-mark! word))
-            (#t ()))
+          (%sh-name-or-refuse! "readonly"
+            (if (fx<? eq 0) word (substring word 0 eq)))
+          (if (fx<? eq 0)
+            (%sh-readonly-mark! word)
+            (do
+              (%sh-var-set! (substring word 0 eq)
+                            (substring word (fx+ eq 1) (string-length word)))
+              (%sh-readonly-mark! (substring word 0 eq))))
           (self (rest wds)))))))
 
 (def %sh-readonly-list
@@ -2799,11 +2834,28 @@
     (newline)
     0))
 
-(def %sh-unset
-  (fn (_ wds)
+; `unset [-v] NAME...` unsets variables, and `unset -f NAME...` functions --
+; every definition of one, since a redefinition shadows rather than replaces.
+; A special builtin, so a word that is not a name ends a script, and so does
+; an option it does not know, being no name either.
+(def %sh-unset-each
+  (fn (self wds fn?)
     (if (null? wds)
       0
-      (do (%sh-var-unset! (first wds)) (%sh-unset (rest wds))))))
+      (do
+        (%sh-name-or-refuse! "unset" (first wds))
+        (if fn?
+          (set! %sh-functions (%sh-table-without-all (first wds) %sh-functions))
+          (%sh-var-unset! (first wds)))
+        (self (rest wds) fn?)))))
+
+(def %sh-unset
+  (fn (_ wds)
+    (match
+      ((null? wds) 0)
+      ((string=? (first wds) "-f") (%sh-unset-each (rest wds) #t))
+      ((string=? (first wds) "-v") (%sh-unset-each (rest wds) ()))
+      (#t (%sh-unset-each wds ())))))
 
 ; `read [-r] VAR...` -- one line from stdin, split on IFS across the names,
 ; with the LAST name taking everything that is left, separators and all.  A
@@ -2902,6 +2954,7 @@
 
 (def %sh-read-assign
   (fn (self names line i n ifs raw?)
+    (%sh-name-or-refuse! "read" (first names))
     (let ((start (%sh-ifs-ws-end line i n ifs)))
       (if (null? (rest names))
         (do (%sh-var-set! (first names) (%sh-read-rest line start n ifs raw?)) 0)
@@ -4442,6 +4495,8 @@
     (if (%cursor-empty? cur)
       (error "parse error: for without variable")
       (let ((var (%tok-word-val (%cursor-peek cur))))
+        (unless (%sh-name? var)
+          (error (string-append "parse error: bad for loop variable " var)))
         (%cursor-advance! cur)
         (%skip-newlines cur)
         ; Collect in-list if present
@@ -4940,6 +4995,8 @@
 (def %eval-fn-def
   (fn (_ cur)
     (let ((name (%tok-word-val (%cursor-peek cur))))
+      (unless (%sh-name? name)
+        (error (string-append "parse error: bad function name " name)))
       (%cursor-advance! cur)
       ; consume name
 

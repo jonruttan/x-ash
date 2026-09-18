@@ -82,9 +82,12 @@ does not leave the shell writing to `log`. A redirection written after a
 compound (`for ...; done > log`) applies to the whole construct. `exec` with
 redirections and no command applies them to the shell itself.
 
-Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset`, `read`,
-`set`, `test` / `[`, `.` / `source`, `eval`, `exec`, `getopts`, `command`,
-`type`, `trap` (EXIT only), `return`, `shift`, `exit`, `true`, `false`, `:`.
+Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
+for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
+`source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap` (EXIT only),
+`return`, `shift`, `exit`, `true`, `false`, `:`. A word one of them takes as a
+variable's name must be a NAME — a letter or underscore, then letters, digits
+and underscores — and so must a function's name and a `for` loop's variable.
 
 `command NAME [arg...]` runs NAME as though no function had that name, and
 `command -v NAME` answers what would run: a builtin, function or reserved word
