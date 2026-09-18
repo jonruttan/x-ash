@@ -436,6 +436,57 @@
       ((= chr (char->integer #\\)) %sh-cs-esc)
       (#t %sh-cs-body))))
 
+; --- Parameter expansion: ${ ... } ------------------------------------------
+;
+; `${` opens a region too.  POSIX reads the text from `${` to its matching `}`
+; as one unit with quoting of its own, so the `"` in `"${x:-"a b"}"` opens a
+; string inside the expansion rather than closing the one around it, and the
+; space in `${x:-a b}` is no end of the word.  Without the region both split,
+; and neither half's `${` was ever closed.
+;
+; Braces nest, `${x:-${y:-z}}` and `${x:-{a}}` alike; quotes and a backslash
+; hide a brace from the count.  The depth and the return context ride in
+; globals for the reason %sh-cs-depth does, and the return codes are the same.
+(def %sh-pe-depth 0)
+(def %sh-pe-return 0)
+(def %sh-pe-body ())
+(def %sh-pe-sq ())
+(def %sh-pe-dq ())
+(def %sh-pe-dq-esc ())
+(def %sh-pe-esc ())
+
+(set! %sh-pe-sq
+  (fn (_ buffer score chr)
+    (if (= chr (char->integer #\')) %sh-pe-body %sh-pe-sq)))
+
+(set! %sh-pe-dq-esc (fn (_ buffer score chr) %sh-pe-dq))
+(set! %sh-pe-esc (fn (_ buffer score chr) %sh-pe-body))
+
+(set! %sh-pe-dq
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\")) %sh-pe-body)
+      ((= chr (char->integer #\\)) %sh-pe-dq-esc)
+      (#t %sh-pe-dq))))
+
+(set! %sh-pe-body
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\{))
+        (do (set! %sh-pe-depth (+ %sh-pe-depth 1)) %sh-pe-body))
+      ((= chr (char->integer #\}))
+        (if (= %sh-pe-depth 0)
+          ; Closed.  Back to whatever the word was doing.
+          (match
+            ((= %sh-pe-return 1) %sh-word-in-dq)
+            ((= %sh-pe-return 2) %sh-dq-body)
+            (#t %sh-qword-body))
+          (do (set! %sh-pe-depth (- %sh-pe-depth 1)) %sh-pe-body)))
+      ((= chr (char->integer #\')) %sh-pe-sq)
+      ((= chr (char->integer #\")) %sh-pe-dq)
+      ((= chr (char->integer #\\)) %sh-pe-esc)
+      (#t %sh-pe-body))))
+
 ; The older backtick substitution needs the same treatment as `$(`: a region
 ; whose spaces do not end the word.  Without it `echo `echo old`` split at the
 ; space into the two words "`echo" and "old`", and the expander -- which only
@@ -460,31 +511,41 @@
           (#t %sh-qword-body)))
       (#t %sh-bt-scan))))
 
-; After a `$`, one character decides. Anything that is not `(` is re-dispatched
-; through the state we came from -- a direct call, correct here because we want
-; that character handled normally, unlike at a closing quote where the
-; character has already been consumed by meaning.
+; After a `$`, one character decides: `(` opens a substitution and `{` an
+; expansion.  Anything else is re-dispatched through the state we came from --
+; a direct call, correct here because we want that character handled
+; normally, unlike at a closing quote where the character has already been
+; consumed by meaning.
 (def %sh-word-dollar ())
 (def %sh-dq-dollar ())
 (def %sh-sq-dq-dollar ())
 
 (set! %sh-word-dollar
   (fn (_ buffer score chr)
-    (if (= chr (char->integer #\())
-      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 0) %sh-cs-body)
-      (%sh-qword-body buffer score chr))))
+    (match
+      ((= chr (char->integer #\())
+        (do (set! %sh-cs-depth 0) (set! %sh-cs-return 0) %sh-cs-body))
+      ((= chr (char->integer #\{))
+        (do (set! %sh-pe-depth 0) (set! %sh-pe-return 0) %sh-pe-body))
+      (#t (%sh-qword-body buffer score chr)))))
 
 (set! %sh-dq-dollar
   (fn (_ buffer score chr)
-    (if (= chr (char->integer #\())
-      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 1) %sh-cs-body)
-      (%sh-word-in-dq buffer score chr))))
+    (match
+      ((= chr (char->integer #\())
+        (do (set! %sh-cs-depth 0) (set! %sh-cs-return 1) %sh-cs-body))
+      ((= chr (char->integer #\{))
+        (do (set! %sh-pe-depth 0) (set! %sh-pe-return 1) %sh-pe-body))
+      (#t (%sh-word-in-dq buffer score chr)))))
 
 (set! %sh-sq-dq-dollar
   (fn (_ buffer score chr)
-    (if (= chr (char->integer #\())
-      (do (set! %sh-cs-depth 0) (set! %sh-cs-return 2) %sh-cs-body)
-      (%sh-dq-body buffer score chr))))
+    (match
+      ((= chr (char->integer #\())
+        (do (set! %sh-cs-depth 0) (set! %sh-cs-return 2) %sh-cs-body))
+      ((= chr (char->integer #\{))
+        (do (set! %sh-pe-depth 0) (set! %sh-pe-return 2) %sh-pe-body))
+      (#t (%sh-dq-body buffer score chr)))))
 
 (def %sh-word-body ())
 (def %sh-qword-body ())
