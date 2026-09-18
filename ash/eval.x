@@ -518,12 +518,14 @@
 ; --- Shell options ----------------------------------------------------------
 ;
 ; `set -e` exit on a failed command, `-u` treat an unset parameter as an error,
-; `-x` trace commands to stderr.  `set +e` and friends turn them off, which is
-; why each is a cell rather than a flag set once.
+; `-x` trace commands to stderr, `-o pipefail` fail a pipeline when any stage
+; fails.  `set +e` and friends turn them off, which is why each is a cell
+; rather than a flag set once.
 (def %sh-opt-errexit ())
 (def %sh-opt-nounset ())
 (def %sh-opt-xtrace ())
 (def %sh-opt-noglob ())
+(def %sh-opt-pipefail ())
 
 ; errexit must not fire in a condition. `if false; then`, `false || echo`,
 ; `! cmd` and a `while` test all run commands whose failure is the point; POSIX
@@ -3049,28 +3051,55 @@
   (list (pair "errexit" "e") (pair "nounset" "u")
         (pair "xtrace" "x") (pair "noglob" "f")))
 
-; One `-abc` or `+abc` cluster.
-(def %sh-set-flags
-  (fn (self word on? i)
-    (if (>= i (string-length word))
-      0
-      (let ((f (%sh-table-get (substring word i (+ i 1)) %sh-set-opts)))
-        (if (null? f)
-          (do (%stderr "ash: set: " (substring word i (+ i 1))
-                       ": unknown option\n") 2)
-          (do (%sh-set-opt-on! f on?) (self word on? (+ i 1))))))))
+; The options that have a name and no letter.  `$-` is letters only, so these
+; are not in it.
+(def %sh-set-long-opts
+  (list (pair "pipefail" (pair (fn (_ on?) (set! %sh-opt-pipefail on?))
+                               (fn (_) %sh-opt-pipefail)))))
 
-; `set -o NAME` and `set +o NAME`, which turn the same option the letter does.
-; A `set -o` with no name would write the options; nothing here reads that, and
-; the format would be a contract invented rather than kept, so it answers 0.
+; The row that turns the option NAME on and off, or () for a name not known.
+(def %sh-set-named-row
+  (fn (_ name)
+    (let ((letter (%sh-table-get name %sh-set-opt-names)))
+      (if (null? letter)
+        (%sh-table-get name %sh-set-long-opts)
+        (%sh-table-get letter %sh-set-opts)))))
+
+; `-o NAME` and `+o NAME` turn the same option the letter does.  An `o` with no
+; name after it would write the options; nothing here reads that, and the
+; format would be a contract invented rather than kept, so it answers 0.
 (def %sh-set-named
   (fn (_ wds on?)
     (if (null? wds)
       0
-      (let ((letter (%sh-table-get (first wds) %sh-set-opt-names)))
-        (if (null? letter)
+      (let ((row (%sh-set-named-row (first wds))))
+        (if (null? row)
           (do (%stderr "ash: set: " (first wds) ": unknown option\n") 2)
-          (do (%sh-set-opt-on! (%sh-table-get letter %sh-set-opts) on?) 0))))))
+          (do (%sh-set-opt-on! row on?) 0))))))
+
+; One `-abc` or `+abc` cluster, with WDS the words after it.  An `o` among the
+; letters takes its option's name from those words, in turn -- so
+; `set -euo pipefail` and `set -oe pipefail` both read as bash reads them, and
+; `-o` alone is the one-letter cluster.  Answers (status . the words left).
+(def %sh-set-flags
+  (fn (self word on? i wds)
+    (match
+      ((fx<? i (string-length word))
+        (match
+          ((= (string-ref word i) #\o)
+            (let ((r (%sh-set-named wds on?)))
+              (match
+                ((not (= r 0)) (pair r wds))
+                ((null? wds) (pair 0 wds))
+                (#t (self word on? (+ i 1) (rest wds))))))
+          (#t
+            (let ((f (%sh-table-get (substring word i (+ i 1)) %sh-set-opts)))
+              (if (null? f)
+                (do (%stderr "ash: set: " (substring word i (+ i 1))
+                             ": unknown option\n")
+                    (pair 2 wds))
+                (do (%sh-set-opt-on! f on?) (self word on? (+ i 1) wds)))))))
+      (#t (pair 0 wds)))))
 
 (def %sh-set
   (fn (self wds)
@@ -3079,18 +3108,12 @@
       (let ((w (first wds)))
         (cond
           ((string=? w "--") (do (set! %sh-args (rest wds)) 0))
-          ((string=? w "-o")
-            (let ((r (%sh-set-named (rest wds) #t)))
-              (if (= r 0) (self (rest (rest wds))) r)))
-          ((string=? w "+o")
-            (let ((r (%sh-set-named (rest wds) ())))
-              (if (= r 0) (self (rest (rest wds))) r)))
           ((%sh-str-starts? w "-")
-            (let ((r (%sh-set-flags w #t 1)))
-              (if (= r 0) (self (rest wds)) r)))
+            (let ((r (%sh-set-flags w #t 1 (rest wds))))
+              (if (= (first r) 0) (self (rest r)) (first r))))
           ((%sh-str-starts? w "+")
-            (let ((r (%sh-set-flags w () 1)))
-              (if (= r 0) (self (rest wds)) r)))
+            (let ((r (%sh-set-flags w () 1 (rest wds))))
+              (if (= (first r) 0) (self (rest r)) (first r))))
           ; A bare operand: POSIX treats `set a b` as setting the parameters.
           (else (do (set! %sh-args wds) 0)))))))
 
@@ -4794,8 +4817,18 @@
               (sh-dup2 read-fd 0)
               (sh-close read-fd)
               (let ((result (%sh-pipe-chain rest-cmds)))
-                (sh-wait pid)
-                result))))))))
+                (%sh-pipe-status result (sh-wait pid))))))))))
+
+; A pipeline's status is its last stage's.  Under pipefail it is the last
+; stage's that failed: RIGHT is the answer for the stages after this one, and
+; OWN this stage's, so a failure to the right stands and a clean right gives
+; way to this stage.  `$?` is what it answers.
+(def %sh-pipe-status
+  (fn (_ right own)
+    (match
+      ((null? %sh-opt-pipefail) right)
+      ((= right 0) (%sh-set-status own))
+      (#t right))))
 ; The parent's stdin is the shell's stdin, and %sh-pipe-chain moves it. The
 ; chain runs its last stage in the shell process, so the parent dup2s each
 ; pipe's read end onto fd 0. Left there it ends a session: after
