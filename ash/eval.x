@@ -3843,11 +3843,41 @@
       ((%sh-declaration? val) (lit decl))
       (#t ()))))
 
-; A word whose first `=` comes after its first character.  One scan, and
-; nothing built: every word in assignment position is asked, the first word of
-; every command among them.
+; A word that is a NAME and then `=`: a letter or underscore, then letters,
+; digits and underscores.  Anything else ahead of the `=` makes the word a
+; command -- `a-b=1` and `1x=5` run, and are not found -- as POSIX's grammar
+; has it.
+;
+; One scan that stops at the first character a name cannot hold, and nothing
+; built: every word in assignment position is asked, the first word of every
+; command among them.  The character classes are written out, not asked of
+; %sh-name-start? and %sh-name-char?, which would be a call per character.
+(def %sh-assign-scan
+  (fn (self word i n)
+    (match
+      ((fx<? i n)
+        (match
+          ; Below `A`: the `=` that ends the name, or a digit, which a name
+          ; may hold but not begin with.
+          ((fx<? (string-ref word i) #\A)
+            (match
+              ((= (string-ref word i) #\=) (fx<? 0 i))
+              ((fx<? (string-ref word i) #\0) ())
+              ((fx<? #\9 (string-ref word i)) ())
+              ((fx<? 0 i) (self word (fx+ i 1) n))
+              (#t ())))
+          ; Above `Z`: an underscore, or a lower-case letter.
+          ((fx<? #\Z (string-ref word i))
+            (match
+              ((= (string-ref word i) #\_) (self word (fx+ i 1) n))
+              ((fx<? (string-ref word i) #\a) ())
+              ((fx<? #\z (string-ref word i)) ())
+              (#t (self word (fx+ i 1) n))))
+          (#t (self word (fx+ i 1) n))))
+      (#t ()))))
+
 (def %is-assignment?
-  (fn (_ word) (fx<? 0 (%sh-first-eq word 0 (string-length word)))))
+  (fn (_ word) (%sh-assign-scan word 0 (string-length word))))
 
 ; The leading NAME=value words, and the command left after them.  Answers
 ; (pair assignments remaining).
