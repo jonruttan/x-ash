@@ -54,7 +54,9 @@ Structure: pipelines, `&&` / `||` / `;` / `&`, `if`/`elif`/`else`, `while`,
 groups.
 
 `case` patterns are globs: `*`, `?`, `[abc]`, `[a-z]`, `[!abc]`, and `\` to
-escape any of them.
+escape any of them. A pattern is expanded as it is compared — `case $x in
+$prefix*)` reads the parameter — and what quoting makes literal stays
+literal: `"*"` looks for a star, and `"$p"` matches the text `$p` holds.
 
 Pathname expansion: an unquoted `*`, `?` or `[...]` in a word is matched
 against the filesystem, and the word becomes the sorted list of what it
