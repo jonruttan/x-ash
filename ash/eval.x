@@ -3549,6 +3549,121 @@
           (%sh-getopts-optind)
           (%sh-optstring-silent? optstring))))))
 
+; --- Where a name would be found --------------------------------------------
+;
+; `command -v` and `command -V` answer what the shell would run, so they ask
+; in the order the dispatch runs: a builtin, then a function, then the first
+; file on PATH that could be executed.  A reserved word is asked about first,
+; because it is not a command name at all, and a name with a `/` in it is
+; already a path and stands for itself.
+;
+; Answers (kind . text), or () for a name that would find nothing.
+
+; 0o111 -- owner, group and other.  Which of them applies is the kernel's
+; question at exec time; a file with none of them is not a program.
+(def %sh-exec-bits 73)
+
+(def %sh-executable?
+  (fn (_ path)
+    (and (eq? (sh-path-kind path) (lit file))
+         (not (= 0 (& (sh-path-mode path) %sh-exec-bits))))))
+
+; An empty PATH entry names the current directory, which %sh-dir-of answers.
+(def %sh-path-of
+  (fn (self name dirs)
+    (if (null? dirs)
+      ()
+      (let ((cand (string-append (%sh-dir-of (first dirs)) "/" name)))
+        (if (%sh-executable? cand) cand (self name (rest dirs)))))))
+
+(def %sh-where
+  (fn (_ name)
+    (match
+      ((%sh-str-has-char? name #\/)
+        (if (%sh-executable? name) (pair (lit file) name) ()))
+      ((%reserved-word? name) (pair (lit keyword) name))
+      ((%sh-builtin? name) (pair (lit builtin) name))
+      ((not (null? (%sh-fn-lookup name %sh-functions)))
+        (pair (lit function) name))
+      (#t
+        (let ((p (%sh-path-of name (%sh-split-char (%sh-var-value "PATH") #\:))))
+          (if (null? p) () (pair (lit file) p)))))))
+
+(def %sh-where-words
+  (list (pair (lit keyword) "a shell keyword")
+        (pair (lit builtin) "a shell builtin")
+        (pair (lit function) "a shell function")))
+
+; -V says what the name is; -v says what would run, which for anything but a
+; file on PATH is the name as written.
+(def %sh-where-said
+  (fn (_ w)
+    (let ((said (%sh-table-get (first w) %sh-where-words)))
+      (if (null? said) (rest w) said))))
+
+(def %sh-command-v
+  (fn (_ name)
+    (let ((w (%sh-where name)))
+      (if (null? w) 1 (do (display (rest w)) (newline) 0)))))
+
+(def %sh-command-verbose
+  (fn (_ name)
+    (let ((w (%sh-where name)))
+      (if (null? w)
+        (do (%stderr "ash: command: " name ": not found\n") 1)
+        (do (display name " is " (%sh-where-said w)) (newline) 0)))))
+
+; `command [-v|-V] name [arg...]` -- run NAME as though no function had that
+; name, or say where it would be found.  The last of -v and -V is the one that
+; answers, as in both reference shells.  POSIX's -p, which would run the name
+; under a PATH of the implementation's choosing, is not implemented: it is
+; refused rather than ignored, since a script that asks for a trusted PATH
+; must not be given the untrusted one instead.
+(def %sh-command-option?
+  (fn (_ w) (and (fx<? 1 (string-length w)) (= (string-ref w 0) #\-))))
+
+(def %sh-command-letter
+  (fn (_ c)
+    (match ((= c #\v) (lit v)) ((= c #\V) (lit verbose)) (#t ()))))
+
+; The letters of one option word, left to right, so `-vV` is `-v -V`.  Answers
+; (ok . mode) or (bad . letter).
+(def %sh-command-letters
+  (fn (self w i n mode)
+    (if (>= i n)
+      (pair (lit ok) mode)
+      (let ((m (%sh-command-letter (string-ref w i))))
+        (if (null? m)
+          (pair (lit bad) (substring w i (+ i 1)))
+          (self w (+ i 1) n m))))))
+
+(def %sh-command-run
+  (fn (_ wds mode)
+    (if (null? wds)
+      0
+      (match
+        ((eq? mode (lit v)) (%sh-command-v (first wds)))
+        ((eq? mode (lit verbose)) (%sh-command-verbose (first wds)))
+        ; The redirections are already in force around this builtin, so the
+        ; command inherits them rather than being given them again.
+        (#t (%sh-dispatch wds () ()))))))
+
+(def %sh-command-opts
+  (fn (self wds mode)
+    (if (null? wds)
+      0
+      (let ((w (first wds)))
+        (match
+          ((string=? w "--") (%sh-command-run (rest wds) mode))
+          ((%sh-command-option? w)
+            (let ((m (%sh-command-letters w 1 (string-length w) mode)))
+              (if (eq? (first m) (lit bad))
+                (do (%stderr "ash: command: -" (rest m) ": invalid option\n") 2)
+                (self (rest wds) (rest m)))))
+          (#t (%sh-command-run wds mode)))))))
+
+(def %sh-command (fn (_ wds) (%sh-command-opts wds ())))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
@@ -3559,6 +3674,7 @@
         (pair "cd"     %sh-cd)
         (pair "pwd"    %sh-pwd)
         (pair "export" %sh-export)
+        (pair "command" %sh-command)
         (pair "local"  %sh-local)
         (pair "unset"  %sh-unset)
         (pair "readonly" %sh-readonly-builtin)
@@ -3802,22 +3918,23 @@
     (if (or (null? assigns) (%sh-special-builtin? (first remaining)))
       (do
         (%sh-apply-assignments assigns)
-        (%sh-dispatch remaining redirs))
+        (%sh-dispatch remaining redirs %sh-functions))
       (let ((saved (%sh-save-values assigns ())))
         (%sh-apply-exported assigns)
         (guard (e (do (%sh-restore-values saved) (error e)))
-          (let ((status (%sh-dispatch remaining redirs)))
+          (let ((status (%sh-dispatch remaining redirs %sh-functions)))
             (%sh-restore-values saved)
             status))))))
 
 (def %sh-dispatch
-  (fn (_ remaining redirs)
+  (fn (_ remaining redirs fns)
     (let ((name (first remaining))
           (args (rest remaining)))
-      (let ((body (%sh-fn-lookup name %sh-functions)))
+      (let ((body (%sh-fn-lookup name fns)))
         (cond
           ; A function wins over an external and loses to a builtin, the
-          ; POSIX order.
+          ; POSIX order.  FNS is which functions are in reach: `command`
+          ; passes none, which is the whole of what it does differently.
           ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
           ; Redirections on a function call apply for the whole body, and
           ; the shell's own descriptors must survive it -- the same
@@ -5195,17 +5312,21 @@
 (def %sh-heredoc-text (fn (_ h) (first h)))
 (def %sh-heredoc-expand? (fn (_ h) (rest h)))
 
-(def %sh-split-lines
-  (fn (_ text)
+; Cut TEXT at each CH, keeping the empty pieces: the lines of a here-document
+; body, and the directories of PATH, are the same walk.
+(def %sh-split-char
+  (fn (_ text ch)
     (let ((n (string-length text)))
       (def go
         (fn (self i start acc)
           (if (>= i n)
             (reverse (pair (substring text start n) acc))
-            (if (= (string-ref text i) #\newline)
+            (if (= (string-ref text i) ch)
               (self (+ i 1) (+ i 1) (pair (substring text start i) acc))
               (self (+ i 1) start acc)))))
       (go 0 0 ()))))
+
+(def %sh-split-lines (fn (_ text) (%sh-split-char text #\newline)))
 
 (def %sh-strip-tabs
   (fn (_ line)
