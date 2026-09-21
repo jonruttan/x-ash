@@ -119,8 +119,10 @@ suppresses splitting entirely.
 predicates `-e` `-f` `-d` `-s`, `-L`/`-h` for a symbolic link, `-p` `-S` `-b`
 `-c` for the other kinds, and `-u` `-g` `-k` for the setuid, setgid and
 sticky bits; `-t FD`; `-nt` and `-ot` by modification time; and the numeric
-comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. An unknown operator is a
-usage error (status 2), not a silent false. `-r`, `-w`, `-x` and `-ef` are not
+comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. Up to four words are read
+by how many there are, as POSIX sets out; more are an expression, where `!`
+binds tighter than `-a` and `-a` tighter than `-o`, and `(` `)` group. An
+unknown operator is a usage error (status 2), not a silent false. `-r`, `-w`, `-x` and `-ef` are not
 implemented: they need access(2) and device and inode numbers, which the
 platform does not yet reach.
 

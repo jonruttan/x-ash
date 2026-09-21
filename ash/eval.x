@@ -2840,7 +2840,8 @@
 ; --- test / [ -------------------------------------------------------------
 ;
 ; test knows -n, -z, =, != (string), the file predicates, and the numeric
-; comparisons; an unknown operator is a usage error, not a silent false.
+; comparisons, joined by `!`, `-a`, `-o` and parentheses; an unknown operator
+; is a usage error, not a silent false.
 
 ; Flat, via match: a nested if-ladder here once came out a closing paren short,
 ; which binds the defs that follow inside this function rather than at the top
@@ -2921,7 +2922,7 @@
       ((string=? op "-n") (%sh-bool (> (string-length val) 0)))
       ((string=? op "-z") (%sh-bool (= (string-length val) 0)))
       ((string=? op "-t") (%sh-bool (%sh-tty? val)))
-      ((string=? op "!")  (%sh-bool (not (= (%sh-test (list val)) 0))))
+      ((string=? op "!")  (%sh-test-not (%sh-test-1 val)))
       (#t
         (let ((r (%sh-test-file op val)))
           ; An unknown unary operator is a usage error (2), not a false --
@@ -2930,7 +2931,8 @@
             (do (%stderr "ash: test: " op ": unary operator expected\n") 2)
             r))))))
 
-(def %sh-test-3
+; A binary primary's answer, or nil when OP is not one.
+(def %sh-test-binary
   (fn (_ left op right)
     (match
       ((string=? op "=")  (%sh-bool (string=? left right)))
@@ -2940,28 +2942,151 @@
       ((string=? op ">")  (%sh-bool (Str8 <? right left)))
       ((string=? op "-nt") (%sh-bool (%sh-newer? left right)))
       ((string=? op "-ot") (%sh-bool (%sh-newer? right left)))
-      (#t
-        (let ((r (%sh-test-num left op right)))
-          (if (null? r)
-            (do (%stderr "ash: test: " op ": binary operator expected\n") 2)
-            r))))))
+      (#t (%sh-test-num left op right)))))
 
-; A plain def: %sh-test-2 calls back into this for `!`, but a body's references
-; resolve when it runs, so no forward declaration is needed.
+(def %sh-test-unary?
+  (fn (_ word)
+    (match
+      ((string=? word "-n") #t)
+      ((string=? word "-z") #t)
+      ((string=? word "-t") #t)
+      (#t (not (null? (%sh-table-get word %sh-file-ops)))))))
+
+; Statuses combine as the truths they stand for, and a usage error, 2, stands.
+(def %sh-test-not
+  (fn (_ s) (match ((= s 0) 1) ((= s 1) 0) (#t s))))
+
+(def %sh-test-both
+  (fn (_ a b) (match ((= a 2) a) ((= b 2) b) ((= a 0) b) (#t 1))))
+
+(def %sh-test-either
+  (fn (_ a b) (match ((= a 2) a) ((= b 2) b) ((= a 0) 0) (#t b))))
+
+; A usage error is reported where it is found, and answers 2.
+(def %sh-test-usage
+  (fn (_ word what) (do (%stderr "ash: test: " word ": " what "\n") 2)))
+
+; POSIX reads up to four words by how many there are.  Three: a binary primary
+; in the middle first, `-a` and `-o` among them, so `! = x` compares two
+; strings; then `!` before two words; then one word in parentheses.
+(def %sh-test-three
+  (fn (_ a b c)
+    (let ((r (%sh-test-binary a b c)))
+      (match
+        ((not (null? r)) r)
+        ((string=? b "-a") (%sh-test-both (%sh-test-1 a) (%sh-test-1 c)))
+        ((string=? b "-o") (%sh-test-either (%sh-test-1 a) (%sh-test-1 c)))
+        ((string=? a "!") (%sh-test-not (%sh-test-2 b c)))
+        ((and (string=? a "(") (string=? c ")")) (%sh-test-1 b))
+        (#t (%sh-test-expr (list a b c)))))))
+
+; Four: `!` before three words, then two words in parentheses.
+(def %sh-test-four
+  (fn (_ wds)
+    (let ((more (rest wds)))
+      (match
+        ((string=? (first wds) "!")
+          (%sh-test-not
+            (%sh-test-three (first more) (first (rest more))
+                            (first (rest (rest more))))))
+        ((and (string=? (first wds) "(") (string=? (last wds) ")"))
+          (%sh-test-2 (first more) (first (rest more))))
+        (#t (%sh-test-expr wds))))))
+
+; Past what the count settles, the words are an expression, read by recursive
+; descent as dash and bash read it: `!` binds tighter than `-a`, and `-a` than
+; `-o`, and parentheses group.  Each step answers (status . words left), a
+; status of 2 being a usage error already reported.
+(def %sh-test-expr
+  (fn (_ wds)
+    (let ((r (%sh-test-or wds)))
+      (match
+        ((= (first r) 2) 2)
+        ((null? (rest r)) (first r))
+        (#t (%sh-test-usage (first (rest r)) "unexpected operator"))))))
+
+; Whether the words left after the step that answered R begin with WORD.
+(def %sh-test-next?
+  (fn (_ r word)
+    (match
+      ((= (first r) 2) ())
+      ((null? (rest r)) ())
+      (#t (string=? (first (rest r)) word)))))
+
+(def %sh-test-or
+  (fn (self wds)
+    (let ((l (%sh-test-and wds)))
+      (if (%sh-test-next? l "-o")
+        (let ((r (self (rest (rest l)))))
+          (pair (%sh-test-either (first l) (first r)) (rest r)))
+        l))))
+
+(def %sh-test-and
+  (fn (self wds)
+    (let ((l (%sh-test-negation wds)))
+      (if (%sh-test-next? l "-a")
+        (let ((r (self (rest (rest l)))))
+          (pair (%sh-test-both (first l) (first r)) (rest r)))
+        l))))
+
+; `!` with more after it negates what follows; alone, it is a word.
+(def %sh-test-negation
+  (fn (self wds)
+    (match
+      ((null? wds) (%sh-test-primary wds))
+      ((null? (rest wds)) (%sh-test-primary wds))
+      ((string=? (first wds) "!")
+        (let ((r (self (rest wds))))
+          (pair (%sh-test-not (first r)) (rest r))))
+      (#t (%sh-test-primary wds)))))
+
+(def %sh-test-primary
+  (fn (_ wds)
+    (match
+      ((null? wds) (pair (%sh-test-usage "test" "argument expected") ()))
+      ((string=? (first wds) "(") (%sh-test-group (rest wds)))
+      (#t (%sh-test-operand wds)))))
+
+(def %sh-test-group
+  (fn (_ wds)
+    (let ((r (%sh-test-or wds)))
+      (match
+        ((= (first r) 2) r)
+        ((%sh-test-next? r ")") (pair (first r) (rest (rest r))))
+        (#t (pair (%sh-test-usage "(" "closing paren expected") ()))))))
+
+; A binary primary, a unary one, or a word, which is true when it is not
+; empty.  An operator second decides before one first, as with three words.
+(def %sh-test-operand
+  (fn (_ wds)
+    (let ((b (%sh-test-binary-of wds)))
+      (match
+        ((not (null? b)) (pair b (rest (rest (rest wds)))))
+        ((null? (rest wds)) (pair (%sh-test-1 (first wds)) ()))
+        ((%sh-test-unary? (first wds))
+          (pair (%sh-test-2 (first wds) (first (rest wds))) (rest (rest wds))))
+        (#t (pair (%sh-test-1 (first wds)) (rest wds)))))))
+
+; The binary primary the first three words make, or nil.
+(def %sh-test-binary-of
+  (fn (_ wds)
+    (match
+      ((null? (rest wds)) ())
+      ((null? (rest (rest wds))) ())
+      (#t (%sh-test-binary (first wds) (first (rest wds))
+                           (first (rest (rest wds))))))))
+
 (def %sh-test
   (fn (_ wds)
     (let ((n (length wds)))
-      (cond
+      (match
         ((= n 0) 1)
-        ; `! EXPR` at any length, so `test ! -f x` works.  Checked before the
-        ; arities so the negation composes with all of them.
-        ((and (> n 1) (string=? (first wds) "!"))
-          (%sh-bool (not (= (%sh-test (rest wds)) 0))))
         ((= n 1) (%sh-test-1 (first wds)))
         ((= n 2) (%sh-test-2 (first wds) (first (rest wds))))
-        ((= n 3) (%sh-test-3 (first wds) (first (rest wds))
-                             (first (rest (rest wds)))))
-        (else 1)))))
+        ((= n 3) (%sh-test-three (first wds) (first (rest wds))
+                                 (first (rest (rest wds)))))
+        ((= n 4) (%sh-test-four wds))
+        (#t (%sh-test-expr wds))))))
 
 ; --- pwd / unset / read / . -----------------------------------------------
 
