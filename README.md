@@ -80,7 +80,9 @@ Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
 does not leave the shell writing to `log`. A redirection written after a
 compound (`for ...; done > log`) applies to the whole construct. `exec` with
-redirections and no command applies them to the shell itself.
+redirections and no command applies them to the shell itself. A number in
+front of the operator names the descriptor: after `exec 3<file`, `read x <&3`
+reads the file's next line.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /

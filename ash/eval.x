@@ -789,8 +789,7 @@
           (if (= pid 0)
             (do
               (sh-close read-fd)
-              (sh-dup2 write-fd 1)
-              (sh-close write-fd)
+              (%sh-move-fd write-fd 1)
               ; The substituted text is its own script, so it starts at the
               ; top level however deep the expansion was reached from -- with
               ; no traps, which a subshell does not inherit, and outside any
@@ -2518,8 +2517,7 @@
                     (sh-exit 0))
                   (do
                     (sh-close w)
-                    (sh-dup2 r fd)
-                    (sh-close r)))))))))))
+                    (%sh-move-fd r fd)))))))))))
 
 (def %sh-heredoc-at
   (fn (self n)
@@ -2542,13 +2540,20 @@
   (fn (_ verb target)
     (do (%stderr "ash: cannot " verb " " target "\n") ())))
 
+; FROM onto TO, and FROM closed: the descriptor moves.  An open or a pipe
+; answers the lowest descriptor free, so FROM can already be TO -- `exec 3<f`
+; with 3 free opens f as 3 -- and closing it then would close the file.
+(def %sh-move-fd
+  (fn (_ from to)
+    (if (= from to) () (do (sh-dup2 from to) (sh-close from)))))
+
 ; The opened descriptor onto FD, or nil when the file could not be opened: the
 ; open answers -1 rather than raising.
 (def %sh-redir-onto
   (fn (_ fh fd verb target)
     (if (fx<? fh 0)
       (%sh-redir-failed verb target)
-      (do (sh-dup2 fh fd) (sh-close fh) #t))))
+      (do (%sh-move-fd fh fd) #t))))
 
 ; `>&2` and `<&0` name a descriptor the shell already has; `>&-` and `<&-`
 ; close FD instead, and closing one that is not open is no failure, as in
@@ -5105,8 +5110,7 @@
 
             (do
               (sh-close read-fd)
-              (sh-dup2 write-fd 1)
-              (sh-close write-fd)
+              (%sh-move-fd write-fd 1)
               (set! %sh-traps ())
               (%sh-in-child
                 (fn (_)
@@ -5117,8 +5121,7 @@
 
             (do
               (sh-close write-fd)
-              (sh-dup2 read-fd 0)
-              (sh-close read-fd)
+              (%sh-move-fd read-fd 0)
               (let ((result (%sh-pipe-chain rest-cmds)))
                 (%sh-pipe-status result (sh-wait pid))))))))))
 
