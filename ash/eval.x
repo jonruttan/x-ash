@@ -735,6 +735,33 @@
           (self s (+ i 2) n)
           (if (= c #\`) i (self s (+ i 1) n)))))))
 
+; Inside backquotes a backslash keeps its literal meaning except before `$`, a
+; backquote or another backslash, where POSIX takes it off before the command
+; runs: that is what lets `\`` open a substitution inside one, and `\$` pass
+; a `$` for the inner command to expand.
+(def %sh-bt-escapable?
+  (fn (_ c) (match ((= c #\$) #t) ((= c #\`) #t) (#t (= c #\\)))))
+
+(def %sh-bt-unescape-from
+  (fn (self s i n start pieces)
+    (match
+      ((fx<? (fx+ i 1) n)
+        (match
+          ((= (string-ref s i) #\\)
+            (if (%sh-bt-escapable? (string-ref s (fx+ i 1)))
+              (self s (fx+ i 2) n (fx+ i 2)
+                (pair (substring s (fx+ i 1) (fx+ i 2))
+                      (pair (substring s start i) pieces)))
+              (self s (fx+ i 2) n start pieces)))
+          (#t (self s (fx+ i 1) n start pieces))))
+      (#t (Str8 join "" (reverse (pair (substring s start n) pieces)))))))
+
+(def %sh-bt-unescape
+  (fn (_ text)
+    (if (%sh-has-backslash? text)
+      (%sh-bt-unescape-from text 0 (string-length text) 0 ())
+      text)))
+
 ; Trailing newlines come off, and only trailing ones -- `$(printf 'a\n\nb\n')`
 ; keeps the blank line in the middle.
 (def %sh-rstrip-newlines
@@ -1992,7 +2019,9 @@
                         (%sh-acc-add a (substring s i (+ i 1)) ()))
                       (self (+ e 1) mode
                         (%sh-add-expansion a mode
-                          (%sh-cmd-subst (substring s (+ i 1) e)) split?)))))
+                          (%sh-cmd-subst
+                            (%sh-bt-unescape (substring s (+ i 1) e)))
+                          split?)))))
                 ((= c #\$) (%sh-expand-dollar self s i n mode a split?))
                 ; A tilde where one may expand; an ordinary character where
                 ; not.  It is asked here rather than scanned for beforehand
