@@ -1509,9 +1509,12 @@
     (let ((n (string-length inner)))
       (cond
         ((= n 0) "")
-        ; ${#X} is a length; ${#} alone is the parameter COUNT, which
-        ; %sh-var-value already knows as the special "#".
-        ((and (> n 1) (= (string-ref inner 0) #\#))
+        ; ${#X} is a length when X is one parameter and nothing more.  ${#}
+        ; alone is the parameter COUNT, which %sh-var-value already knows as
+        ; the special "#" -- and so is the `#` an operator follows, in
+        ; `${#:-x}` and `${##pat}`, which the arm below reads.
+        ((and (> n 1) (= (string-ref inner 0) #\#)
+              (= (string-length (%sh-param-name (substring inner 1 n))) (- n 1)))
           (convert
             (string-length (%sh-var-value-checked (substring inner 1 n)))
             %string))
