@@ -251,21 +251,32 @@
 ; bits to the kernel: a file it creates is 0666 (438) less the umask, as a
 ; shell's is, and a file already there keeps its mode.  (Sys open-write) and
 ; (Sys open-append) set every file they open to 0666.
-(def sh-open-read (fn (_ path) (%file-open File path (lit rdonly))))
-(def sh-open-write
-  (fn (_ path)
-    (%file-open File path (list (lit wronly) (lit creat) (lit trunc)) 438)))
-(def sh-open-append
-  (fn (_ path)
-    (%file-open File path (list (lit wronly) (lit creat) (lit append)) 438)))
-(def sh-open-rdwr
-  (fn (_ path) (%file-open File path (list (lit rdwr) (lit creat)) 438)))
+;
+; Each open's flags are ORed together once, from the platform's own table,
+; (File file-modes), as its documentation has it: a list of names handed to
+; (File open) is folded into the same number at every call.
+(def %sh-open-flags
+  (fn (self names acc)
+    (if (null? names)
+      acc
+      (self (rest names)
+            (| acc (first (Assoc get (first names) (File file-modes))))))))
+
+(def %sh-o-read (%sh-open-flags (list (lit rdonly)) 0))
+(def %sh-o-write (%sh-open-flags (list (lit wronly) (lit creat) (lit trunc)) 0))
+(def %sh-o-append (%sh-open-flags (list (lit wronly) (lit creat) (lit append)) 0))
+(def %sh-o-rdwr (%sh-open-flags (list (lit rdwr) (lit creat)) 0))
+(def %sh-o-new (%sh-open-flags (list (lit wronly) (lit creat) (lit excl)) 0))
+(def %sh-o-existing (%sh-open-flags (list (lit wronly)) 0))
+
+(def sh-open-read (fn (_ path) (%file-open File path %sh-o-read)))
+(def sh-open-write (fn (_ path) (%file-open File path %sh-o-write 438)))
+(def sh-open-append (fn (_ path) (%file-open File path %sh-o-append 438)))
+(def sh-open-rdwr (fn (_ path) (%file-open File path %sh-o-rdwr 438)))
 ; For `set -C`: a file created only when none is there, and one already there
 ; opened as it is.
-(def sh-open-new
-  (fn (_ path)
-    (%file-open File path (list (lit wronly) (lit creat) (lit excl)) 438)))
-(def sh-open-existing (fn (_ path) (%file-open File path (lit wronly))))
+(def sh-open-new (fn (_ path) (%file-open File path %sh-o-new 438)))
+(def sh-open-existing (fn (_ path) (%file-open File path %sh-o-existing)))
 (def sh-close (fn (_ fd) (%sys-close Sys fd)))
 (def sh-dup2 (fn (_ from to) (%sys-dup2 Sys from to)))
 
