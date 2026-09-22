@@ -5758,32 +5758,58 @@
           (if (and (< i n) (= (string-ref line i) #\tab)) (self (+ i 1)) i)))
       (substring line (go 0) n))))
 
-; The delimiter word that follows `<<`, and where it ends.  A quoted one is
-; taken literally and marks the body as unexpanded.
+; The delimiter word that follows `<<`, and where it ends: (word end expand?).
+; The body ends at the word with its quoting removed, and quoting anywhere in
+; it -- `'EOF'`, `"EOF"`, `\EOF`, `E"O"F` -- keeps the body from expanding.
 (def %sh-hd-delim
   (fn (_ line i n)
     (let ((j (%sh-ar-skip-ws line i n)))
-      (if (>= j n)
-        (list "" j #t)
-        (let ((q (string-ref line j)))
-          (if (or (= q #\') (= q #\"))
-            (let ((e (%sh-quote-scan line (+ j 1) n q)))
-              (list (substring line (+ j 1) e) (+ e 1) ()))
-            (let ((e (%sh-word-scan line j n)))
-              (list (substring line j e) e #t))))))))
+      (%sh-hd-delim-from line j n j () ()))))
 
 (def %sh-quote-scan
   (fn (self line i n q)
     (if (>= i n) i (if (= (string-ref line i) q) i (self line (+ i 1) n q)))))
 
-(def %sh-word-scan
-  (fn (self line i n)
-    (if (>= i n)
-      i
+; A delimiter word ends at the end of the line, a blank or an operator.
+(def %sh-hd-delim-end?
+  (fn (_ line i n)
+    (match
+      ((not (fx<? i n)) #t)
+      ((%sh-ws-char? (string-ref line i)) #t)
+      (#t (%sh-op-start? (string-ref line i))))))
+
+; The word from I.  PIECES holds its text so far with the quoting removed,
+; latest first, and START is where the run not yet in PIECES began.
+(def %sh-hd-delim-from
+  (fn (self line i n start pieces quoted?)
+    (if (%sh-hd-delim-end? line i n)
+      (list (Str8 join "" (reverse (pair (substring line start i) pieces)))
+            i
+            (not quoted?))
       (let ((c (string-ref line i)))
-        (if (or (%sh-ws-char? c) (or (= c #\;) (or (= c #\<) (= c #\>))))
-          i
-          (self line (+ i 1) n))))))
+        (match
+          ; `\c` is c.
+          ((= c #\\)
+            (let ((e (if (fx<? (fx+ i 1) n) (fx+ i 2) n)))
+              (%sh-hd-delim-piece line n start i (fx+ i 1) e e pieces)))
+          ((= c #\') (%sh-hd-delim-quote line n start i c pieces))
+          ((= c #\") (%sh-hd-delim-quote line n start i c pieces))
+          (#t (self line (fx+ i 1) n start pieces quoted?)))))))
+
+; A quoted run from I, which holds the quote Q, to the one that closes it.
+(def %sh-hd-delim-quote
+  (fn (_ line n start i q pieces)
+    (let ((e (%sh-quote-scan line (fx+ i 1) n q)))
+      (%sh-hd-delim-piece line n start i (fx+ i 1) e
+        (if (fx<? e n) (fx+ e 1) e) pieces))))
+
+; The word goes on at NEXT after the quoted text from FROM to TO, which follows
+; the run from START to I.
+(def %sh-hd-delim-piece
+  (fn (_ line n start i from to next pieces)
+    (%sh-hd-delim-from line next n next
+      (pair (substring line from to) (pair (substring line start i) pieces))
+      #t)))
 
 ; For a `$` at I that opens `$((`, the index of the `)` closing the arithmetic
 ; expansion on this line, or -1.

@@ -74,8 +74,9 @@ moves the arguments along. A function shadows an external of the same name
 and is shadowed by a builtin.
 
 Here-documents: `<<EOF` and `<<-EOF` (which strips leading tabs), with the body
-expanded unless the delimiter is quoted. Several on one line are taken in
-order.
+expanded unless the delimiter is quoted. The body ends at the delimiter with
+its quoting removed, and quoting any part of it (`'EOF'`, `"EOF"`, `\EOF`,
+`E"O"F`) counts. Several on one line are taken in order.
 
 Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`
