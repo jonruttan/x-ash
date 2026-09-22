@@ -33,7 +33,7 @@
   string=? string? make-string list->string length reverse append map filter
   take drop nth last fx<? fx+
   sh-fork sh-exec sh-wait sh-exit sh-getpid
-  sh-open-read sh-open-write sh-open-append sh-close sh-dup2 sh-pipe
+  sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
   sh-path-kind sh-path-size sh-path-mode sh-path-lkind sh-path-mtime
   sh-read-file sh-read-line sh-read-line-fd
@@ -208,19 +208,27 @@
 (def set-first! %set-first!)
 
 ; --- The shell's syscalls ----------------------------------------------------
-; One-line forwards to the Sys class, which carries every process and file door
-; under a name a shell recognises. The sh- prefix is kept because eval.x reads
-; as a shell for it: (sh-dup2 fh fd) in a redirection is the shell's
-; vocabulary, not the platform's.
+; One-line forwards to the Sys and File classes, which carry every process and
+; file door, under a name a shell recognises. The sh- prefix is kept because
+; eval.x reads as a shell for it: (sh-dup2 fh fd) in a redirection is the
+; shell's vocabulary, not the platform's.
 (def sh-fork (fn (_) (Sys fork)))
 (def sh-exec (fn (_ path args) (Sys exec path args)))
 (def sh-wait (fn (_ pid) (Sys wait pid)))
 (def sh-exit (fn (_ status) (Sys exit status)))
 (def sh-getpid (fn (_) (Sys getpid)))
 
-(def sh-open-read (fn (_ path) (Sys open-read path)))
-(def sh-open-write (fn (_ path) (Sys open-write path)))
-(def sh-open-append (fn (_ path) (Sys open-append path)))
+; A redirection's file is opened by (File open), which hands the permission
+; bits to the kernel: a file it creates is 0666 (438) less the umask, as a
+; shell's is, and a file already there keeps its mode.  (Sys open-write) and
+; (Sys open-append) set every file they open to 0666.
+(def sh-open-read (fn (_ path) (File open path (lit rdonly))))
+(def sh-open-write
+  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit trunc)) 438)))
+(def sh-open-append
+  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit append)) 438)))
+(def sh-open-rdwr
+  (fn (_ path) (File open path (list (lit rdwr) (lit creat)) 438)))
 (def sh-close (fn (_ fd) (Sys close fd)))
 (def sh-dup2 (fn (_ from to) (Sys dup2 from to)))
 

@@ -35,9 +35,9 @@ hexadecimal (`0x10`), `+ - * / %` (division truncates toward zero),
 comparisons, the bitwise `& | ^ ~` and the shifts `<< >>`, `&&` / `||` / `!`,
 the conditional `c ? a : b`, parentheses, and bare names read as their values
 (unset or non-numeric is zero; blanks around a value and a sign in front of it
-are allowed, so a count `wc` pads still reads). `&&`, `||` and the conditional evaluate only
-the side they take, so `$((n && total/n))` guards its own division. A counting
-loop is `i=$((i+1))`.
+are allowed, so a count `wc` pads still reads). `&&`, `||` and the
+conditional evaluate only the side they take, so `$((n && total/n))` guards
+its own division. A counting loop is `i=$((i+1))`.
 
 Parameter expansion: `${X:-default}`, `${X:=assign}`, `${X:?message}`,
 `${X:+alternative}` and their colonless forms (which treat a null value as
@@ -87,7 +87,9 @@ does not leave the shell writing to `log`. A redirection written after a
 compound (`for ...; done > log`) applies to the whole construct. `exec` with
 redirections and no command applies them to the shell itself. A number in
 front of the operator names the descriptor: after `exec 3<file`, `read x <&3`
-reads the file's next line.
+reads the file's next line. A file `>` or `>>` creates has permission 0666
+less the umask, and one already there keeps its mode; `<>` opens its file for
+reading and writing, creating it if need be.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
@@ -129,9 +131,9 @@ sticky bits; `-t FD`; `-nt` and `-ot` by modification time; and the numeric
 comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. Up to four words are read
 by how many there are, as POSIX sets out; more are an expression, where `!`
 binds tighter than `-a` and `-a` tighter than `-o`, and `(` `)` group. An
-unknown operator is a usage error (status 2), not a silent false. `-r`, `-w`, `-x` and `-ef` are not
-implemented: they need access(2) and device and inode numbers, which the
-platform does not yet reach.
+unknown operator is a usage error (status 2), not a silent false. `-r`, `-w`,
+`-x` and `-ef` are not implemented: they need access(2) and device and inode
+numbers, which the platform does not yet reach.
 
 Not implemented: an action on a signal (`trap` takes one for EXIT alone), and
 job control.
