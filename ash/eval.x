@@ -5218,6 +5218,23 @@
         (fx+ j 2))
       (#t (self pat (fx+ j 1) hi)))))
 
+; A member of a class at I, and the index just past it.  A backslash makes the
+; character after it the member, itself and nothing else: `[a\]]` holds `]`,
+; and `[a\-z]` a literal `-` rather than the range `a` to `z`.
+(def %sh-glob-escaped-at?
+  (fn (_ pat i hi)
+    (if (= (string-ref pat i) #\\) (fx<? (fx+ i 1) hi) ())))
+
+(def %sh-glob-member-at
+  (fn (_ pat i hi)
+    (if (%sh-glob-escaped-at? pat i hi)
+      (string-ref pat (fx+ i 1))
+      (string-ref pat i))))
+
+(def %sh-glob-member-end
+  (fn (_ pat i hi)
+    (if (%sh-glob-escaped-at? pat i hi) (fx+ i 2) (fx+ i 1))))
+
 ; The character-class helpers, taking the class body as the half-open range
 ; [lo, hi) -- lo just after the `[`, hi at the `]`.
 (def %sh-glob-class-scan
@@ -5234,16 +5251,17 @@
           (if (%sh-char-class? (substring pat (+ i 2) (- e 2)) c)
             #t
             (self pat e hi c))
-          ; A range `a-b` needs its closing character inside the class.
-          (if (and (< (+ i 2) hi)
-                   (= (string-ref pat (+ i 1)) #\-))
-            (if (and (>= c (string-ref pat i))
-                     (<= c (string-ref pat (+ i 2))))
-              #t
-              (self pat (+ i 3) hi c))
-            (if (= c (string-ref pat i))
-              #t
-              (self pat (+ i 1) hi c))))))))
+          (do
+            (def lo (%sh-glob-member-at pat i hi))
+            (def after (%sh-glob-member-end pat i hi))
+            ; A range `a-b` needs its closing member inside the class.
+            (if (if (fx<? (fx+ after 1) hi) (= (string-ref pat after) #\-) ())
+              (do
+                (def top (%sh-glob-member-at pat (fx+ after 1) hi))
+                (if (if (fx<? c lo) () (not (fx<? top c)))
+                  #t
+                  (self pat (%sh-glob-member-end pat (fx+ after 1) hi) hi c)))
+              (if (= c lo) #t (self pat after hi c)))))))))
 
 (def %sh-glob-class-match?
   (fn (_ pat lo hi s si)
@@ -5262,10 +5280,13 @@
   (fn (_ pat i pn)
     (def scan
       (fn (self j)
-        (if (>= j pn)
-          (- 0 1)
-          (if (= (string-ref pat j) #\])
-            j
+        (match
+          ((not (fx<? j pn)) (- 0 1))
+          ; An escaped character is a member, a `]` included, so it closes
+          ; nothing.
+          ((%sh-glob-escaped-at? pat j pn) (self (fx+ j 2)))
+          ((= (string-ref pat j) #\]) j)
+          (#t
             (let ((e (if (and (< (+ j 1) pn)
                               (= (string-ref pat j) #\[)
                               (= (string-ref pat (+ j 1)) #\:))
