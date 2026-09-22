@@ -198,8 +198,8 @@
 (def nth
   (fn (_ n l) (let ((tail (drop n l))) (if (null? tail) () (first tail)))))
 
-; %sh-run-builtin's `[` arm uses `last`, so it must be bound here or
-; `[ x = x ]` raises Unbound.
+; %sh-bracket uses `last`, so it must be bound here or `[ x = x ]` raises
+; Unbound.
 (def last
   (fn (self l)
     (match
