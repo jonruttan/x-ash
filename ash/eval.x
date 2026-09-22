@@ -1522,12 +1522,19 @@
                   (if (string=? base "+") (not absent?) absent?)
                   word)))))))))
 
+; What `${...}` holds is a parameter, and then an operator or nothing at all.
+; Anything else is no expansion: `${1a}`, `${a b}`, `${:-x}` and `${}` are
+; refused rather than read as a name the shell has never been given.
+(def %sh-bad-substitution
+  (fn (_ inner)
+    (error (string-append "${" inner "}: bad substitution"))))
+
 ; ${...} in full.  Answers the expanded text.
 (def %sh-brace-expand
   (fn (_ inner)
     (let ((n (string-length inner)))
       (cond
-        ((= n 0) "")
+        ((= n 0) (%sh-bad-substitution inner))
         ; ${#X} is a length when X is one parameter and nothing more.  ${#}
         ; alone is the parameter COUNT, which %sh-var-value already knows as
         ; the special "#" -- and so is the `#` an operator follows, in
@@ -1540,15 +1547,16 @@
         (else
           (let ((name (%sh-param-name inner)))
             (let ((tail (substring inner (string-length name) n)))
-              (if (= (string-length tail) 0)
-                (%sh-var-value-checked name)
-                (let ((op (%sh-first-op tail %sh-param-op-names)))
-                  (if (null? op)
-                    ; Not an operator we know -- the whole of it is a name.
-                    (%sh-var-value-checked inner)
-                    (%sh-param-apply name op
-                      (substring tail (string-length op)
-                        (string-length tail)))))))))))))
+              (cond
+                ((= (string-length name) 0) (%sh-bad-substitution inner))
+                ((= (string-length tail) 0) (%sh-var-value-checked name))
+                (else
+                  (let ((op (%sh-first-op tail %sh-param-op-names)))
+                    (if (null? op)
+                      (%sh-bad-substitution inner)
+                      (%sh-param-apply name op
+                        (substring tail (string-length op)
+                          (string-length tail))))))))))))))
 
 ; A plain run, and whether it holds a metacharacter, in one pass. Finding where
 ; the run ends looks at every character; the only other question about a run is
