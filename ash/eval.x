@@ -1367,11 +1367,14 @@
 (def %sh-param-default
   (fn (_ name val fired? word) (if fired? (%sh-in-place word) val)))
 
+; Only a variable can be assigned this way: a positional parameter or a special
+; that the operator would assign is refused, `${1:=x}` with no parameters.
 (def %sh-param-assign
   (fn (_ name val fired? word)
-    (if fired?
-      (let ((v (%sh-word-value word))) (%sh-var-set! name v) v)
-      val)))
+    (match
+      ((not fired?) val)
+      ((not (%sh-name? name)) (error (string-append name ": bad variable name")))
+      (#t (do (def v (%sh-word-value word)) (%sh-var-set! name v) v)))))
 
 (def %sh-param-error
   (fn (_ name val fired? word)
@@ -1451,8 +1454,10 @@
         (first names)
         (self tail (rest names))))))
 
-; The leading parameter NAME: a run of name characters, or a single special
-; ($?, $#, $1...), or empty when the braces open with an operator.
+; The leading parameter NAME: a run of name characters, a run of digits -- in
+; braces a positional parameter's number may be more than one, `${10:-x}` --
+; or a single special ($?, $#...), or empty when the braces open with an
+; operator.
 (def %sh-param-name
   (fn (_ inner)
     (let ((n (string-length inner)))
@@ -1462,7 +1467,7 @@
           (if (%sh-name-start? c)
             (substring inner 0 (%sh-name-end inner 0 n))
             (if (null? (%sh-table-get (substring inner 0 1) %sh-special-vars))
-              (if (%sh-digit? c) (substring inner 0 1) "")
+              (if (%sh-digit? c) (substring inner 0 (%sh-ar-digits-end inner 0 n)) "")
               (substring inner 0 1))))))))
 
 ; Is the parameter unset?  `$!` is until a list has run in the background; any
