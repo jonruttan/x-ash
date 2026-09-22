@@ -1249,6 +1249,44 @@
           filled
           (self (%sh-acc-break filled) (rest args)))))))
 
+; The positional parameters unquoted, as fields of their own that are not split
+; again: the first joins the field in hand, and each later one closes it and
+; begins the next.  An empty parameter adds nothing, so a field only it began
+; is no field, while it still closes the one before it: with two empty
+; parameters `x$*y` is `x` and `y`.
+(def %sh-add-params
+  (fn (self a args)
+    (match
+      ((null? args) a)
+      (#t
+        (do
+          (def filled
+            (if (fx<? 0 (string-length (first args)))
+              (%sh-acc-add-value a (first args))
+              a))
+          (match
+            ((null? (rest args)) filled)
+            ((null? (%sh-acc-started filled)) (self filled (rest args)))
+            (#t (self (%sh-acc-break filled) (rest args)))))))))
+
+; `$@` and `$*`, and the same in braces; NAME is "@" or "*".  Quoted, "$@" is a
+; field per parameter (%sh-add-args) and "$*" one field, the parameters joined
+; on IFS's first character.  Unquoted, both are that joined text, which field
+; splitting then splits apart again -- but with IFS empty there is no character
+; to join on and nothing splits, so the parameters go in as fields of their own
+; (%sh-add-params).  Where nothing is split -- an assignment, a `case` word --
+; they are the joined text either way.
+(def %sh-add-all-params
+  (fn (_ a name mode split?)
+    (match
+      ((= mode %sh-mode-dq)
+        (if (string=? name "@")
+          (%sh-add-args a %sh-args)
+          (%sh-add-expansion a mode (%sh-var-value name) split?)))
+      ((if split? (= 0 (string-length (%sh-ifs))) ())
+        (%sh-add-params a %sh-args))
+      (#t (%sh-add-expansion a mode (%sh-var-value name) split?)))))
+
 ; Fields already built, each with what it holds, spliced in: the first joins
 ; the field in hand and each later one begins its own.
 (def %sh-add-fields
@@ -2270,11 +2308,10 @@
                   (literal-dollar)
                   (do
                     (def inner (substring s (fx+ j 1) e))
-                    ; `"${@}"` asks exactly what `"$@"` asks, so it is
-                    ; answered in the same place rather than joined into one
-                    ; field here.
-                    (if (if (= mode %sh-mode-dq) (string=? inner "@") ())
-                      (cont (fx+ e 1) mode (%sh-add-args a %sh-args))
+                    ; `${@}` and `${*}` ask exactly what `$@` and `$*` ask, so
+                    ; they are answered in the same place.
+                    (if (if (string=? inner "@") #t (string=? inner "*"))
+                      (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?))
                       ; A value operator that fired answers its word to stand
                       ; here, rather than text (see %sh-param-default).
                       (do
@@ -2282,12 +2319,11 @@
                         (if (pair? r)
                           (cont (fx+ e 1) mode (%sh-add-word a mode (rest r) split?))
                           (substitute (fx+ e 1) r))))))))
-            ; "$@" is the one special that is not a string -- see
-            ; %sh-add-args.  Unquoted it is not special at all: `$@` splits on
-            ; IFS the way any unquoted expansion does, which %sh-add-expansion
-            ; already handles.
-            ((if (= d #\@) (= mode %sh-mode-dq) ())
-              (cont (fx+ j 1) mode (%sh-add-args a %sh-args)))
+            ; `$@` and `$*` are the specials that are not one string -- see
+            ; %sh-add-all-params.
+            ((if (= d #\@) #t (= d #\*))
+              (cont (fx+ j 1) mode
+                (%sh-add-all-params a (if (= d #\@) "@" "*") mode split?)))
             ((%sh-special-param? d)
               (substitute (fx+ j 1) (%sh-var-value (substring s j (fx+ j 1)))))
             ; $ followed by anything else is a literal $.
