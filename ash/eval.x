@@ -845,19 +845,6 @@
 (def %sh-ws-char?
   (fn (_ c) (or (= c #\space) (= c #\tab) (= c #\newline))))
 
-(def %sh-lead-ws?
-  (fn (_ text)
-    (if (= (string-length text) 0)
-      ()
-      (%sh-ws-char? (string-ref text 0)))))
-
-(def %sh-trail-ws?
-  (fn (_ text)
-    (let ((n (string-length text)))
-      (if (= n 0)
-        ()
-        (%sh-ws-char? (string-ref text (- n 1)))))))
-
 ; The non-empty runs between whitespace, in order.
 ; --- IFS ---------------------------------------------------------------------
 ;
@@ -933,6 +920,14 @@
       ((= (string-ref text i) c) #t)
       (#t (self text c (fx+ i 1) n)))))
 
+; Whether TEXT holds an IFS character at I or after, before N.
+(def %sh-has-ifs-from?
+  (fn (self text ifs i n)
+    (match
+      ((not (fx<? i n)) ())
+      ((%sh-in-ifs? (string-ref text i) ifs) #t)
+      (#t (self text ifs (fx+ i 1) n)))))
+
 ; How far a run of IFS WHITESPACE reaches from I.
 (def %sh-ifs-ws-end
   (fn (self text i n ifs)
@@ -942,15 +937,13 @@
       (self text (+ i 1) n ifs)
       i)))
 
+; The fields of TEXT, N long, which holds a character of IFS.  A leading run
+; of IFS whitespace is skipped rather than delimiting.
 (def %sh-ifs-split
-  (fn (_ text)
-    (let ((ifs (%sh-ifs)) (n (string-length text)))
-      (if (= (string-length ifs) 0)
-        ; IFS="" -- no splitting.  An empty text is still no fields.
-        (if (= n 0) () (list text))
-        ; A leading run of IFS whitespace is skipped rather than delimiting.
-        (let ((i (%sh-ifs-ws-end text 0 n ifs)))
-          (%sh-ifs-fields text i n ifs i () ()))))))
+  (fn (_ text n ifs)
+    (do
+      (def i (%sh-ifs-ws-end text 0 n ifs))
+      (%sh-ifs-fields text i n ifs i () ()))))
 
 ; The fields of TEXT from I, walked by index: FROM is where the field in hand
 ; began, and a field is cut out once, when it ends.  STARTED? is whether one is
@@ -1176,29 +1169,50 @@
       (self (%sh-acc-add-value (%sh-acc-break a) (first pieces))
             (rest pieces)))))
 
-; Splice expanded TEXT into the accumulator, splitting it on IFS whitespace.
+; Splice expanded TEXT into the accumulator, splitting it on IFS.
 ;
-; Leading whitespace closes the field in hand; the first piece JOINS whatever
-; is left of it (`p${X}s` is one word made of three); each later piece starts
-; its own; trailing whitespace closes the last.
+; A value that holds no IFS character is not split: it JOINS the field in hand
+; whole (`p${X}s` is one word made of three), as every value does when IFS is
+; empty.  Only a character of IFS counts: with IFS=: a space is text.
 (def %sh-add-split
   (fn (_ a text)
-    (let ((pieces (%sh-ifs-split text)))
-      (cond
-        ; Nothing at all changes nothing; all-whitespace still closes a field
-        ; that has content.
-        ((null? pieces)
-          (if (and (> (string-length text) 0) (%sh-acc-started a))
-            (%sh-acc-break a)
-            a))
-        (else
-          (let ((opened (if (and (%sh-lead-ws? text) (%sh-acc-started a))
-                          (%sh-acc-break a)
-                          a)))
-            (let ((filled (%sh-add-pieces
-                            (%sh-acc-add-value opened (first pieces))
-                            (rest pieces))))
-              (if (%sh-trail-ws? text) (%sh-acc-break filled) filled))))))))
+    (do
+      (def ifs (%sh-ifs))
+      (def n (string-length text))
+      (match
+        ((%sh-has-ifs-from? text ifs 0 n)
+          (%sh-add-split-fields a text n ifs (%sh-ifs-split text n ifs)))
+        ; An empty value changes nothing.
+        ((fx<? 0 n) (%sh-acc-add-value a text))
+        (#t a)))))
+
+; Splice the FIELDS of TEXT, N long, which holds a character of IFS.  The
+; first field joins the field in hand and each later one starts its own.  An
+; IFS character at the start closes the field in hand, and one at the end
+; closes the last field, so what follows starts another.  A start that holds an
+; IFS character other than whitespace is an empty first field, which joins the
+; field in hand and so closes it once, whatever whitespace comes with it.  A
+; value of IFS whitespace alone has no fields, and closes a field in hand that
+; has started.
+(def %sh-add-split-fields
+  (fn (_ a text n ifs fields)
+    (do
+      (def opened
+        (match
+          ((null? (%sh-acc-started a)) a)
+          ((null? fields) (%sh-acc-break a))
+          ((= 0 (string-length (first fields))) a)
+          ((%sh-in-ifs? (string-ref text 0) ifs) (%sh-acc-break a))
+          (#t a)))
+      (match
+        ((null? fields) opened)
+        (#t
+          (do
+            (def filled (%sh-add-pieces (%sh-acc-add-value opened (first fields))
+                                        (rest fields)))
+            (if (%sh-in-ifs? (string-ref text (fx+ n -1)) ifs)
+              (%sh-acc-break filled)
+              filled)))))))
 
 ; "$@" -- one field per positional parameter.
 ;
