@@ -4234,46 +4234,40 @@
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
 ; names are the table's keys rather than a separate list a dispatch repeats.
-; `.` and `source` are the same handler under two names.
+; `.` and `source` are the same handler under two names.  A name is found by
+; walking the table, so the builtins a loop runs most come first.
 (def %sh-builtin-table
-  (list (pair "echo"   %sh-echo)
-        (pair "cd"     %sh-cd)
-        (pair "pwd"    %sh-pwd)
-        (pair "export" %sh-export)
-        (pair "command" %sh-command)
-        (pair "type"   %sh-type)
-        (pair "local"  %sh-local)
-        (pair "unset"  %sh-unset)
-        (pair "readonly" %sh-readonly-builtin)
-        (pair "read"   %sh-read)
-        (pair "return" %sh-return)
-        (pair "shift"  %sh-shift)
-        (pair "eval"   %sh-eval-builtin)
-        (pair "exec"   %sh-exec-builtin)
-        (pair "trap"   %sh-trap-builtin)
-        (pair "getopts" %sh-getopts-builtin)
-        (pair "break"  %sh-break)
-        (pair "continue" %sh-continue)
-        (pair "set"    %sh-set)
+  (list (pair "["      %sh-bracket)
         (pair "test"   %sh-test)
-        (pair "["      %sh-bracket)
-        (pair "."      %sh-source)
-        (pair "source" %sh-source)
-        (pair "exit"   %sh-exit)
+        (pair "echo"   %sh-echo)
+        (pair ":"      %sh-true)
         (pair "true"   %sh-true)
         (pair "false"  %sh-false)
+        (pair "read"   %sh-read)
+        (pair "shift"  %sh-shift)
+        (pair "set"    %sh-set)
+        (pair "local"  %sh-local)
+        (pair "return" %sh-return)
+        (pair "break"  %sh-break)
+        (pair "continue" %sh-continue)
+        (pair "cd"     %sh-cd)
+        (pair "export" %sh-export)
+        (pair "unset"  %sh-unset)
+        (pair "exit"   %sh-exit)
+        (pair "eval"   %sh-eval-builtin)
+        (pair "."      %sh-source)
+        (pair "command" %sh-command)
+        (pair "getopts" %sh-getopts-builtin)
+        (pair "pwd"    %sh-pwd)
+        (pair "readonly" %sh-readonly-builtin)
+        (pair "exec"   %sh-exec-builtin)
+        (pair "trap"   %sh-trap-builtin)
         (pair "wait"   %sh-wait-builtin)
-        (pair ":"      %sh-true)))
+        (pair "type"   %sh-type)
+        (pair "source" %sh-source)))
 
 (def %sh-builtin?
   (fn (_ name) (not (null? (%sh-table-get name %sh-builtin-table)))))
-
-(def %sh-run-builtin
-  (fn (_ name wds)
-    (let ((run (%sh-table-get name %sh-builtin-table)))
-      ; Unreachable in practice -- %sh-run-cmd asks %sh-builtin? first, and
-      ; both read this table -- but a missing handler must not be a crash.
-      (if (null? run) 1 (run wds)))))
 
 ; A builtin under redirection: park the descriptors, run, put them back. The
 ; guard restores and re-raises, so a builtin that raises with fd 1 still on a
@@ -4283,21 +4277,24 @@
 ; for inline, so a second one is a list entry rather than another branch.
 (def %sh-keeps-redirs (list "exec"))
 
+; RUN is the builtin's handler, which the dispatch has already found.
 (def %sh-run-builtin-redir
-  (fn (_ name wds redirs)
+  (fn (_ name run wds redirs)
     (if (null? redirs)
-      (%sh-run-builtin name wds)
+      (run wds)
       (if (%sh-word-in? name %sh-keeps-redirs)
         ; Set up and never put back: that is the whole of what `exec > log`
         ; means.  See %sh-exec-builtin.
         (if (%sh-setup-redirs redirs)
-          (%sh-run-builtin name wds)
+          (run wds)
           (%sh-redir-refused name))
-        (let ((parked (%sh-save-fds redirs)))
+        (do
+          (def parked (%sh-save-fds redirs))
           (guard (e (do (%sh-restore-fds parked) (error e)))
-            (let ((status (if (%sh-setup-redirs redirs)
-                            (%sh-run-builtin name wds)
-                            (%sh-redir-refused name))))
+            (do
+              (def status (if (%sh-setup-redirs redirs)
+                            (run wds)
+                            (%sh-redir-refused name)))
               (%sh-restore-fds parked)
               status)))))))
 
@@ -4524,19 +4521,24 @@
 
 (def %sh-dispatch
   (fn (_ remaining redirs fns)
-    (let ((name (first remaining))
-          (args (rest remaining)))
-      (let ((body (%sh-fn-lookup name fns)))
-        (cond
-          ; A function wins over a regular builtin and an external, and
-          ; loses to a special builtin, the POSIX order.  FNS is which
-          ; functions are in reach: `command` passes none, which is the
-          ; whole of what it does differently.  Redirections on a function
-          ; call apply for the whole body, and the shell's own descriptors
-          ; must survive it -- the same save/apply/restore a builtin gets.
-          ((%sh-fn-wins? name body) (%sh-run-fn-redir body args redirs))
-          ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
-          (else (%sh-run-external name args redirs)))))))
+    (do
+      (def name (first remaining))
+      (def args (rest remaining))
+      (def body (%sh-fn-lookup name fns))
+      ; A function wins over a regular builtin and an external, and loses to
+      ; a special builtin, the POSIX order.  FNS is which functions are in
+      ; reach: `command` passes none, which is the whole of what it does
+      ; differently.  Redirections on a function call apply for the whole
+      ; body, and the shell's own descriptors must survive it -- the same
+      ; save/apply/restore a builtin gets.  A builtin is looked up once, and
+      ; its handler handed on.
+      (if (%sh-fn-wins? name body)
+        (%sh-run-fn-redir body args redirs)
+        (do
+          (def run (%sh-table-get name %sh-builtin-table))
+          (if (null? run)
+            (%sh-run-external name args redirs)
+            (%sh-run-builtin-redir name run args redirs)))))))
 
 ; Whether a function found as BODY runs for NAME: it does unless NAME is a
 ; special builtin.  Only a name some function has is asked about the specials.
