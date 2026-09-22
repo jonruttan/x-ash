@@ -140,7 +140,8 @@ suppresses splitting entirely.
 predicates `-e` `-f` `-d` `-s`, `-L`/`-h` for a symbolic link, `-p` `-S` `-b`
 `-c` for the other kinds, and `-u` `-g` `-k` for the setuid, setgid and
 sticky bits; `-t FD`; `-nt` and `-ot` by modification time; and the numeric
-comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`. Up to four words are read
+comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`, whose operands are decimal
+integers, blanks around them and a sign allowed. Up to four words are read
 by how many there are, as POSIX sets out; more are an expression, where `!`
 binds tighter than `-a` and `-a` tighter than `-o`, and `(` `)` group. An
 unknown operator is a usage error (status 2), not a silent false. `-r`, `-w`,
