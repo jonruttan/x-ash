@@ -308,15 +308,22 @@
     (do (%stderr "ash: " name ": is read only\n") (error (lit %sh-reported)))))
 
 ; Assign NAME where it already lives: the environment when it is exported,
-; the table otherwise.
+; the table otherwise.  Under `set -a` every name assigned is exported, so one
+; the table holds moves out of it.
 (def %sh-var-set!
   (fn (_ name value)
     (when (%sh-readonly? name) (%sh-readonly-refuse name))
-    (if (%sh-var-exported? name)
-      (do
-        (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
-        (sh-setenv name value))
-      (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))))
+    (match
+      ((%sh-var-exported? name)
+        (do
+          (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
+          (sh-setenv name value)))
+      ((null? %sh-opt-allexport)
+        (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))
+      (#t
+        (do
+          (set! %sh-vars (%sh-table-without name %sh-vars))
+          (sh-setenv name value))))))
 
 ; Unset NAME everywhere, the export attribute included.
 (def %sh-var-unset!
@@ -547,13 +554,14 @@
 ; --- Shell options ----------------------------------------------------------
 ;
 ; `set -e` exit on a failed command, `-u` treat an unset parameter as an error,
-; `-x` trace commands to stderr, `-o pipefail` fail a pipeline when any stage
-; fails.  `set +e` and friends turn them off, which is why each is a cell
-; rather than a flag set once.
+; `-x` trace commands to stderr, `-a` export every variable assigned, `-o
+; pipefail` fail a pipeline when any stage fails.  `set +e` and friends turn
+; them off, which is why each is a cell rather than a flag set once.
 (def %sh-opt-errexit ())
 (def %sh-opt-nounset ())
 (def %sh-opt-xtrace ())
 (def %sh-opt-noglob ())
+(def %sh-opt-allexport ())
 (def %sh-opt-pipefail ())
 
 ; errexit must not fire in a condition. `if false; then`, `false || echo`,
@@ -3385,7 +3393,9 @@
         (pair "x" (pair (fn (_ on?) (set! %sh-opt-xtrace on?))
                         (fn (_) %sh-opt-xtrace)))
         (pair "f" (pair (fn (_ on?) (set! %sh-opt-noglob on?))
-                        (fn (_) %sh-opt-noglob)))))
+                        (fn (_) %sh-opt-noglob)))
+        (pair "a" (pair (fn (_ on?) (set! %sh-opt-allexport on?))
+                        (fn (_) %sh-opt-allexport)))))
 
 (def %sh-set-opt-on! (fn (_ row on?) ((first row) on?)))
 (def %sh-set-opt-on? (fn (_ row) ((rest row))))
@@ -3408,7 +3418,7 @@
 ; letter.
 (def %sh-set-opt-names
   (list (pair "errexit" "e") (pair "nounset" "u")
-        (pair "xtrace" "x") (pair "noglob" "f")))
+        (pair "xtrace" "x") (pair "noglob" "f") (pair "allexport" "a")))
 
 ; The options that have a name and no letter.  `$-` is letters only, so these
 ; are not in it.
