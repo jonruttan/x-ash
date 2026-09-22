@@ -2502,6 +2502,13 @@
   (fn (_ s)
     (if (= (string-length s) 0) () (%all-digits-from? s 0 (string-length s)))))
 
+; The number S spells, S being digits only -- a descriptor, a here-document's
+; index -- read by the arithmetic reader's digit loop rather than `convert`,
+; which costs several times as much.  Nil when S is not all digits.
+(def %sh-digits-int
+  (fn (_ s)
+    (if (%all-digits? s) (%sh-ar-digits-value s 0 (string-length s) 10 0) ())))
+
 ; Which descriptor an operator redirects when the script names none.
 (def %sh-input-ops (list "<" "<>" "<&" "<<" "<<-"))
 
@@ -2514,8 +2521,8 @@
 ; (first (rest (rest redir))) at each of three sites.  Named, so the shape
 ; lives in one place and a reader does not have to count `rest`s.
 ;
-; FD arrives as a string when the script wrote one (`2> log`) and as an int
-; from %default-fd otherwise; %sh-redir-fd is where that is reconciled, once.
+; FD is an int: %default-fd's, or the digits the script wrote against the
+; operator (`2> log`), read once where the redirection is collected.
 (def %sh-redir (fn (_ op fd target) (list (lit sh-redir) op fd target)))
 
 ; The target of a redirection whose OPERATOR HAS JUST BEEN CONSUMED.  Both
@@ -2544,13 +2551,10 @@
         (error "parse error: redirect without operator")
         (do
           (%cursor-advance! cur)
-          (%sh-read-redir-target cur rop (%tok-word-val io)))))))
+          (%sh-read-redir-target cur rop (%sh-digits-int (%tok-word-val io))))))))
 (def %sh-redir-op     (fn (_ r) (first (rest r))))
 (def %sh-redir-target (fn (_ r) (first (rest (rest (rest r))))))
-(def %sh-redir-fd
-  (fn (_ r)
-    (let ((fd (first (rest (rest r)))))
-      (if (string? fd) (convert fd %int) fd))))
+(def %sh-redir-fd     (fn (_ r) (first (rest (rest r)))))
 
 ; A here-document's body reaches the command down a pipe.
 ;
@@ -2561,7 +2565,7 @@
 ; other side -- so the writer is reaped when the shell exits.
 (def %sh-setup-heredoc
   (fn (_ index fd)
-    (let ((h (%sh-heredoc-at (convert index %int))))
+    (let ((h (%sh-heredoc-at (%sh-digits-int index))))
       (if (null? h)
         ()
         (let ((text (if (%sh-heredoc-expand? h)
@@ -2626,7 +2630,7 @@
   (fn (_ target fd)
     (if (string=? target "-")
       (do (sh-close fd) #t)
-      (let ((from (convert target %int)))
+      (let ((from (%sh-digits-int target)))
         (if (null? from)
           (%sh-redir-failed "duplicate" target)
           (if (fx<? (sh-dup2 from fd) 0)
