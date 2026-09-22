@@ -116,8 +116,10 @@ dash's, and `local` outside a function is refused.
 
 `set -- a b c` replaces the positional parameters; `set -e` exits on a failed
 command, `-u` makes an unset parameter an error, `-x` traces to stderr, `-f`
-turns off pathname expansion, `-o pipefail` makes a pipeline fail when any
-stage does, and `set +e` (etc.) turns each back off. `-e` is suppressed where
+turns off pathname expansion, `-a` (`-o allexport`) exports every variable
+assigned while it is on — so `set -a; . ./settings; set +a` exports a file of
+assignments — `-o pipefail` makes a pipeline fail when any stage does, and
+`set +e` (etc.) turns each back off. `-e` is suppressed where
 a failure is the point — a condition, `!`, and any operand of an AND-OR list
 but the last. An `o` among a cluster's letters takes its name from the words
 after the cluster, so `set -euo pipefail` is the three.
