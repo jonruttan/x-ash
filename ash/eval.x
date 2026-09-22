@@ -2779,28 +2779,66 @@
           (let ((old (%sh-var-get "OLDPWD")))
             (if (or (null? old) (= (string-length old) 0)) () old)))))))
 
+; `-L` and `-P`, for cd and pwd, and letters of them run together: whether the
+; directory is read physically, the last letter deciding.  `--` ends them, and
+; `-` alone is cd's operand for OLDPWD.  Answers (physical? . words left).
+(def %sh-lp-options
+  (fn (self wds physical?)
+    (match
+      ((null? wds) (pair physical? wds))
+      ((string=? (first wds) "--") (pair physical? (rest wds)))
+      ((%sh-lp-word? (first wds))
+        (self (rest wds)
+              (= (string-ref (first wds) (- (string-length (first wds)) 1)) #\P)))
+      (#t (pair physical? wds)))))
+
+(def %sh-lp-word?
+  (fn (_ w)
+    (let ((n (string-length w)))
+      (match
+        ((fx<? n 2) ())
+        ((= (string-ref w 0) #\-) (%sh-lp-letters? w 1 n))
+        (#t ())))))
+
+(def %sh-lp-letters?
+  (fn (self w i n)
+    (match
+      ((not (fx<? i n)) #t)
+      ((= (string-ref w i) #\L) (self w (fx+ i 1) n))
+      ((= (string-ref w i) #\P) (self w (fx+ i 1) n))
+      (#t ()))))
+
+; The directory as getcwd resolves it, every symlink followed.
+(def %sh-cwd-physical
+  (fn (_) (let ((d (sh-getcwd))) (if (null? d) (%sh-cwd-logical) d))))
+
+; `cd -P` goes where the kernel takes the operand, `..` after a symlink
+; included, and PWD becomes the resolved path; `cd -L`, the default, folds the
+; operand against the logical directory by text.
 (def %sh-cd
-  (fn (_ wds)
-    (let ((dest (%sh-cd-destination wds)))
-      (if (null? dest)
-        (do (%stderr "ash: cd: OLDPWD not set\n") 1)
-        (let ((base (%sh-cwd-logical)))
-          (let ((target (%sh-cd-target dest base)))
-            (if (= (sh-chdir target) -1)
-              (do
-                (%stderr "ash: cd: " dest ": No such file or directory\n")
-                1)
-              (do
-                (%sh-var-set! "OLDPWD" base)
-                (%sh-var-set! "PWD" target)
-                (set! %sh-pwd-logical target)
-                ; `cd -` reports where it arrived, which is how a script can
-                ; use it without keeping its own copy of OLDPWD.
-                (unless (null? wds)
-                  (when (string=? (first wds) "-")
-                    (display target)
-                    (newline)))
-                0))))))))
+  (fn (_ args)
+    (let ((opts (%sh-lp-options args ())))
+      (let ((physical? (first opts)) (wds (rest opts)))
+        (let ((dest (%sh-cd-destination wds)))
+          (if (null? dest)
+            (do (%stderr "ash: cd: OLDPWD not set\n") 1)
+            (let ((base (%sh-cwd-logical)))
+              (let ((target (if physical? dest (%sh-cd-target dest base))))
+                (if (= (sh-chdir target) -1)
+                  (do
+                    (%stderr "ash: cd: " dest ": No such file or directory\n")
+                    1)
+                  (let ((now (if physical? (%sh-cwd-physical) target)))
+                    (%sh-var-set! "OLDPWD" base)
+                    (%sh-var-set! "PWD" now)
+                    (set! %sh-pwd-logical now)
+                    ; `cd -` reports where it arrived, which is how a script
+                    ; can use it without keeping its own copy of OLDPWD.
+                    (unless (null? wds)
+                      (when (string=? (first wds) "-")
+                        (display now)
+                        (newline)))
+                    0))))))))))
 
 ; `export NAME[=VALUE]...`, every operand.  A value is assigned before the name
 ; is exported, so `export x=1` and `x=1; export x` leave the same variable, and
@@ -3158,9 +3196,12 @@
 
 ; The logical directory, not getcwd's resolved one, and not $PWD either: a
 ; plain assignment to PWD leaves the shell's own idea of where it is alone.
+; `pwd -P` answers getcwd's.
 (def %sh-pwd
   (fn (_ wds)
-    (display (%sh-cwd-logical))
+    (display (if (first (%sh-lp-options wds ()))
+               (%sh-cwd-physical)
+               (%sh-cwd-logical)))
     (newline)
     0))
 

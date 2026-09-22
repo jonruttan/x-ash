@@ -100,6 +100,13 @@ for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
 variable's name must be a NAME — a letter or underscore, then letters, digits
 and underscores — and so must a function's name and a `for` loop's variable.
 
+`cd` and `pwd` work on the logical directory: the route the shell took, a
+symlink on it left as written, so `cd ..` from a link comes back past the
+link. `-P` asks for the physical one: `cd -P` goes where the kernel resolves
+the operand and sets PWD to the resolved path, and `pwd -P` prints it. `-L` is
+the default, the last of `-L` and `-P` decides, and `cd -` returns to OLDPWD
+and prints where it arrived.
+
 `command NAME [arg...]` runs NAME as though no function had that name, and
 `command -v NAME` answers what would run: a builtin, function or reserved word
 as written, a name holding a `/` as written, and anything else as the first
