@@ -923,12 +923,15 @@
 (def %sh-in-ifs? (fn (_ c ifs) (%sh-str-has-char? ifs c)))
 
 (def %sh-str-has-char?
-  (fn (_ text c)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i)
-          (if (>= i n) () (if (= (string-ref text i) c) #t (self (+ i 1))))))
-      (go 0))))
+  (fn (_ text c) (%sh-has-char-from? text c 0 (string-length text))))
+
+; Whether TEXT holds C at I or after, before N.
+(def %sh-has-char-from?
+  (fn (self text c i n)
+    (match
+      ((not (fx<? i n)) ())
+      ((= (string-ref text i) c) #t)
+      (#t (self text c (fx+ i 1) n)))))
 
 ; How far a run of IFS WHITESPACE reaches from I.
 (def %sh-ifs-ws-end
@@ -941,38 +944,45 @@
 
 (def %sh-ifs-split
   (fn (_ text)
-    (let ((ifs (%sh-ifs)))
+    (let ((ifs (%sh-ifs)) (n (string-length text)))
       (if (= (string-length ifs) 0)
         ; IFS="" -- no splitting.  An empty text is still no fields.
-        (if (= (string-length text) 0) () (list text))
-        (let ((n (string-length text)))
-          (def go
-            (fn (self i cur started acc)
-              (if (>= i n)
-                (reverse (if started (pair cur acc) acc))
-                (let ((c (string-ref text i)))
-                  (if (not (%sh-in-ifs? c ifs))
-                    (self (+ i 1)
-                      (string-append cur (substring text i (+ i 1))) #t acc)
-                    ; A delimiter.  Take any IFS whitespace around it, and at
-                    ; most ONE non-whitespace delimiter with it.
-                    (let ((after-ws (%sh-ifs-ws-end text i n ifs)))
-                      (let ((hard? (and (< after-ws n)
-                                        (and (%sh-in-ifs?
-                                               (string-ref text after-ws) ifs)
-                                             (not (%sh-ws-char?
-                                                    (string-ref text after-ws))))))
-                        )
-                        (let ((j (%sh-ifs-ws-end text
-                                   (if hard? (+ after-ws 1) after-ws) n ifs)))
-                          ; A whitespace-only delimiter never makes an empty
-                          ; field; a non-whitespace one does.
-                          (if (or hard? started)
-                            (self j "" (and hard? (< j n))
-                              (pair cur acc))
-                            (self j "" () acc))))))))))
-          ; A leading run of IFS whitespace is skipped rather than delimiting.
-          (go (%sh-ifs-ws-end text 0 n ifs) "" () ()))))))
+        (if (= n 0) () (list text))
+        ; A leading run of IFS whitespace is skipped rather than delimiting.
+        (let ((i (%sh-ifs-ws-end text 0 n ifs)))
+          (%sh-ifs-fields text i n ifs i () ()))))))
+
+; The fields of TEXT from I, walked by index: FROM is where the field in hand
+; began, and a field is cut out once, when it ends.  STARTED? is whether one is
+; in hand, which an empty field between two non-whitespace delimiters is.
+(def %sh-ifs-fields
+  (fn (self text i n ifs from started? acc)
+    (match
+      ((not (fx<? i n))
+        (reverse (if started? (pair (substring text from n) acc) acc)))
+      ((not (%sh-in-ifs? (string-ref text i) ifs))
+        (self text (fx+ i 1) n ifs (if started? from i) #t acc))
+      ; A delimiter.  Take any IFS whitespace around it, and at most ONE
+      ; non-whitespace delimiter with it.
+      (#t
+        (let ((after-ws (%sh-ifs-ws-end text i n ifs)))
+          (let ((hard? (%sh-ifs-hard-at? text after-ws n ifs)))
+            (let ((j (%sh-ifs-ws-end text (if hard? (fx+ after-ws 1) after-ws)
+                                     n ifs)))
+              ; A whitespace-only delimiter never makes an empty field; a
+              ; non-whitespace one does.
+              (if (if hard? #t started?)
+                (self text j n ifs j (if hard? (fx<? j n) ())
+                      (pair (substring text from i) acc))
+                (self text j n ifs j () acc)))))))))
+
+; Whether an IFS character that is not whitespace stands at I.
+(def %sh-ifs-hard-at?
+  (fn (_ text i n ifs)
+    (match
+      ((not (fx<? i n)) ())
+      ((%sh-ws-char? (string-ref text i)) ())
+      (#t (%sh-in-ifs? (string-ref text i) ifs)))))
 
 ; --- The word being built ---------------------------------------------------
 ;
