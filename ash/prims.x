@@ -240,6 +240,17 @@
 (def %file-read-all (method-of File (lit read-all)))
 (def %file-list-dir (method-of File (lit list-dir)))
 (def %assoc-entry (method-of Assoc (lit entry)))
+(def %str8-join (method-of Str8 (lit join)))
+
+; A word's pieces are joined each time one of its fields closes, and a field
+; is most often one piece, which Str8 join answers as it is; asking first
+; skips the call.
+(def %ash-join
+  (fn (_ sep pieces)
+    (match
+      ((null? pieces) "")
+      ((null? (rest pieces)) (first pieces))
+      (#t (%str8-join Str8 sep pieces)))))
 
 (def sh-fork (fn (_) (%sys-fork Sys)))
 (def sh-exec (fn (_ path args) (%sys-exec Sys path args)))
