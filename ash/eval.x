@@ -3049,12 +3049,39 @@
         (pair "-gt" (fn (_ a b) (> a b)))
         (pair "-ge" (fn (_ a b) (>= a b)))))
 
+; A numeric operator's answer, nil when OP is not one, or 2 when an operand
+; is no integer.
 (def %sh-test-num
   (fn (_ l op r)
     (let ((p (%sh-table-get op %sh-num-ops)))
       (if (null? p)
         ()
-        (%sh-bool (p (convert l %int) (convert r %int)))))))
+        (let ((a (%sh-test-int l)) (b (%sh-test-int r)))
+          (match
+            ((null? a) (%sh-test-usage l "integer expression expected"))
+            ((null? b) (%sh-test-usage r "integer expression expected"))
+            (#t (%sh-bool (p a b)))))))))
+
+; An integer operand: decimal digits with a sign in front and blanks around
+; them allowed, so `010` is ten and `0x10` is no integer.  Answers the value,
+; or nil for anything else.
+(def %sh-test-int
+  (fn (_ word)
+    (let ((n (%sh-ar-ws-before word (string-length word))))
+      (let ((i (%sh-ar-skip-ws word 0 n)))
+        (match
+          ((not (fx<? i n)) ())
+          ((= (string-ref word i) #\-) (%sh-test-digits word (fx+ i 1) n #t))
+          ((= (string-ref word i) #\+) (%sh-test-digits word (fx+ i 1) n ()))
+          (#t (%sh-test-digits word i n ())))))))
+
+(def %sh-test-digits
+  (fn (_ word i n negative?)
+    (match
+      ((not (fx<? i n)) ())
+      ((not (%all-digits-from? word i n)) ())
+      (#t (let ((v (%sh-ar-digits-value word i n 10 0)))
+            (if negative? (- 0 v) v))))))
 
 (def %sh-test-1
   (fn (_ word) (%sh-bool (> (string-length word) 0))))
