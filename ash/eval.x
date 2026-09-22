@@ -3985,9 +3985,9 @@
       ((%sh-str-has-char? name #\/)
         (if (%sh-executable? name) (pair (lit file) name) ()))
       ((%reserved-word? name) (pair (lit keyword) name))
-      ((%sh-builtin? name) (pair (lit builtin) name))
-      ((not (null? (%sh-fn-lookup name %sh-functions)))
+      ((%sh-fn-wins? name (%sh-fn-lookup name %sh-functions))
         (pair (lit function) name))
+      ((%sh-builtin? name) (pair (lit builtin) name))
       (#t
         (let ((p (%sh-path-of name (%sh-split-char (%sh-var-value "PATH") #\:))))
           (if (null? p) () (pair (lit file) p)))))))
@@ -4379,15 +4379,21 @@
           (args (rest remaining)))
       (let ((body (%sh-fn-lookup name fns)))
         (cond
-          ; A function wins over an external and loses to a builtin, the
-          ; POSIX order.  FNS is which functions are in reach: `command`
-          ; passes none, which is the whole of what it does differently.
+          ; A function wins over a regular builtin and an external, and
+          ; loses to a special builtin, the POSIX order.  FNS is which
+          ; functions are in reach: `command` passes none, which is the
+          ; whole of what it does differently.  Redirections on a function
+          ; call apply for the whole body, and the shell's own descriptors
+          ; must survive it -- the same save/apply/restore a builtin gets.
+          ((%sh-fn-wins? name body) (%sh-run-fn-redir body args redirs))
           ((%sh-builtin? name) (%sh-run-builtin-redir name args redirs))
-          ; Redirections on a function call apply for the whole body, and
-          ; the shell's own descriptors must survive it -- the same
-          ; save/apply/restore a builtin gets.
-          ((not (null? body)) (%sh-run-fn-redir body args redirs))
           (else (%sh-run-external name args redirs)))))))
+
+; Whether a function found as BODY runs for NAME: it does unless NAME is a
+; special builtin.  Only a name some function has is asked about the specials.
+(def %sh-fn-wins?
+  (fn (_ name body)
+    (if (null? body) () (not (%sh-special-builtin? name)))))
 
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error

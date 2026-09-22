@@ -70,8 +70,11 @@ Functions: `name()` followed by any compound command — `{ ... }`, `( ... )`,
 `if`, `for`, `while`, `until` or `case` — and the redirections written after
 it, which are expanded at each call. `$1`…, `$#` and `$@` are scoped to the
 call and restored afterwards, `return [n]` leaves early, and `shift [n]`
-moves the arguments along. A function shadows an external of the same name
-and is shadowed by a builtin.
+moves the arguments along. A function shadows a builtin or an external of the
+same name, except the special builtins POSIX lists (`:` `.` `break` `continue`
+`eval` `exec` `exit` `export` `readonly` `return` `set` `shift` `times` `trap`
+`unset`), which run whatever functions there are; `command NAME` runs the
+builtin or external.
 
 Here-documents: `<<EOF` and `<<-EOF` (which strips leading tabs), with the body
 expanded unless the delimiter is quoted. The body ends at the delimiter with

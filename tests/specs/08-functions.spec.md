@@ -75,10 +75,10 @@
 ### a function beats an external of the same name
 
 ```sh
-(do (sh-eval "true() { echo shadowed; }; echo ok") ())
+(do (sh-eval "( ls() { echo shadowed; }; ls )") ())
 ```
 ---
-    ok
+    shadowed
 
 ## sh-eval return and shift
 
