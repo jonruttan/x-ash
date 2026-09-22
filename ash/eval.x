@@ -2162,96 +2162,105 @@
 ; word, made on each call.
 (def %sh-expand-walk
   (fn (_ s n mode0 split? assign? start a0)
-    (let ((eq (if assign? (%sh-first-eq s 0 n) -1)))
+    (do
+      (def eq (if assign? (%sh-first-eq s 0 n) -1))
+      ; Every character of every word comes through here, so the walk steps on
+      ; the integer doors and asks with `match`.
       (def go
         (fn (self i mode a)
-          (if (>= i n)
+          (if (not (fx<? i n))
             (%sh-acc-finish a)
-            (let ((c (string-ref s i)))
-              (cond
+            (do
+              (def c (string-ref s i))
+              (match
                 ; Inside single quotes: literal until the closing quote.
                 ((= mode %sh-mode-sq)
                   (if (= c #\')
-                    (self (+ i 1) %sh-mode-bare a)
-                    (let ((r (%sh-plain-run s i n mode () ())))
-                      (let ((e (%sh-run-end r)))
-                        (self e mode
-                          (%sh-acc-add-literal a (substring s i e)
-                            (%sh-run-meta? r)))))))
+                    (self (fx+ i 1) %sh-mode-bare a)
+                    (do
+                      (def r (%sh-plain-run s i n mode () ()))
+                      (def e (%sh-run-end r))
+                      (self e mode
+                        (%sh-acc-add-literal a (substring s i e)
+                          (%sh-run-meta? r))))))
                 ; A quote mark switches region and starts a field.
-                ((and (= mode %sh-mode-bare) (= c #\'))
-                  (self (+ i 1) %sh-mode-sq (%sh-acc-open a)))
-                ((and (= mode %sh-mode-bare) (= c #\"))
-                  (self (+ i 1) %sh-mode-dq (%sh-acc-open a)))
-                ((and (= mode %sh-mode-dq) (= c #\"))
-                  (self (+ i 1) %sh-mode-bare (%sh-acc-open a)))
+                ((if (= c #\') (= mode %sh-mode-bare) ())
+                  (self (fx+ i 1) %sh-mode-sq (%sh-acc-open a)))
+                ((if (= c #\") (= mode %sh-mode-bare) ())
+                  (self (fx+ i 1) %sh-mode-dq (%sh-acc-open a)))
+                ((if (= c #\") (= mode %sh-mode-dq) ())
+                  (self (fx+ i 1) %sh-mode-bare (%sh-acc-open a)))
                 ; A backslash emits what it protects and resumes past it, so a
                 ; `$` it protected stays a `$`. A trailing backslash protects
                 ; nothing and stands for itself; it is claimed here, because the
                 ; plain-run scanner cannot consume a backslash and the arm below
                 ; needs a character to protect.
-                ((and (= c #\\) (>= (+ i 1) n))
-                  (self (+ i 1) mode
-                    (%sh-acc-add-literal a (substring s i (+ i 1)) #t)))
-                ((and (= c #\\) (< (+ i 1) n))
-                  (let ((d (string-ref s (+ i 1))))
-                    (let ((text (if (or (= mode %sh-mode-bare)
-                                        (%sh-dq-escapable? d))
-                                  (substring s (+ i 1) (+ i 2))
-                                  (substring s i (+ i 2)))))
-                      (self (+ i 2) mode
-                        (%sh-acc-add-literal a text
-                          (%sh-has-glob-meta? text))))))
+                ((if (= c #\\) (not (fx<? (fx+ i 1) n)) ())
+                  (self (fx+ i 1) mode
+                    (%sh-acc-add-literal a (substring s i (fx+ i 1)) #t)))
+                ((= c #\\)
+                  (do
+                    (def d (string-ref s (fx+ i 1)))
+                    (def text
+                      (if (if (= mode %sh-mode-bare) #t (%sh-dq-escapable? d))
+                        (substring s (fx+ i 1) (fx+ i 2))
+                        (substring s i (fx+ i 2))))
+                    (self (fx+ i 2) mode
+                      (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
                 ; The older backtick substitution.
                 ((= c #\`)
-                  (let ((e (%sh-bt-end s (+ i 1) n)))
-                    (if (< e 0)
-                      (self (+ i 1) mode
-                        (%sh-acc-add a (substring s i (+ i 1)) ()))
-                      (self (+ e 1) mode
+                  (do
+                    (def e (%sh-bt-end s (fx+ i 1) n))
+                    (if (fx<? e 0)
+                      (self (fx+ i 1) mode
+                        (%sh-acc-add a (substring s i (fx+ i 1)) ()))
+                      (self (fx+ e 1) mode
                         (%sh-add-expansion a mode
                           (%sh-cmd-subst
-                            (%sh-bt-unescape (substring s (+ i 1) e)))
+                            (%sh-bt-unescape (substring s (fx+ i 1) e)))
                           split?)))))
                 ((= c #\$) (%sh-expand-dollar self s i n mode a split?))
                 ; A tilde where one may expand; an ordinary character where
                 ; not.  It is asked here rather than scanned for beforehand
                 ; because this is the only place that knows the `~` is bare.
-                ((and (= c #\~) (= mode %sh-mode-bare))
-                  (let ((home (%sh-tilde-home s i n assign? eq)))
+                ((if (= c #\~) (= mode %sh-mode-bare) ())
+                  (do
+                    (def home (%sh-tilde-home s i n assign? eq))
                     (if (null? home)
-                      (self (+ i 1) mode (%sh-acc-add a "~" ()))
+                      (self (fx+ i 1) mode (%sh-acc-add a "~" ()))
                       ; The result is LITERAL: a home directory with a space
                       ; in it is one field, and one with a `*` is not a
                       ; pattern.
-                      (self (+ i 1) mode
+                      (self (fx+ i 1) mode
                         (%sh-acc-add-literal a home
                           (%sh-has-glob-meta? home))))))
                 ; Ordinary text goes in a run at a time: a plain word is one
                 ; substring rather than one per character. A bare `*` is the
                 ; glob; the same character inside quotes is not, so the run is
                 ; escaped or not by the mode it was read in.
-                (else
-                  (let ((r (%sh-plain-run s i n mode ()
-                             (and assign? (= mode %sh-mode-bare)))))
-                    (let ((e (%sh-run-end r)) (meta? (%sh-run-meta? r)))
-                      ; A run of nothing would not advance, which would hang
-                      ; rather than answer. Every non-plain character is
-                      ; claimed by an earlier arm, so this is unreachable and
-                      ; says so if it ever is.
-                      (when (= e i)
-                        (error "internal: expansion made no progress"))
-                      (let ((run (substring s i e)))
-                        (self e mode
-                          (match
-                            ; The word of `${x:-word}` in place is split
-                            ; where it is not quoted, its literal text as
-                            ; well as its expansions (see %sh-add-word).
-                            ((= mode %sh-mode-bare)
-                              (if (eq? split? (lit fields))
-                                (%sh-add-split a run)
-                                (%sh-acc-add a run meta?)))
-                            (#t (%sh-acc-add-literal a run meta?)))))))))))))
+                (#t
+                  (do
+                    (def r (%sh-plain-run s i n mode ()
+                             (if assign? (= mode %sh-mode-bare) ())))
+                    (def e (%sh-run-end r))
+                    (def meta? (%sh-run-meta? r))
+                    ; A run of nothing would not advance, which would hang
+                    ; rather than answer. Every non-plain character is
+                    ; claimed by an earlier arm, so this is unreachable and
+                    ; says so if it ever is.
+                    (when (= e i)
+                      (error "internal: expansion made no progress"))
+                    (def run (substring s i e))
+                    (self e mode
+                      (match
+                        ; The word of `${x:-word}` in place is split
+                        ; where it is not quoted, its literal text as
+                        ; well as its expansions (see %sh-add-word).
+                        ((= mode %sh-mode-bare)
+                          (if (eq? split? (lit fields))
+                            (%sh-add-split a run)
+                            (%sh-acc-add a run meta?)))
+                        (#t (%sh-acc-add-literal a run meta?)))))))))))
       (go start mode0 a0))))
 
 ; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
