@@ -554,14 +554,16 @@
 ; --- Shell options ----------------------------------------------------------
 ;
 ; `set -e` exit on a failed command, `-u` treat an unset parameter as an error,
-; `-x` trace commands to stderr, `-a` export every variable assigned, `-o
-; pipefail` fail a pipeline when any stage fails.  `set +e` and friends turn
-; them off, which is why each is a cell rather than a flag set once.
+; `-x` trace commands to stderr, `-a` export every variable assigned, `-C`
+; refuse `>` over a regular file, `-o pipefail` fail a pipeline when any stage
+; fails.  `set +e` and friends turn them off, which is why each is a cell
+; rather than a flag set once.
 (def %sh-opt-errexit ())
 (def %sh-opt-nounset ())
 (def %sh-opt-xtrace ())
 (def %sh-opt-noglob ())
 (def %sh-opt-allexport ())
+(def %sh-opt-noclobber ())
 (def %sh-opt-pipefail ())
 
 ; errexit must not fire in a condition. `if false; then`, `false || echo`,
@@ -2628,6 +2630,8 @@
           ((string=? op "<")
             (%sh-redir-onto (sh-open-read target) fd "open" target))
           ((string=? op ">")
+            (%sh-redir-onto (%sh-open-output target) fd "create" target))
+          ((string=? op ">|")
             (%sh-redir-onto (sh-open-write target) fd "create" target))
           ((string=? op ">>")
             (%sh-redir-onto (sh-open-append target) fd "create" target))
@@ -2636,6 +2640,18 @@
           ((string=? op ">&") (%sh-redir-dup target fd))
           ((string=? op "<&") (%sh-redir-dup target fd))
           (#t #t))))))
+
+; `>`'s file.  Under `set -C` a regular file already there is refused, as dash
+; and bash refuse it, while a file that is not there is created only if it is
+; still not there when opened, and anything else -- /dev/null, a terminal -- is
+; written to as it is.  `>|` opens as `>` does without the option.
+(def %sh-open-output
+  (fn (_ path)
+    (match
+      ((null? %sh-opt-noclobber) (sh-open-write path))
+      ((null? (sh-path-kind path)) (sh-open-new path))
+      ((eq? (sh-path-kind path) (lit file)) (- 0 1))
+      (#t (sh-open-existing path)))))
 
 ; All of them, in order, and nil as soon as one could not be made.
 (def %sh-setup-redirs
@@ -3395,7 +3411,9 @@
         (pair "f" (pair (fn (_ on?) (set! %sh-opt-noglob on?))
                         (fn (_) %sh-opt-noglob)))
         (pair "a" (pair (fn (_ on?) (set! %sh-opt-allexport on?))
-                        (fn (_) %sh-opt-allexport)))))
+                        (fn (_) %sh-opt-allexport)))
+        (pair "C" (pair (fn (_ on?) (set! %sh-opt-noclobber on?))
+                        (fn (_) %sh-opt-noclobber)))))
 
 (def %sh-set-opt-on! (fn (_ row on?) ((first row) on?)))
 (def %sh-set-opt-on? (fn (_ row) ((rest row))))
@@ -3418,7 +3436,8 @@
 ; letter.
 (def %sh-set-opt-names
   (list (pair "errexit" "e") (pair "nounset" "u")
-        (pair "xtrace" "x") (pair "noglob" "f") (pair "allexport" "a")))
+        (pair "xtrace" "x") (pair "noglob" "f") (pair "allexport" "a")
+        (pair "noclobber" "C")))
 
 ; The options that have a name and no letter.  `$-` is letters only, so these
 ; are not in it.

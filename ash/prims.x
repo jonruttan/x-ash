@@ -33,7 +33,8 @@
   string=? string? make-string list->string length reverse append map filter
   take drop nth last fx<? fx+
   sh-fork sh-exec sh-wait sh-exit sh-getpid
-  sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-close sh-dup2 sh-pipe
+  sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-open-new
+  sh-open-existing sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
   sh-path-kind sh-path-size sh-path-mode sh-path-lkind sh-path-mtime
   sh-read-file sh-read-line sh-read-line-fd
@@ -229,6 +230,11 @@
   (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit append)) 438)))
 (def sh-open-rdwr
   (fn (_ path) (File open path (list (lit rdwr) (lit creat)) 438)))
+; For `set -C`: a file created only when none is there, and one already there
+; opened as it is.
+(def sh-open-new
+  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit excl)) 438)))
+(def sh-open-existing (fn (_ path) (File open path (lit wronly))))
 (def sh-close (fn (_ fd) (Sys close fd)))
 (def sh-dup2 (fn (_ from to) (Sys dup2 from to)))
 
