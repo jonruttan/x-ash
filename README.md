@@ -83,15 +83,15 @@ its quoting removed, and quoting any part of it (`'EOF'`, `"EOF"`, `\EOF`,
 a command substitution in double quotes, as in `x="$(cat <<EOF`, and `<<`
 inside a quoted string, over however many lines, is text.
 
-Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
-— and on a builtin the descriptors are put back afterwards, so `echo x > log`
-does not leave the shell writing to `log`. A redirection written after a
-compound (`for ...; done > log`) applies to the whole construct. `exec` with
-redirections and no command applies them to the shell itself. A number in
-front of the operator names the descriptor: after `exec 3<file`, `read x <&3`
-reads the file's next line. A file `>` or `>>` creates has permission 0666
-less the umask, and one already there keeps its mode; `<>` opens its file for
-reading and writing, creating it if need be.
+Redirection: `<`, `>`, `>|`, `>>`, `<>`, `>&`, `<&`, on builtins as well as
+externals — and on a builtin the descriptors are put back afterwards, so
+`echo x > log` does not leave the shell writing to `log`. A redirection
+written after a compound (`for ...; done > log`) applies to the whole
+construct. `exec` with redirections and no command applies them to the shell
+itself. A number in front of the operator names the descriptor: after
+`exec 3<file`, `read x <&3` reads the file's next line. A file `>` or `>>`
+creates has permission 0666 less the umask, and one already there keeps its
+mode; `<>` opens its file for reading and writing, creating it if need be.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
@@ -118,9 +118,10 @@ dash's, and `local` outside a function is refused.
 command, `-u` makes an unset parameter an error, `-x` traces to stderr, `-f`
 turns off pathname expansion, `-a` (`-o allexport`) exports every variable
 assigned while it is on — so `set -a; . ./settings; set +a` exports a file of
-assignments — `-o pipefail` makes a pipeline fail when any stage does, and
-`set +e` (etc.) turns each back off. `-e` is suppressed where
-a failure is the point — a condition, `!`, and any operand of an AND-OR list
+assignments — `-C` (`-o noclobber`) keeps `>` from writing over a regular
+file already there, which `>|` still does, `-o pipefail` makes a pipeline
+fail when any stage does, and `set +e` (etc.) turns each back off. `-e` is
+suppressed where a failure is the point — a condition, `!`, and any operand of an AND-OR list
 but the last. An `o` among a cluster's letters takes its name from the words
 after the cluster, so `set -euo pipefail` is the three.
 
