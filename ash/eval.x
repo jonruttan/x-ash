@@ -1114,9 +1114,10 @@
 
 (def %sh-char-in?
   (fn (self c chars)
-    (if (null? chars)
-      ()
-      (if (= c (first chars)) #t (self c (rest chars))))))
+    (match
+      ((null? chars) ())
+      ((= c (first chars)) #t)
+      (#t (self c (rest chars))))))
 
 ; The rest of that set: metacharacters that are not wildcards -- the backslash,
 ; and anything that ever joins it.  BELOW %sh-char-in? ON PURPOSE: these three
@@ -1127,18 +1128,18 @@
 
 ; Scan first, build only if needed: text out of an expansion has not been
 ; through the walk, so it is the one thing still worth scanning -- for escaping
-; if it goes in quoted, or for a pattern if bare.
+; if it goes in quoted, or for a pattern if bare.  The scan runs per character
+; of every value, so it steps on the integer doors.
 (def %sh-has-char-in?
-  (fn (_ text chars)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i)
-          (if (>= i n)
-            ()
-            (if (%sh-char-in? (string-ref text i) chars)
-              #t
-              (self (+ i 1))))))
-      (go 0))))
+  (fn (_ text chars) (%sh-has-char-in-from? text chars 0 (string-length text))))
+
+; Whether TEXT holds one of CHARS at I or after, before N.
+(def %sh-has-char-in-from?
+  (fn (self text chars i n)
+    (match
+      ((not (fx<? i n)) ())
+      ((%sh-char-in? (string-ref text i) chars) #t)
+      (#t (self text chars (fx+ i 1) n)))))
 
 (def %sh-has-glob-meta? (fn (_ text) (%sh-has-char-in? text %sh-glob-meta)))
 (def %sh-has-active-glob? (fn (_ text) (%sh-has-char-in? text %sh-glob-active)))
