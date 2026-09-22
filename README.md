@@ -34,7 +34,8 @@ Arithmetic expansion: `$((...))` — integers in decimal, octal (`010`) or
 hexadecimal (`0x10`), `+ - * / %` (division truncates toward zero),
 comparisons, the bitwise `& | ^ ~` and the shifts `<< >>`, `&&` / `||` / `!`,
 the conditional `c ? a : b`, parentheses, and bare names read as their values
-(unset or non-numeric is zero). `&&`, `||` and the conditional evaluate only
+(unset or non-numeric is zero; blanks around a value and a sign in front of it
+are allowed, so a count `wc` pads still reads). `&&`, `||` and the conditional evaluate only
 the side they take, so `$((n && total/n))` guards its own division. A counting
 loop is `i=$((i+1))`.
 

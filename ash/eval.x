@@ -1729,6 +1729,41 @@
         (#t (let ((v (guard (_ ()) (convert text %int))))
               (if (null? v) 0 v)))))))
 
+; A variable's value is read as an integer constant with blanks around it and a
+; sign in front allowed, since $((n)) answers what $(($n)) does: `n=$(wc -l <
+; f)` holds "       3" where wc pads its count.  A bare constant, the usual
+; value, is read as it stands.
+(def %sh-ar-value-num
+  (fn (_ text)
+    (let ((len (string-length text)))
+      (match
+        ((= len 0) 0)
+        ((%sh-digit? (string-ref text 0))
+          (if (%sh-ws-char? (string-ref text (- len 1)))
+            (%sh-ar-padded-num text len)
+            (%sh-ar-num text)))
+        (#t (%sh-ar-padded-num text len))))))
+
+; The index just past the last character of S before N that is not a blank.
+(def %sh-ar-ws-before
+  (fn (self s n)
+    (match
+      ((not (fx<? 0 n)) n)
+      ((%sh-ws-char? (string-ref s (- n 1))) (self s (- n 1)))
+      (#t n))))
+
+(def %sh-ar-padded-num
+  (fn (_ text len)
+    (let ((n (%sh-ar-ws-before text len)))
+      (let ((i (%sh-ar-skip-ws text 0 n)))
+        (match
+          ((not (fx<? i n)) 0)
+          ((= (string-ref text i) #\-)
+            (- 0 (%sh-ar-num (substring text (fx+ i 1) n))))
+          ((= (string-ref text i) #\+)
+            (%sh-ar-num (substring text (fx+ i 1) n)))
+          (#t (%sh-ar-num (substring text i n))))))))
+
 (def %sh-ar-binary ())
 (def %sh-ar-climb ())
 (def %sh-ar-primary ())
@@ -1768,7 +1803,9 @@
                   (%sh-ar (if live? v 0) e))))
             ((%sh-name-start? c)
               (let ((e (%sh-name-end s i n)))
-                (%sh-ar (if live? (%sh-ar-num (%sh-var-value (substring s i e))) 0)
+                (%sh-ar (if live?
+                          (%sh-ar-value-num (%sh-var-value (substring s i e)))
+                          0)
                         e)))
             ; Anything else is not arithmetic; step over it rather than loop.
             (else (%sh-ar 0 (+ i 1)))))))))
@@ -1908,7 +1945,7 @@
         (let ((value (if (null? (rest op))
                        (%sh-ar-val right)
                        ((%sh-table-get (rest op) %sh-ar-ops)
-                        (%sh-ar-num (%sh-var-value name))
+                        (%sh-ar-value-num (%sh-var-value name))
                         (%sh-ar-val right)))))
           (%sh-var-set! name (convert value %string))
           (%sh-ar value (%sh-ar-pos right)))))))
