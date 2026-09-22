@@ -209,45 +209,76 @@
 (def set-first! %set-first!)
 
 ; --- The shell's syscalls ----------------------------------------------------
-; One-line forwards to the Sys and File classes, which carry every process and
-; file door, under a name a shell recognises. The sh- prefix is kept because
-; eval.x reads as a shell for it: (sh-dup2 fh fd) in a redirection is the
-; shell's vocabulary, not the platform's.
-(def sh-fork (fn (_) (Sys fork)))
-(def sh-exec (fn (_ path args) (Sys exec path args)))
-(def sh-wait (fn (_ pid) (Sys wait pid)))
-(def sh-exit (fn (_ status) (Sys exit status)))
-(def sh-getpid (fn (_) (Sys getpid)))
+; Forwards to the Sys and File classes, which carry every process and file
+; door, under a name a shell recognises. The sh- prefix is kept because eval.x
+; reads as a shell for it: (sh-dup2 fh fd) in a redirection is the shell's
+; vocabulary, not the platform's.
+;
+; Each method is resolved once, through method-of, the door class.x keeps for
+; hot paths.  A (Sys dup2 ...) call finds its method in the class's table
+; every time, and two methods of one class in turn -- dup2 and close, which
+; every redirection runs -- cost ~9K objects a call that way, against ~1.4K
+; for the method resolved.
+(def %sys-fork (method-of Sys (lit fork)))
+(def %sys-exec (method-of Sys (lit exec)))
+(def %sys-wait (method-of Sys (lit wait)))
+(def %sys-exit (method-of Sys (lit exit)))
+(def %sys-getpid (method-of Sys (lit getpid)))
+(def %sys-close (method-of Sys (lit close)))
+(def %sys-dup2 (method-of Sys (lit dup2)))
+(def %sys-pipe (method-of Sys (lit pipe)))
+(def %sys-getenv (method-of Sys (lit getenv)))
+(def %sys-setenv (method-of Sys (lit setenv)))
+(def %sys-unsetenv (method-of Sys (lit unsetenv)))
+(def %sys-chdir (method-of Sys (lit chdir)))
+(def %sys-getcwd (method-of Sys (lit getcwd)))
+(def %sys-fd-read (method-of Sys (lit fd-read)))
+(def %sys-fd-write (method-of Sys (lit fd-write)))
+(def %file-open (method-of File (lit open)))
+(def %file-stat (method-of File (lit stat)))
+(def %file-lstat (method-of File (lit lstat)))
+(def %file-read-all (method-of File (lit read-all)))
+(def %file-list-dir (method-of File (lit list-dir)))
+(def %assoc-entry (method-of Assoc (lit entry)))
+
+(def sh-fork (fn (_) (%sys-fork Sys)))
+(def sh-exec (fn (_ path args) (%sys-exec Sys path args)))
+(def sh-wait (fn (_ pid) (%sys-wait Sys pid)))
+(def sh-exit (fn (_ status) (%sys-exit Sys status)))
+(def sh-getpid (fn (_) (%sys-getpid Sys)))
 
 ; A redirection's file is opened by (File open), which hands the permission
 ; bits to the kernel: a file it creates is 0666 (438) less the umask, as a
 ; shell's is, and a file already there keeps its mode.  (Sys open-write) and
 ; (Sys open-append) set every file they open to 0666.
-(def sh-open-read (fn (_ path) (File open path (lit rdonly))))
+(def sh-open-read (fn (_ path) (%file-open File path (lit rdonly))))
 (def sh-open-write
-  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit trunc)) 438)))
+  (fn (_ path)
+    (%file-open File path (list (lit wronly) (lit creat) (lit trunc)) 438)))
 (def sh-open-append
-  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit append)) 438)))
+  (fn (_ path)
+    (%file-open File path (list (lit wronly) (lit creat) (lit append)) 438)))
 (def sh-open-rdwr
-  (fn (_ path) (File open path (list (lit rdwr) (lit creat)) 438)))
+  (fn (_ path) (%file-open File path (list (lit rdwr) (lit creat)) 438)))
 ; For `set -C`: a file created only when none is there, and one already there
 ; opened as it is.
 (def sh-open-new
-  (fn (_ path) (File open path (list (lit wronly) (lit creat) (lit excl)) 438)))
-(def sh-open-existing (fn (_ path) (File open path (lit wronly))))
-(def sh-close (fn (_ fd) (Sys close fd)))
-(def sh-dup2 (fn (_ from to) (Sys dup2 from to)))
+  (fn (_ path)
+    (%file-open File path (list (lit wronly) (lit creat) (lit excl)) 438)))
+(def sh-open-existing (fn (_ path) (%file-open File path (lit wronly))))
+(def sh-close (fn (_ fd) (%sys-close Sys fd)))
+(def sh-dup2 (fn (_ from to) (%sys-dup2 Sys from to)))
 
 ; (Sys pipe) answers a (read-fd . write-fd) pair, which is what
 ; %sh-pipe-create expects.
-(def sh-pipe (fn (_) (Sys pipe)))
+(def sh-pipe (fn (_) (%sys-pipe Sys)))
 
-(def sh-getenv (fn (_ name) (Sys getenv name)))
-(def sh-setenv (fn (_ name value) (Sys setenv name value)))
-(def sh-chdir (fn (_ dir) (Sys chdir dir)))
+(def sh-getenv (fn (_ name) (%sys-getenv Sys name)))
+(def sh-setenv (fn (_ name value) (%sys-setenv Sys name value)))
+(def sh-chdir (fn (_ dir) (%sys-chdir Sys dir)))
 
-(def sh-unsetenv (fn (_ name) (Sys unsetenv name)))
-(def sh-getcwd (fn (_) (Sys getcwd)))
+(def sh-unsetenv (fn (_ name) (%sys-unsetenv Sys name)))
+(def sh-getcwd (fn (_) (%sys-getcwd Sys)))
 
 ; --- What `test` needs to know about a path ------------------------------
 ; The kind symbol ('file, 'dir, 'link, ...) or nil when the path is not there
@@ -255,27 +286,34 @@
 ; rather than a raise.  File stat raises a tag 'io Err on failure, which for
 ; a shell test is an ANSWER, not an error.
 (def sh-path-kind
-  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit kind) (File stat path))))))
+  (fn (_ path)
+    (guard (_ ()) (rest (%assoc-entry Assoc (lit kind) (%file-stat File path))))))
 
 (def sh-path-size
-  (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit size) (File stat path))))))
+  (fn (_ path)
+    (guard (_ 0) (rest (%assoc-entry Assoc (lit size) (%file-stat File path))))))
 
 ; The permission bits, or 0 for a path that is not there -- what `command -v`
 ; asks to tell a program on PATH from a file of the same name.
 (def sh-path-mode
-  (fn (_ path) (guard (_ 0) (rest (Assoc entry (lit mode) (File stat path))))))
+  (fn (_ path)
+    (guard (_ 0) (rest (%assoc-entry Assoc (lit mode) (%file-stat File path))))))
 
 ; The kind of the path itself, a symbolic link reporting 'link rather than
 ; its target's kind -- what `test -L` asks -- or nil when nothing is there.
 (def sh-path-lkind
-  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit kind) (File lstat path))))))
+  (fn (_ path)
+    (guard (_ ())
+      (rest (%assoc-entry Assoc (lit kind) (%file-lstat File path))))))
 
 ; The last modification, in whole seconds, or nil when nothing is there --
 ; what `test -nt` and `-ot` compare.
 (def sh-path-mtime
-  (fn (_ path) (guard (_ ()) (rest (Assoc entry (lit mtime) (File stat path))))))
+  (fn (_ path)
+    (guard (_ ())
+      (rest (%assoc-entry Assoc (lit mtime) (%file-stat File path))))))
 
-(def sh-read-file (fn (_ path) (File read-all path)))
+(def sh-read-file (fn (_ path) (%file-read-all File path)))
 
 ; --- One line from the current input, or nil at EOF ----------------------
 ; bytes->str, NOT list->string: the accumulator holds raw input BYTES, and the
@@ -327,7 +365,7 @@
   (fn (_ fd)
     (def go
       (fn (self acc)
-        (let ((b (Sys fd-read fd 1)))
+        (let ((b (%sys-fd-read Sys fd 1)))
           (if (null? b)
             (do
               (set! sh-read-hit-eof #t)
@@ -354,7 +392,7 @@
   (fn (_ fd)
     (def go
       (fn (self chunks)
-        (let ((b (Sys fd-read fd 4096)))
+        (let ((b (%sys-fd-read Sys fd 4096)))
           (if (null? b) chunks (self (pair b chunks))))))
     (bytes->str (%sh-join-chunks (go ()) ()))))
 
@@ -367,8 +405,8 @@
   (fn (_ xs) (List sort (fn (_ a b) (Str8 <? a b)) xs)))
 
 (def sh-list-dir
-  (fn (_ path) (sh-sort-strings (guard (_ ()) (File list-dir path)))))
+  (fn (_ path) (sh-sort-strings (guard (_ ()) (%file-list-dir File path)))))
 
 ; Raw write to a descriptor -- what a here-document's writer child pushes into
 ; the pipe.  (Sys fd-write) answers the byte count; the shell has no use for it.
-(def sh-fd-write (fn (_ fd text) (Sys fd-write fd text)))
+(def sh-fd-write (fn (_ fd text) (%sys-fd-write Sys fd text)))
