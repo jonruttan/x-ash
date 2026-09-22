@@ -2660,29 +2660,52 @@
 ; A builtin's redirections are applied and then undone. A builtin runs in the
 ; shell itself, so `echo x > out.txt` must not leave the shell writing to
 ; out.txt afterwards -- unlike an external, whose redirections are set up in
-; the child after the fork. This is the same shape as the pipeline's stdin
-; handling below: save the descriptor, redirect, run, restore.
+; the child after the fork. A function call's and a compound's are undone the
+; same way, and so is the stdin a pipeline moves: save the descriptor,
+; redirect, run, restore.
 ;
-; Descriptors are saved one at a time at a fixed offset, so the restore is
-; exact: fd N is parked at N + %sh-fd-save-base for the duration. The base
-; clears the descriptors a script plausibly names itself (and x.sh's fd 3, and
-; %sh-stdin-save at 19).
-(def %sh-fd-save-base 30)
+; These nest -- `log() { echo "$*" >&2; }; main >out 2>&1` applies echo's >&2
+; while main's are in force -- so each descriptor a redirection changes is
+; parked on a descriptor of its own, taken in turn from %sh-fd-park-base up
+; and handed back as the redirection is undone, innermost first.  The base
+; clears the descriptors a script plausibly names itself, and x.sh's fd 3.  A
+; descriptor that was not open is parked as nil, and closed again after.
+(def %sh-fd-park-base 30)
+(def %sh-fd-park-next %sh-fd-park-base)
 
-(def %sh-save-fds
-  (fn (self redirs)
-    (unless (null? redirs)
-      (let ((fd (%sh-redir-fd (first redirs))))
-        (sh-dup2 fd (+ %sh-fd-save-base fd))
-        (self (rest redirs))))))
+; Park each of FDS.  Answers ((fd . parked) ...) latest first, the order they
+; are put back in, so an fd named twice gets its first value back last.
+(def %sh-park-fds
+  (fn (self fds parked)
+    (if (null? fds)
+      parked
+      (let ((slot %sh-fd-park-next))
+        (set! %sh-fd-park-next (fx+ slot 1))
+        (self (rest fds)
+              (pair (pair (first fds)
+                          (if (fx<? (sh-dup2 (first fds) slot) 0) () slot))
+                    parked))))))
 
+; Put back what %sh-park-fds or %sh-save-fds parked.
 (def %sh-restore-fds
+  (fn (self parked)
+    (unless (null? parked)
+      (let ((fd (first (first parked))) (slot (rest (first parked))))
+        (if (null? slot)
+          (sh-close fd)
+          (do (sh-dup2 slot fd) (sh-close slot)))
+        (set! %sh-fd-park-next (- %sh-fd-park-next 1))
+        (self (rest parked))))))
+
+(def %sh-redir-fds
   (fn (self redirs)
-    (unless (null? redirs)
-      (let ((fd (%sh-redir-fd (first redirs))))
-        (sh-dup2 (+ %sh-fd-save-base fd) fd)
-        (sh-close (+ %sh-fd-save-base fd))
-        (self (rest redirs))))))
+    (if (null? redirs)
+      ()
+      (pair (%sh-redir-fd (first redirs)) (self (rest redirs))))))
+
+; What REDIRS change, parked.
+(def %sh-save-fds
+  (fn (_ redirs) (%sh-park-fds (%sh-redir-fds redirs) ())))
 ; --- Built-in commands ---
 
 (def %sh-echo
@@ -4153,13 +4176,12 @@
         (if (%sh-setup-redirs redirs)
           (%sh-run-builtin name wds)
           (%sh-redir-refused name))
-        (do
-          (%sh-save-fds redirs)
-          (guard (e (do (%sh-restore-fds redirs) (error e)))
+        (let ((parked (%sh-save-fds redirs)))
+          (guard (e (do (%sh-restore-fds parked) (error e)))
             (let ((status (if (%sh-setup-redirs redirs)
                             (%sh-run-builtin name wds)
                             (%sh-redir-refused name))))
-              (%sh-restore-fds redirs)
+              (%sh-restore-fds parked)
               status)))))))
 
 
@@ -4417,13 +4439,12 @@
   (fn (_ body wds redirs)
     (if (null? redirs)
       (%sh-call-fn body wds)
-      (do
-        (%sh-save-fds redirs)
-        (guard (e (do (%sh-restore-fds redirs) (error e)))
+      (let ((parked (%sh-save-fds redirs)))
+        (guard (e (do (%sh-restore-fds parked) (error e)))
           (let ((status (if (%sh-setup-redirs redirs)
                           (%sh-call-fn body wds)
                           %sh-redir-status)))
-            (%sh-restore-fds redirs)
+            (%sh-restore-fds parked)
             status))))))
 ; Save C pipe primitive before we shadow it
 
@@ -5317,20 +5338,17 @@
 ; chain runs its last stage in the shell process, so the parent dup2s each
 ; pipe's read end onto fd 0. Left there it ends a session: after
 ; `echo hello | grep h` at the prompt, stdin is an exhausted pipe and the next
-; read is EOF. So stdin is saved first (dup2 onto a high spare fd, 19 -- 9 is
-; a script's to redirect and x.sh has claimed 3) and restored after, on the
-; error path too, via the guard/re-raise shape lib/x/sys/stream.x uses.
-(def %sh-stdin-save 19)
-
+; read is EOF. So stdin is parked first, as a redirection parks what it
+; changes, and put back after, on the error path too, via the guard/re-raise
+; shape lib/x/sys/stream.x uses.  A pipeline in a pipeline's last stage parks
+; its own.
 (def %sh-run-pipeline
   (fn (_ stages)
-    (sh-dup2 0 %sh-stdin-save)
-    (guard (e
-        (do (sh-dup2 %sh-stdin-save 0) (sh-close %sh-stdin-save) (error e)))
-      (let ((result (%sh-pipe-chain stages)))
-        (sh-dup2 %sh-stdin-save 0)
-        (sh-close %sh-stdin-save)
-        result))))
+    (let ((parked (%sh-park-fds (list 0) ())))
+      (guard (e (do (%sh-restore-fds parked) (error e)))
+        (let ((result (%sh-pipe-chain stages)))
+          (%sh-restore-fds parked)
+          result)))))
 
 ; --- Recursive descent evaluator ---
 ; command: compound or simple
@@ -5519,9 +5537,8 @@
           (set-first! cur start)
           (if (null? redirs)
             (%eval-compound cur)
-            (do
-              (%sh-save-fds redirs)
-              (guard (e (do (%sh-restore-fds redirs) (error e)))
+            (let ((parked (%sh-save-fds redirs)))
+              (guard (e (do (%sh-restore-fds parked) (error e)))
                 (let ((status (if (%sh-setup-redirs redirs)
                                   (%eval-compound cur)
                                   ; The construct is what sets the status when
@@ -5531,7 +5548,7 @@
                   ; The construct stopped at its own end, or never ran; either
                   ; way, step over it and the redirections read before it.
                   (set-first! cur after)
-                  (%sh-restore-fds redirs)
+                  (%sh-restore-fds parked)
                   status)))))))))
 
 (set! %eval-command
