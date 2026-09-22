@@ -79,7 +79,9 @@ builtin or external.
 Here-documents: `<<EOF` and `<<-EOF` (which strips leading tabs), with the body
 expanded unless the delimiter is quoted. The body ends at the delimiter with
 its quoting removed, and quoting any part of it (`'EOF'`, `"EOF"`, `\EOF`,
-`E"O"F`) counts. Several on one line are taken in order.
+`E"O"F`) counts. Several on one line are taken in order. One can open inside
+a command substitution in double quotes, as in `x="$(cat <<EOF`, and `<<`
+inside a quoted string, over however many lines, is text.
 
 Redirection: `<`, `>`, `>>`, `<>`, `>&`, `<&`, on builtins as well as externals
 — and on a builtin the descriptors are put back afterwards, so `echo x > log`

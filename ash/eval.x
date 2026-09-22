@@ -5952,48 +5952,108 @@
       (%sh-cs-end line (+ i 2) n 0)
       (- 0 1))))
 
-; Rewrite one line, collecting the here-documents it opens.  Answers
-; (rewritten pending), where pending is a list of (delim strip? expand?) in the
+; The scan for here-document operators keeps its frames on a list, innermost
+; first: a quote character for a quoted region, and these for a `$(` and for a
+; parenthesis inside one.  An empty list is the top level.
+(def %sh-hd-subst 1)
+(def %sh-hd-paren 2)
+
+; Rewrite one line, collecting the here-documents it opens.  STACK is the scan
+; state the line starts in, carried over from the line before: a quoted string
+; and a `$(` can both run past the end of a line, and `<<` is text inside a
+; quoted string but an operator inside a `$(` inside one.  Answers (rewritten
+; pending stack), where pending is a list of (delim strip? expand?) in the
 ; order the bodies must follow.
 (def %sh-hd-scan-line
-  (fn (_ line index)
-    (let ((n (string-length line)))
-      (def go
-        (fn (self i mode out pending idx)
-          (if (>= i n)
-            (list (Str8 join "" (reverse out)) (reverse pending))
-            (let ((c (string-ref line i)))
-              (cond
-                ; Quoted regions are copied through; `<<` inside them is text.
-                ((not (= mode 0))
-                  (self (+ i 1) (if (= c mode) 0 mode)
-                        (pair (substring line i (+ i 1)) out) pending idx))
-                ((or (= c #\') (= c #\"))
-                  (self (+ i 1) c (pair (substring line i (+ i 1)) out)
-                        pending idx))
-                ; An arithmetic expansion is copied through whole, so the `<<`
-                ; in `$((a<<2))` stays a shift.
-                ((= c #\$)
-                  (let ((e (%sh-hd-arith-end line i n)))
-                    (if (< i e)
-                      (self (+ e 1) 0 (pair (substring line i (+ e 1)) out)
-                            pending idx)
-                      (self (+ i 1) 0 (pair "$" out) pending idx))))
-                ; `<<` but not `<<<`, and not `<&`
-                ((and (= c #\<)
-                      (and (< (+ i 1) n) (= (string-ref line (+ i 1)) #\<)))
-                  (let ((strip? (and (< (+ i 2) n)
-                                     (= (string-ref line (+ i 2)) #\-))))
-                    (let ((d (%sh-hd-delim line (if strip? (+ i 3) (+ i 2)) n)))
-                      (self (first (rest d)) 0
-                        (pair (string-append "<<" (convert idx %string)) out)
-                        (pair (list (first d) strip?
-                                    (first (rest (rest d)))) pending)
-                        (+ idx 1)))))
-                (else
-                  (self (+ i 1) 0 (pair (substring line i (+ i 1)) out)
-                        pending idx)))))))
-      (go 0 0 () () index))))
+  (fn (_ line index stack)
+    (%sh-hd-scan line 0 (string-length line) stack #t 0 () () index)))
+
+; The scan from I.  START? is whether a `#` there would open a comment, FROM
+; where the text not yet copied into OUT begins, and IDX the next body's
+; number.
+(def %sh-hd-scan
+  (fn (self line i n stack start? from out pending idx)
+    (if (not (fx<? i n))
+      (list (Str8 join "" (reverse (pair (substring line from n) out)))
+            (reverse pending)
+            stack)
+      (let ((c (string-ref line i)))
+        (match
+          ((null? stack)
+            (%sh-hd-scan-bare line i n stack start? from out pending idx c))
+          ((= (first stack) #\')
+            (self line (fx+ i 1) n (if (= c #\') (rest stack) stack) ()
+                  from out pending idx))
+          ((= (first stack) #\")
+            (%sh-hd-scan-dq line i n stack from out pending idx c))
+          (#t (%sh-hd-scan-bare line i n stack start? from out pending idx c)))))))
+
+; Unquoted: a quote opens a frame, a backslash takes the next character with
+; it, a `#` where a word could start is a comment to the end of the line, and
+; a `(` inside a `$(` opens a frame that `)` closes, as `)` closes the `$(`.
+(def %sh-hd-scan-bare
+  (fn (_ line i n stack start? from out pending idx c)
+    (match
+      ((= c #\')
+        (%sh-hd-scan line (fx+ i 1) n (pair c stack) () from out pending idx))
+      ((= c #\")
+        (%sh-hd-scan line (fx+ i 1) n (pair c stack) () from out pending idx))
+      ((= c #\\) (%sh-hd-scan line (fx+ i 2) n stack () from out pending idx))
+      ((= c #\#)
+        (%sh-hd-scan line (if start? n (fx+ i 1)) n stack () from out pending idx))
+      ((= c #\$) (%sh-hd-scan-dollar line i n stack from out pending idx))
+      ((= c #\()
+        (%sh-hd-scan line (fx+ i 1) n
+          (if (null? stack) stack (pair %sh-hd-paren stack)) #t
+          from out pending idx))
+      ((= c #\))
+        (%sh-hd-scan line (fx+ i 1) n (if (null? stack) stack (rest stack)) #t
+          from out pending idx))
+      ((%sh-hd-op-at? line i n) (%sh-hd-scan-op line i n stack from out pending idx))
+      (#t (%sh-hd-scan line (fx+ i 1) n stack (%sh-comment-may-follow? c)
+            from out pending idx)))))
+
+; Inside double quotes only the closing quote, a backslash and `$` count.
+(def %sh-hd-scan-dq
+  (fn (_ line i n stack from out pending idx c)
+    (match
+      ((= c #\") (%sh-hd-scan line (fx+ i 1) n (rest stack) () from out pending idx))
+      ((= c #\\) (%sh-hd-scan line (fx+ i 2) n stack () from out pending idx))
+      ((= c #\$) (%sh-hd-scan-dollar line i n stack from out pending idx))
+      (#t (%sh-hd-scan line (fx+ i 1) n stack () from out pending idx)))))
+
+; An arithmetic expansion is passed over whole, so the `<<` in `$((a<<2))`
+; stays a shift; a `$(` opens a frame.
+(def %sh-hd-scan-dollar
+  (fn (_ line i n stack from out pending idx)
+    (let ((e (%sh-hd-arith-end line i n)))
+      (match
+        ((fx<? i e) (%sh-hd-scan line (fx+ e 1) n stack () from out pending idx))
+        ((%sh-hd-char-at? line (fx+ i 1) n #\()
+          (%sh-hd-scan line (fx+ i 2) n (pair %sh-hd-subst stack) #t
+            from out pending idx))
+        (#t (%sh-hd-scan line (fx+ i 1) n stack () from out pending idx))))))
+
+(def %sh-hd-char-at?
+  (fn (_ line i n ch)
+    (if (fx<? i n) (= (string-ref line i) ch) ())))
+
+(def %sh-hd-op-at?
+  (fn (_ line i n)
+    (if (= (string-ref line i) #\<) (%sh-hd-char-at? line (fx+ i 1) n #\<) ())))
+
+; `<<DELIM` or `<<-DELIM` at I is rewritten `<<N`, and the delimiter joins
+; PENDING.
+(def %sh-hd-scan-op
+  (fn (_ line i n stack from out pending idx)
+    (let ((strip? (%sh-hd-char-at? line (fx+ i 2) n #\-)))
+      (let ((d (%sh-hd-delim line (if strip? (fx+ i 3) (fx+ i 2)) n)))
+        (let ((e (first (rest d))))
+          (%sh-hd-scan line e n stack () e
+            (pair (string-append "<<" (convert idx %string))
+                  (pair (substring line from i) out))
+            (pair (list (first d) strip? (first (rest (rest d)))) pending)
+            (fx+ idx 1)))))))
 
 ; Whether S, up to I, ends in a backslash that escapes the newline after it: an
 ; odd run of them, since each pair is one escaped backslash.
@@ -6053,15 +6113,16 @@
                   bodies)))))))
 
 (def %sh-hd-walk
-  (fn (self lines out bodies)
+  (fn (self lines out bodies stack)
     (if (null? lines)
       (list (Str8 join "\n" (reverse out)) (reverse bodies))
-      (let ((scanned (%sh-hd-scan-line (first lines) (length bodies))))
+      (let ((scanned (%sh-hd-scan-line (first lines) (length bodies) stack)))
         (let ((collected (%sh-hd-collect (rest lines)
                            (first (rest scanned)) bodies)))
           (self (first collected)
                 (pair (first scanned) out)
-                (first (rest collected))))))))
+                (first (rest collected))
+                (first (rest (rest scanned)))))))))
 
 ; Lift every here-document out of INPUT, leaving `<<N` behind.  Answers the
 ; rewritten text; the bodies land in %sh-heredocs.
@@ -6071,7 +6132,7 @@
     ; question is asked first.
     (if (not (%sh-str-has-heredoc-op? input))
       input
-      (let ((r (%sh-hd-walk (%sh-split-lines input) () ())))
+      (let ((r (%sh-hd-walk (%sh-split-lines input) () () ())))
         (set! %sh-heredocs (first (rest r)))
         (first r)))))
 
