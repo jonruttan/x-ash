@@ -219,12 +219,14 @@ and the rest match against `/`.
 
 A backslash the shell reads in the source escapes what follows it. A backslash
 that arrives inside a variable's value does not: it is an ordinary character and
-survives to the output. All four are checked against `/bin/sh`.
+survives to the output. All four are checked against `/bin/sh` and `dash`, and
+written with `printf '%s\n'`, which writes its operand as it is: `echo` reads
+`\b` in its operand as a backspace, as both shells' does.
 
 ### an unquoted expansion keeps a literal backslash
 
 ```sh
-(do (sh-eval "x='a\\b'; echo $x") ())
+(do (sh-eval "x='a\\b'; printf '%s\\n' $x") ())
 ```
 ---
     a\b
@@ -232,7 +234,7 @@ survives to the output. All four are checked against `/bin/sh`.
 ### a quoted expansion keeps it too
 
 ```sh
-(do (sh-eval "x='a\\b'; echo \"$x\"") ())
+(do (sh-eval "x='a\\b'; printf '%s\\n' \"$x\"") ())
 ```
 ---
     a\b
@@ -240,7 +242,7 @@ survives to the output. All four are checked against `/bin/sh`.
 ### a backslash in a value does not escape a wildcard beside it
 
 ```sh
-(do (sh-eval "w='a\\*b'; echo $w") ())
+(do (sh-eval "w='a\\*b'; printf '%s\\n' $w") ())
 ```
 ---
     a\*b
@@ -248,7 +250,7 @@ survives to the output. All four are checked against `/bin/sh`.
 ### a value that is only a backslash survives
 
 ```sh
-(do (sh-eval "v='\\'; echo $v") ())
+(do (sh-eval "v='\\'; printf '%s\\n' $v") ())
 ```
 ---
     \
