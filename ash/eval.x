@@ -539,9 +539,11 @@
     (unless (%sh-name? name)
       (do (%sh-bad-name who name) (error (lit %sh-reported))))))
 
-; `set -u`: a plain `$X` on an unset name is an error.  ONLY the plain form --
-; `${X:-default}` and `${X+alt}` exist precisely to ask about an unset
-; parameter, and POSIX exempts them, so they go through %sh-var-value directly.
+; `set -u`: expanding an unset parameter is an error -- `$X`, `${X}` and
+; `${#X}`, a name, a positional past the last, or `$!` before any list has run
+; in the background.  `$@` and `$*` never are.  `${X:-default}` and `${X+alt}`
+; exist precisely to ask about an unset parameter, and POSIX exempts them, so
+; they go through %sh-var-value directly.
 (def %sh-var-value-checked
   (fn (_ name)
     (match
@@ -1463,11 +1465,13 @@
               (if (%sh-digit? c) (substring inner 0 1) "")
               (substring inner 0 1))))))))
 
-; Is the parameter unset?  A special is always set; a positional is set when it
-; is within range; anything else asks the variables.
+; Is the parameter unset?  `$!` is until a list has run in the background; any
+; other special is always set; a positional is set when it is within range;
+; anything else asks the variables.
 (def %sh-param-unset?
   (fn (_ name)
     (match
+      ((string=? name "!") (null? %sh-bg-pid))
       ((not (null? (%sh-table-get name %sh-special-vars))) ())
       ((%all-digits? name) (> (%sh-digits-int name) (length %sh-args)))
       (#t (null? (%sh-var-get name))))))
@@ -1504,17 +1508,17 @@
         ; %sh-var-value already knows as the special "#".
         ((and (> n 1) (= (string-ref inner 0) #\#))
           (convert
-            (string-length (%sh-var-value (substring inner 1 n)))
+            (string-length (%sh-var-value-checked (substring inner 1 n)))
             %string))
         (else
           (let ((name (%sh-param-name inner)))
             (let ((tail (substring inner (string-length name) n)))
               (if (= (string-length tail) 0)
-                (%sh-var-value name)
+                (%sh-var-value-checked name)
                 (let ((op (%sh-first-op tail %sh-param-op-names)))
                   (if (null? op)
                     ; Not an operator we know -- the whole of it is a name.
-                    (%sh-var-value inner)
+                    (%sh-var-value-checked inner)
                     (%sh-param-apply name op
                       (substring tail (string-length op)
                         (string-length tail)))))))))))))
@@ -2325,7 +2329,8 @@
               (cont (fx+ j 1) mode
                 (%sh-add-all-params a (if (= d #\@) "@" "*") mode split?)))
             ((%sh-special-param? d)
-              (substitute (fx+ j 1) (%sh-var-value (substring s j (fx+ j 1)))))
+              (substitute (fx+ j 1)
+                (%sh-var-value-checked (substring s j (fx+ j 1)))))
             ; $ followed by anything else is a literal $.
             (#t (literal-dollar))))))))
 
