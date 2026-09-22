@@ -240,11 +240,10 @@
 ; set of keys and what they do stay one fact instead of two.
 (def %sh-table-get
   (fn (self key table)
-    (if (null? table)
-      ()
-      (if (string=? key (first (first table)))
-        (rest (first table))
-        (self key (rest table))))))
+    (match
+      ((null? table) ())
+      ((string=? key (first (first table))) (rest (first table)))
+      (#t (self key (rest table))))))
 
 (def %sh-table-without
   (fn (self key table)
@@ -286,7 +285,8 @@
 ; The value of NAME, or () when it is unset.
 (def %sh-var-get
   (fn (_ name)
-    (let ((v (%sh-table-get name %sh-vars)))
+    (do
+      (def v (%sh-table-get name %sh-vars))
       (if (null? v) (sh-getenv name) v))))
 
 (def %sh-var-exported?
@@ -544,9 +544,10 @@
 ; parameter, and POSIX exempts them, so they go through %sh-var-value directly.
 (def %sh-var-value-checked
   (fn (_ name)
-    (if (and (not (null? %sh-opt-nounset)) (%sh-param-unset? name))
-      (error (string-append name ": parameter not set"))
-      (%sh-var-value name))))
+    (match
+      ((null? %sh-opt-nounset) (%sh-var-value name))
+      ((%sh-param-unset? name) (error (string-append name ": parameter not set")))
+      (#t (%sh-var-value name)))))
 
 ; --- Positional parameters and the function table ---------------------------
 ;
@@ -646,13 +647,20 @@
 
 (def %sh-var-value
   (fn (_ name)
-    (let ((special (%sh-table-get name %sh-special-vars)))
-      (cond
+    (do
+      ; A name that begins with a letter or underscore is a variable's: no
+      ; special's name does, so the table is not asked.
+      (def special
+        (match
+          ((not (fx<? 0 (string-length name))) ())
+          ((%sh-name-start? (string-ref name 0)) ())
+          (#t (%sh-table-get name %sh-special-vars))))
+      (match
         ((not (null? special)) (special))
-        ((%all-digits? name) (%sh-arg-at (convert name %int)))
+        ((%all-digits? name) (%sh-arg-at (%sh-digits-int name)))
         ; An unset variable expands to the empty string, which is POSIX
         ; default -- there is no `set -u` here to make it an error.
-        (else (let ((v (%sh-var-get name))) (if (null? v) "" v)))))))
+        (#t (do (def v (%sh-var-get name)) (if (null? v) "" v)))))))
 
 ; The end of the name run starting at I.
 (def %sh-name-end
@@ -667,19 +675,20 @@
 ; that is itself an expansion -- `${X:-${Y}}` -- closes where it should.
 (def %sh-brace-end
   (fn (self s i n depth)
-    (if (>= i n)
+    (if (not (fx<? i n))
       (- 0 1)
-      (let ((c (string-ref s i)))
-        (cond
-          ((= c #\{) (self s (+ i 1) n (+ depth 1)))
-          ((= c #\}) (if (= depth 0) i (self s (+ i 1) n (- depth 1))))
+      (do
+        (def c (string-ref s i))
+        (match
+          ((= c #\{) (self s (fx+ i 1) n (fx+ depth 1)))
+          ((= c #\}) (if (= depth 0) i (self s (fx+ i 1) n (fx+ depth -1))))
           ; A backslash and a quoted string hide a brace, as they do in
           ; %sh-cs-end and in the tokenizer's reading of the same text:
           ; `${x:-\}}` and `${x:-"}"}` each close at the last brace.
-          ((= c #\\) (self s (+ i 2) n depth))
-          ((= c #\') (self s (%sh-skip-quoted s (+ i 1) n #\') n depth))
-          ((= c #\") (self s (%sh-skip-quoted s (+ i 1) n #\") n depth))
-          (else (self s (+ i 1) n depth)))))))
+          ((= c #\\) (self s (fx+ i 2) n depth))
+          ((= c #\') (self s (%sh-skip-quoted s (fx+ i 1) n #\') n depth))
+          ((= c #\") (self s (%sh-skip-quoted s (fx+ i 1) n #\") n depth))
+          (#t (self s (fx+ i 1) n depth)))))))
 
 ; Inside double quotes a backslash is literal EXCEPT before one of $ ` " \ and
 ; newline -- so `"a\db"` keeps its backslash and `"a\$b"` does not.  Outside
@@ -1405,10 +1414,10 @@
 ; is within range; anything else asks the variables.
 (def %sh-param-unset?
   (fn (_ name)
-    (cond
+    (match
       ((not (null? (%sh-table-get name %sh-special-vars))) ())
-      ((%all-digits? name) (> (convert name %int) (length %sh-args)))
-      (else (null? (%sh-var-get name))))))
+      ((%all-digits? name) (> (%sh-digits-int name) (length %sh-args)))
+      (#t (null? (%sh-var-get name))))))
 
 (def %sh-param-apply
   (fn (_ name op word)
@@ -2185,67 +2194,89 @@
             (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
                          (%sh-run-meta? lead))))))))
 
+; Whether C names a one-character parameter: $? $$ $! $- $# $@ $* and $1..$9.
+; A single digit only, per POSIX: `$10` is `$1` followed by a literal 0, and
+; `${10}` is how the tenth is spelled.
+(def %sh-special-param?
+  (fn (_ c)
+    (match
+      ((= c #\?) #t)
+      ((= c #\$) #t)
+      ((= c #\!) #t)
+      ((= c #\-) #t)
+      ((= c #\#) #t)
+      ((= c #\@) #t)
+      ((= c #\*) #t)
+      (#t (%sh-digit? c)))))
+
 ; The `$` arm, lifted out so the walk above stays readable.  CONT is the
 ; walker's own continuation, resumed at an index with an accumulator.
 (def %sh-expand-dollar
   (fn (_ cont s i n mode a split?)
-    ; Two local helpers, in a `let` so they stay local: this file already has
-    ; more module-level %-names than it needs, and neither is meaningful
-    ; outside these fifteen lines.
-    (let ((literal-dollar
-            (fn (_) (cont (+ i 1) mode (%sh-acc-add a "$" ()))))
-          (substitute
-            (fn (_ next text)
-              (cont next mode (%sh-add-expansion a mode text split?)))))
-    ; A `$` at the very end is a literal `$`.
-    (if (>= (+ i 1) n)
-      (%sh-acc-finish (%sh-acc-add a "$" ()))
-      (let ((d (string-ref s (+ i 1))))
-        (cond
-          ; $( ... ) -- a command substitution.
-          ((= d #\()
-            (let ((e (%sh-cs-end s (+ i 2) n 0)))
-              (if (< e 0)
-                (literal-dollar)
-                (let ((inner (substring s (+ i 2) e)))
-                  (substitute (+ e 1)
-                    (if (%sh-arith? inner)
-                      (%sh-arith-eval (%sh-arith-text inner))
-                      (%sh-cmd-subst inner)))))))
-          ; ${NAME}
-          ((= d #\{)
-            (let ((e (%sh-brace-end s (+ i 2) n 0)))
-              (if (< e 0)
-                (literal-dollar)
-                (let ((inner (substring s (+ i 2) e)))
-                  ; `"${@}"` asks exactly what `"$@"` asks, so it is answered
-                  ; in the same place rather than joined into one field here.
-                  (if (and (= mode %sh-mode-dq) (string=? inner "@"))
-                    (cont (+ e 1) mode (%sh-add-args a %sh-args))
-                    ; A value operator that fired answers its word to stand
-                    ; here, rather than text (see %sh-param-default).
-                    (let ((r (%sh-brace-expand inner)))
-                      (if (pair? r)
-                        (cont (+ e 1) mode (%sh-add-word a mode (rest r) split?))
-                        (substitute (+ e 1) r))))))))
-          ; "$@" is the one special that is not a string -- see %sh-add-args.
-          ; Unquoted it is not special at all: `$@` splits on IFS the way any
-          ; unquoted expansion does, which %sh-add-expansion already handles.
-          ((and (= d #\@) (= mode %sh-mode-dq))
-            (cont (+ i 2) mode (%sh-add-args a %sh-args)))
-          ; The one-character specials: $? $$ $! $- $# $@ $* and $1..$9.
-          ;
-          ; A single digit only, per POSIX: `$10` is `$1` followed by a literal
-          ; 0, and `${10}` is how the tenth is spelled.
-          ((or (= d #\?) (= d #\$) (= d #\!) (= d #\-) (= d #\#)
-               (= d #\@) (= d #\*) (%sh-digit? d))
-            (substitute (+ i 2) (%sh-var-value (substring s (+ i 1) (+ i 2)))))
-          ; $NAME
-          ((%sh-name-start? d)
-            (let ((e (%sh-name-end s (+ i 1) n)))
-              (substitute e (%sh-var-value-checked (substring s (+ i 1) e)))))
-          ; $ followed by anything else is a literal $.
-          (else (literal-dollar))))))))
+    (do
+      ; Two local helpers, bound here so they stay local: this file already
+      ; has more module-level %-names than it needs, and neither is
+      ; meaningful outside this function.
+      (def literal-dollar
+        (fn (_) (cont (fx+ i 1) mode (%sh-acc-add a "$" ()))))
+      (def substitute
+        (fn (_ next text)
+          (cont next mode (%sh-add-expansion a mode text split?))))
+      ; J is the character after the `$`.
+      (def j (fx+ i 1))
+      ; A `$` at the very end is a literal `$`.
+      (if (not (fx<? j n))
+        (%sh-acc-finish (%sh-acc-add a "$" ()))
+        (do
+          (def d (string-ref s j))
+          (match
+            ; $NAME, the most common, so asked first.
+            ((%sh-name-start? d)
+              (do
+                (def e (%sh-name-end s (fx+ j 1) n))
+                (substitute e (%sh-var-value-checked (substring s j e)))))
+            ; $( ... ) -- a command substitution.
+            ((= d #\()
+              (do
+                (def e (%sh-cs-end s (fx+ j 1) n 0))
+                (if (fx<? e 0)
+                  (literal-dollar)
+                  (do
+                    (def inner (substring s (fx+ j 1) e))
+                    (substitute (fx+ e 1)
+                      (if (%sh-arith? inner)
+                        (%sh-arith-eval (%sh-arith-text inner))
+                        (%sh-cmd-subst inner)))))))
+            ; ${NAME}
+            ((= d #\{)
+              (do
+                (def e (%sh-brace-end s (fx+ j 1) n 0))
+                (if (fx<? e 0)
+                  (literal-dollar)
+                  (do
+                    (def inner (substring s (fx+ j 1) e))
+                    ; `"${@}"` asks exactly what `"$@"` asks, so it is
+                    ; answered in the same place rather than joined into one
+                    ; field here.
+                    (if (if (= mode %sh-mode-dq) (string=? inner "@") ())
+                      (cont (fx+ e 1) mode (%sh-add-args a %sh-args))
+                      ; A value operator that fired answers its word to stand
+                      ; here, rather than text (see %sh-param-default).
+                      (do
+                        (def r (%sh-brace-expand inner))
+                        (if (pair? r)
+                          (cont (fx+ e 1) mode (%sh-add-word a mode (rest r) split?))
+                          (substitute (fx+ e 1) r))))))))
+            ; "$@" is the one special that is not a string -- see
+            ; %sh-add-args.  Unquoted it is not special at all: `$@` splits on
+            ; IFS the way any unquoted expansion does, which %sh-add-expansion
+            ; already handles.
+            ((if (= d #\@) (= mode %sh-mode-dq) ())
+              (cont (fx+ j 1) mode (%sh-add-args a %sh-args)))
+            ((%sh-special-param? d)
+              (substitute (fx+ j 1) (%sh-var-value (substring s j (fx+ j 1)))))
+            ; $ followed by anything else is a literal $.
+            (#t (literal-dollar))))))))
 
 ; --- Pathname expansion -----------------------------------------------------
 ;
