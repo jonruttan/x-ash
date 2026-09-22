@@ -2624,7 +2624,7 @@
           ((string=? op ">>")
             (%sh-redir-onto (sh-open-append target) fd "create" target))
           ((string=? op "<>")
-            (%sh-redir-onto (sh-open-read target) fd "open" target))
+            (%sh-redir-onto (sh-open-rdwr target) fd "open" target))
           ((string=? op ">&") (%sh-redir-dup target fd))
           ((string=? op "<&") (%sh-redir-dup target fd))
           (#t #t))))))
