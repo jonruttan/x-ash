@@ -768,7 +768,7 @@
                       (pair (substring s start i) pieces)))
               (self s (fx+ i 2) n start pieces)))
           (#t (self s (fx+ i 1) n start pieces))))
-      (#t (Str8 join "" (reverse (pair (substring s start n) pieces)))))))
+      (#t (%ash-join "" (reverse (pair (substring s start n) pieces)))))))
 
 (def %sh-bt-unescape
   (fn (_ text)
@@ -1023,7 +1023,7 @@
 
 ; The field in hand, materialized.  Only the two closers below need it.
 (def %sh-acc-cur
-  (fn (_ a) (Str8 join "" (reverse (%sh-acc-pieces a)))))
+  (fn (_ a) (%ash-join "" (reverse (%sh-acc-pieces a)))))
 
 ; One piece, and what it contributes to the field in hand.  Anything literal
 ; starts a field, which is what makes `cmd ""` an empty argument.  Both flags
@@ -1147,7 +1147,7 @@
       (def go
         (fn (self i out)
           (if (>= i n)
-            (Str8 join "" (reverse out))
+            (%ash-join "" (reverse out))
             (let ((here (substring text i (+ i 1))))
               (self (+ i 1)
                 (pair (if (%sh-char-in? (string-ref text i) chars)
@@ -2291,7 +2291,7 @@
         (def go
           (fn (self i out)
             (if (>= i n)
-              (Str8 join "" (reverse out))
+              (%ash-join "" (reverse out))
               (if (and (= (string-ref text i) #\\) (< (+ i 1) n))
                 (self (+ i 2) (pair (substring text (+ i 1) (+ i 2)) out))
                 (self (+ i 1) (pair (substring text i (+ i 1)) out))))))
@@ -2854,7 +2854,7 @@
                 (%sh-path-step kept (substring path start i)))
               (self (+ i 1) start kept)))))
       (let ((parts (reverse (walk 0 0 ()))))
-        (if (null? parts) "/" (string-append "/" (Str8 join "/" parts)))))))
+        (if (null? parts) "/" (string-append "/" (%ash-join "/" parts)))))))
 
 ; Where an operand points, read against the logical directory rather than the
 ; resolved one.
@@ -3405,12 +3405,12 @@
     (def walk
       (fn (self j pieces)
         (if (>= j n)
-          (pair (Str8 join "" (reverse pieces)) j)
+          (pair (%ash-join "" (reverse pieces)) j)
           (let ((c (string-ref line j)))
             (match
               ((and (not raw?) (= c #\\) (< (+ j 1) n))
                 (self (+ j 2) (pair (substring line (+ j 1) (+ j 2)) pieces)))
-              ((%sh-in-ifs? c ifs) (pair (Str8 join "" (reverse pieces)) j))
+              ((%sh-in-ifs? c ifs) (pair (%ash-join "" (reverse pieces)) j))
               (#t (self (+ j 1) (pair (substring line j (+ j 1)) pieces))))))))
     (walk i ())))
 
@@ -3446,7 +3446,7 @@
     (def texts
       (fn (self rows out)
         (if (null? rows) out (self (rest rows) (pair (first (first rows)) out)))))
-    (Str8 join "" (texts kept ()))))
+    (%ash-join "" (texts kept ()))))
 
 (def %sh-read-assign
   (fn (self names line i n ifs raw?)
@@ -3525,7 +3525,7 @@
       (let ((n (convert (first wds) %int)))
         (if (< n 1)
           (do
-            (%stderr (Str8 join "" (list "ash: " who ": " (first wds)
+            (%stderr (%ash-join "" (list "ash: " who ": " (first wds)
                                          ": loop count out of range\n")))
             ())
           n)))))
@@ -3589,7 +3589,7 @@
 (def %sh-flag-letters
   (fn (self rows out)
     (if (null? rows)
-      (Str8 join "" (reverse out))
+      (%ash-join "" (reverse out))
       (self (rest rows)
             (if (%sh-set-opt-on? (rest (first rows)))
               (pair (first (first rows)) out)
@@ -3882,7 +3882,7 @@
 (def %sh-escape-quotes
   (fn (self text i n out)
     (if (>= i n)
-      (Str8 join "" (reverse out))
+      (%ash-join "" (reverse out))
       (self text (+ i 1) n
         (pair (if (= (string-ref text i) #\')
                 "'\\''"
@@ -6099,7 +6099,7 @@
 (def %sh-hd-delim-from
   (fn (self line i n start pieces quoted?)
     (if (%sh-hd-delim-end? line i n)
-      (list (Str8 join "" (reverse (pair (substring line start i) pieces)))
+      (list (%ash-join "" (reverse (pair (substring line start i) pieces)))
             i
             (not quoted?))
       (let ((c (string-ref line i)))
@@ -6159,7 +6159,7 @@
 (def %sh-hd-scan
   (fn (self line i n stack start? from out pending idx)
     (if (not (fx<? i n))
-      (list (Str8 join "" (reverse (pair (substring line from n) out)))
+      (list (%ash-join "" (reverse (pair (substring line from n) out)))
             (reverse pending)
             stack)
       (let ((c (string-ref line i)))
@@ -6268,7 +6268,7 @@
         (if (null? remaining)
           ; Unterminated: what is left is the body, which is what a shell does
           ; at end of input.
-          (list (Str8 join "" (reverse acc)) ())
+          (list (%ash-join "" (reverse acc)) ())
           (let ((line (if strip?
                         (%sh-strip-tabs (first remaining))
                         (first remaining))))
@@ -6280,7 +6280,7 @@
                             (rest (rest remaining)))
                       acc))
               ((string=? line delim)
-                (list (Str8 join "" (reverse acc)) (rest remaining)))
+                (list (%ash-join "" (reverse acc)) (rest remaining)))
               (#t
                 (self (rest remaining)
                   (pair (string-append line "\n") acc))))))))
@@ -6300,7 +6300,7 @@
 (def %sh-hd-walk
   (fn (self lines out bodies stack)
     (if (null? lines)
-      (list (Str8 join "\n" (reverse out)) (reverse bodies))
+      (list (%ash-join "\n" (reverse out)) (reverse bodies))
       (let ((scanned (%sh-hd-scan-line (first lines) (length bodies) stack)))
         (let ((collected (%sh-hd-collect (rest lines)
                            (first (rest scanned)) bodies)))
@@ -6407,7 +6407,7 @@
 (def %sh-cut-pairs
   (fn (self s cuts end acc)
     (if (null? cuts)
-      (Str8 join "" (pair (substring s 0 end) acc))
+      (%ash-join "" (pair (substring s 0 end) acc))
       (self s (rest cuts) (first cuts)
             (pair (substring s (fx+ (first cuts) 2) end) acc)))))
 
