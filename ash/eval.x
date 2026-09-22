@@ -2667,13 +2667,6 @@
         ; read them. %sh-field-plain is for the sites that want literal text.
         (if (null? fs) "" (%sh-field-text (first fs)))))))
 
-(def %sh-expand-words
-  (fn (_ wds)
-    (if (null? wds)
-      ()
-      (pair
-        (%sh-expand-word (first wds))
-        (%sh-expand-words (rest wds))))))
 ; --- Redirection ---
 
 (def %redir-op?
