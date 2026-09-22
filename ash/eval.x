@@ -1283,7 +1283,7 @@
         (if (string=? name "@")
           (%sh-add-args a %sh-args)
           (%sh-add-expansion a mode (%sh-var-value name) split?)))
-      ((if split? (= 0 (string-length (%sh-ifs))) ())
+      ((if (%sh-splitting? split?) (= 0 (string-length (%sh-ifs))) ())
         (%sh-add-params a %sh-args))
       (#t (%sh-add-expansion a mode (%sh-var-value name) split?)))))
 
@@ -1310,8 +1310,23 @@
       (let ((fs (%sh-expand-str word %sh-mode-dq () ())))
         (let ((text (if (null? fs) "" (%sh-field-plain (first fs)))))
           (%sh-acc-add-literal a text (%sh-has-glob-meta? text))))
+      ; The word stands in the expansion's place, so it is read as that place
+      ; is: split where splitting is on, and a pattern in a pattern.
       (%sh-add-fields a
-        (%sh-expand-str word %sh-mode-bare (if split? (lit fields) ()) ())))))
+        (%sh-expand-str word %sh-mode-bare
+          (match
+            ((eq? split? (lit pattern)) split?)
+            ((%sh-splitting? split?) (lit fields))
+            (#t ()))
+          ())))))
+
+; Whether SPLIT? has a word's expansions split into fields: `#t` or `fields`
+; do, and a pattern, like nil, does not.
+(def %sh-splitting?
+  (fn (_ split?)
+    (match
+      ((eq? split? (lit pattern)) ())
+      (#t split?))))
 
 ; One expansion's worth of text.  Split only when splitting is on AND we are
 ; outside quotes -- inside `"..."` a value keeps its spaces, which is the
@@ -1320,10 +1335,14 @@
   (fn (_ a mode text split?)
     (if (= mode %sh-mode-bare)
       ; An unquoted expansion's RESULT is subject to both splitting and
-      ; globbing -- `X='*'; echo $X` globs, `echo "$X"` does not.
-      (if split?
-        (%sh-add-split a text)
-        (%sh-acc-add-value a text))
+      ; globbing -- `X='*'; echo $X` globs, `echo "$X"` does not.  In a
+      ; pattern a backslash it holds escapes the character after it, as one
+      ; written in the pattern would, so it goes in as it is.
+      (match
+        ((eq? split? (lit pattern))
+          (%sh-acc-add a text (%sh-has-active-glob? text)))
+        ((%sh-splitting? split?) (%sh-add-split a text))
+        (#t (%sh-acc-add-value a text)))
       (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
 
 ; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
@@ -2229,7 +2248,10 @@
 ; all and an empty quoted one is one empty field, which the walk tells apart.
 ; SPLIT? may also be `fields`, for the word of `${x:-word}` standing in place:
 ; then its unquoted literal text is split as an expansion's would be, so that
-; word is always walked, its leading run included.
+; word is always walked, its leading run included.  And it may be `pattern`,
+; for a word that is a pattern -- a `case` pattern, the operand of `${x#pat}`:
+; nothing is split, and a backslash an expansion's value holds escapes the
+; character after it (see %sh-add-expansion).
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
     (let ((n (string-length s))
@@ -2583,7 +2605,8 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (%sh-glob-escape-all (%tok-word-val tok))
-      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ())))
+      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
+                  (lit pattern) ())))
         (if (null? fs) "" (%sh-field-text (first fs)))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
@@ -2592,7 +2615,7 @@
   (fn (_ word)
     (if (not (string? word))
       word
-      (let ((fs (%sh-expand-str word %sh-mode-bare () ())))
+      (let ((fs (%sh-expand-str word %sh-mode-bare (lit pattern) ())))
         ; The escapes stay on: this feeds pattern operands (`${x#pat}`), which
         ; read them. %sh-field-plain is for the sites that want literal text.
         (if (null? fs) "" (%sh-field-text (first fs)))))))
@@ -5279,8 +5302,9 @@
                 (if (and (< si sn) (%sh-glob-class-match? pat (+ pi 1) e s si))
                   (self pat (+ e 1) pn s (+ si 1) sn)
                   ()))))
-          ; A backslash makes the next character itself; a trailing one is
-          ; itself.
+          ; A backslash makes the next character itself.  A trailing one --
+          ; which only an expansion's value can leave in a pattern -- escapes
+          ; nothing, and the pattern matches nothing, as in dash and bash.
           ((= (string-ref pat pi) #\\)
             (match
               ((fx<? (fx+ pi 1) pn)
@@ -5290,11 +5314,6 @@
                       ((= (string-ref pat (fx+ pi 1)) (string-ref s si))
                         (self pat (fx+ pi 2) pn s (fx+ si 1) sn))
                       (#t ())))
-                  (#t ())))
-              ((fx<? si sn)
-                (match
-                  ((= (string-ref s si) #\\)
-                    (self pat (fx+ pi 1) pn s (fx+ si 1) sn))
                   (#t ())))
               (#t ())))
           ((fx<? si sn)
