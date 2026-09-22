@@ -2929,21 +2929,99 @@
   (fn (_ redirs) (%sh-park-fds (%sh-redir-fds redirs) ())))
 ; --- Built-in commands ---
 
+; `echo` writes its operands with a space between each and a newline after, and
+; reads a backslash in them as XSI has it: \a \b \f \n \r \t \v and \\ are
+; those characters, \0 with up to three octal digits after it is the byte they
+; make, and \c ends the output where it stands, newline and all.  Any other
+; backslash is itself.  A first operand of -n leaves the newline off.  dash and
+; bash read the escapes so.  Where the two part -- -n, which bash as sh
+; prints; \NNN without its 0; \xHH -- ash reads -n as dash does, and the other
+; two as the backslash and text POSIX leaves them.  A NUL byte cannot be held
+; in a string here, so \0 making 0 writes nothing (see %sh-byte-string).
 (def %sh-echo
   (fn (_ wds)
-    (def %print-words ())
-    (set! %print-words
-      (fn (_ ws first-word)
-        (if (null? ws)
-          ()
-          (do
-            (if first-word () (display " "))
-            (display (first ws))
-            (%print-words (rest ws) ())))))
-    (let ((suppress (if (null? wds) () (string=? (first wds) "-n"))))
-      (%print-words (if suppress (rest wds) wds) #t)
-      (if suppress () (newline))
+    (do
+      (def suppress (if (null? wds) () (string=? (first wds) "-n")))
+      (def r (%sh-echo-words (if suppress (rest wds) wds) () #t))
+      (display (%ash-join "" (reverse (rest r))))
+      (if (if suppress #t (first r)) () (newline))
       0)))
+
+; The operands WS with their escapes read, pushed onto OUT with a space before
+; each but the first: answers (STOPPED? . OUT), STOPPED? when a \c ended them.
+(def %sh-echo-words
+  (fn (self ws out first?)
+    (match
+      ((null? ws) (pair () out))
+      (#t
+        (do
+          (def r (%sh-echo-escapes (first ws) 0 (string-length (first ws))
+                   (if first? out (pair " " out))))
+          (if (first r) r (self (rest ws) (rest r) ())))))))
+
+; One operand from I, its escapes read, pushed onto OUT: answers
+; (STOPPED? . OUT) as %sh-echo-words does.
+(def %sh-echo-escapes
+  (fn (self s i n out)
+    (match
+      ((not (fx<? i n)) (pair () out))
+      ((not (= (string-ref s i) #\\))
+        (do
+          (def j (%sh-backslash-from s i n))
+          (self s j n (pair (substring s i j) out))))
+      ; A backslash at the end escapes nothing, and is itself.
+      ((not (fx<? (fx+ i 1) n)) (pair () (pair "\\" out)))
+      ((= (string-ref s (fx+ i 1)) #\c) (pair #t out))
+      ((= (string-ref s (fx+ i 1)) #\0)
+        (do
+          (def e (%sh-octal-end s (fx+ i 2) n (fx+ i 5)))
+          (def v (%sh-ar-digits-value s (fx+ i 2) e 8 0))
+          (self s e n (pair (%sh-byte-string (if (fx<? v 256) v (fx+ v -256))) out))))
+      (#t
+        (do
+          (def code (%sh-echo-escape-code (string-ref s (fx+ i 1))))
+          (self s (fx+ i 2) n
+            (pair (if (null? code) (substring s i (fx+ i 2)) (%sh-byte-string code))
+                  out)))))))
+
+; The code a letter after a backslash names, or nil for one that names none.
+(def %sh-echo-escape-code
+  (fn (_ c)
+    (match
+      ((= c #\a) 7)
+      ((= c #\b) 8)
+      ((= c #\f) 12)
+      ((= c #\n) 10)
+      ((= c #\r) 13)
+      ((= c #\t) 9)
+      ((= c #\v) 11)
+      ((= c #\\) 92)
+      (#t ()))))
+
+; The index of the next backslash at or after I, or N.
+(def %sh-backslash-from
+  (fn (self s i n)
+    (match
+      ((not (fx<? i n)) n)
+      ((= (string-ref s i) #\\) i)
+      (#t (self s (fx+ i 1) n)))))
+
+; The end of the run of octal digits from I, stopping by N and by LIMIT.
+(def %sh-octal-end
+  (fn (self s i n limit)
+    (match
+      ((not (fx<? i n)) i)
+      ((not (fx<? i limit)) i)
+      ((fx<? (string-ref s i) #\0) i)
+      ((fx<? (string-ref s i) #\8) (self s (fx+ i 1) n limit))
+      (#t i))))
+
+; A string of the one byte V, as a byte rather than a character: \0377 is the
+; byte 255, where a character 255 would be written as two.  A string ends at
+; a NUL byte here, so the byte 0 is the empty string, and echo writes nothing
+; for it.
+(def %sh-byte-string
+  (fn (_ v) (bytes->str (list v))))
 
 ; The working directory as a path rather than as an inode: the route the
 ; shell took to it, with any symlink on that route left as it was written.
