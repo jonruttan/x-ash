@@ -44,6 +44,10 @@
       (eq? (first tok) (lit tok-sq))
       (eq? (first tok) (lit tok-dq)))))
 
+; The digits of `2>err`, which the tokenizer reads apart from any other word
+; because they run straight into a redirection operator.
+(def %tok-is-io? (fn (_ tok) (eq? (first tok) (lit tok-io))))
+
 ; A reserved word is one only where the grammar can take one: `done` closes a
 ; loop in `echo x; done` and is an argument in `echo done`, and a quoted "done"
 ; is never one.  %sh-mark-keywords walks the tokens once, as they come from the
@@ -2527,6 +2531,18 @@
       (let ((target (%sh-expand-tok-1 (%cursor-peek cur))))
         (%cursor-advance! cur)
         (%sh-redir rop fd target)))))
+
+; The redirection whose descriptor number is the tok-io IO, the cursor past it.
+; The operator is the next token: the tokenizer ends such a run of digits only
+; where one starts.
+(def %sh-io-redir
+  (fn (_ cur io)
+    (let ((rop (if (%cursor-empty? cur) () (%redir-op? (%cursor-peek cur)))))
+      (if (null? rop)
+        (error "parse error: redirect without operator")
+        (do
+          (%cursor-advance! cur)
+          (%sh-read-redir-target cur rop (%tok-word-val io)))))))
 (def %sh-redir-op     (fn (_ r) (first (rest r))))
 (def %sh-redir-target (fn (_ r) (first (rest (rest (rest r))))))
 (def %sh-redir-fd
@@ -4483,10 +4499,7 @@
             (if rop
               (do
                 (%cursor-advance! cur)
-                (let ((fd
-                        (if (and (not (null? wds)) (%all-digits? (first wds)))
-                          (let ((n (first wds))) (set! wds (rest wds)) n)
-                          (%default-fd rop))))
+                (let ((fd (%default-fd rop)))
                   (if (%cursor-empty? cur)
                     (error "parse error: redirect without target")
                     ; NOT SPLIT.  `> $f` with two fields in $f is an
@@ -4520,7 +4533,14 @@
                         wds)
                       redirs
                       (%sh-next-assign? assign? tok val))))
-                (%sh-run-cmd (reverse wds) (reverse redirs))))))))))
+                ; `2>err`: the descriptor number the tokenizer found against
+                ; the operator.
+                (if (%tok-is-io? tok)
+                  (do
+                    (%cursor-advance! cur)
+                    (%collect-cmd-tokens
+                      cur wds (pair (%sh-io-redir cur tok) redirs) assign?))
+                  (%sh-run-cmd (reverse wds) (reverse redirs)))))))))))
 
 ; A command's words are expanded as they are collected, so this is where the
 ; command's substitutions start to count.
@@ -5480,10 +5500,8 @@
         (%cursor-advance! cur)
         (when (> d 0) (self cur d paren?))))))
 
-; The redirections written after a construct.  `done 2> log` puts the
-; descriptor in a WORD before the operator, so a digit is taken only when an
-; operator follows it -- and the cursor is wound back when one does not,
-; because `done 2` is a word that belongs to whatever comes next.
+; The redirections written after a construct: `done > log`, and `done 2> log`,
+; whose descriptor number the tokenizer hands over as a tok-io.
 (def %sh-collect-trailing-redirs
   (fn (self cur redirs)
     (if (%cursor-empty? cur)
@@ -5495,18 +5513,10 @@
               (%cursor-advance! cur)
               (self cur
                 (pair (%sh-read-redir-target cur rop (%default-fd rop)) redirs)))
-            (if (and (%tok-is-word? tok) (%all-digits? (%tok-word-val tok)))
-              (let ((save (first cur)) (fd (%tok-word-val tok)))
+            (if (%tok-is-io? tok)
+              (do
                 (%cursor-advance! cur)
-                (let ((op2 (if (%cursor-empty? cur)
-                             ()
-                             (%redir-op? (%cursor-peek cur)))))
-                  (if (null? op2)
-                    (do (set-first! cur save) (reverse redirs))
-                    (do
-                      (%cursor-advance! cur)
-                      (self cur
-                        (pair (%sh-read-redir-target cur op2 fd) redirs))))))
+                (self cur (pair (%sh-io-redir cur tok) redirs)))
               (reverse redirs))))))))
 
 (def %eval-compound-redir

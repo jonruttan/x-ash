@@ -100,6 +100,8 @@
 (def mk-tok-sq (fn (_ s) (list (lit tok-sq) s)))
 
 (def mk-tok-dq (fn (_ s) (list (lit tok-dq) s)))
+
+(def mk-tok-io (fn (_ s) (list (lit tok-io) s)))
 ; --- Shared reader: extract consumed text as word token ---
 
 (def %sh-word-reader
@@ -714,6 +716,9 @@
   (fn (_ buffer score chr)
     (match
       ((%sh-digit? chr) %sh-int-body)
+      ; A run that meets `<` or `>` is a descriptor number: IO-NUMBER's, below.
+      ((= chr (char->integer #\<)) ())
+      ((= chr (char->integer #\>)) ())
       ((%sh-word-break? chr)
         (do (buffer-unread buffer) (score-set score 1 buffer)))
       ; Not a digit and not a break: the run is a word from here on, and the
@@ -739,6 +744,33 @@
           ((= chr (char->integer #\+)) (do (score-set score 1 buffer) %sh-int-body))
           (#t ()))))
     (pair (lit read) %sh-word-reader)))
+
+; --- IO-NUMBER: a descriptor number against a redirection (positive) ---
+;
+; `2>err` names descriptor 2 because the digits run straight into the
+; operator, while `echo 2 >out` writes the word 2 to out, and so does
+; `echo "$n" >out` whatever $n holds.  Only here, where the characters are,
+; can the two be told apart: a digit run that meets `<` or `>` is a tok-io,
+; INTEGER declining it, and any other digit run is INTEGER's.
+(def %sh-io-read (fn (_ . args) (mk-tok-io (buffer-token (first args)))))
+
+(def %sh-io-body ())
+
+(set! %sh-io-body
+  (fn (_ buffer score chr)
+    (match
+      ((%sh-digit? chr) %sh-io-body)
+      ((= chr (char->integer #\<)) (do (buffer-unread buffer) (score-set score 1 buffer)))
+      ((= chr (char->integer #\>)) (do (buffer-unread buffer) (score-set score 1 buffer)))
+      (#t ()))))
+
+(%sh-tok-type!
+  "IO-NUMBER"
+  (list
+    (pair
+      (lit analyse)
+      (fn (_ buffer score chr) (if (%sh-digit? chr) %sh-io-body ())))
+    (pair (lit read) %sh-io-read)))
 ; --- Convenience: tokenize a string ---
 
 ; A safety net under the parser: every predicate in eval.x opens with
