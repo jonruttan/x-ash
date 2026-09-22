@@ -544,11 +544,24 @@
 ; in the background.  `$@` and `$*` never are.  `${X:-default}` and `${X+alt}`
 ; exist precisely to ask about an unset parameter, and POSIX exempts them, so
 ; they go through %sh-var-value directly.
+; An expansion's error, written where it happens rather than where it is
+; caught.  The standard error in force is the one the message belongs on -- a
+; subshell's, a pipeline stage's, a command substitution's -- and unwinding
+; puts the shell's own back first, so a report written after it would go to the
+; wrong place.  The raise carries the sentinel %sh-report knows not to write
+; again.  A simple command's own redirections are not in force yet, since a
+; word is expanded before they are applied, which is where both shells write
+; it too.
+(def %sh-expansion-error
+  (fn (_ text)
+    (do (%stderr "ash: " text "\n") (error (lit %sh-reported)))))
+
 (def %sh-var-value-checked
   (fn (_ name)
     (match
       ((null? %sh-opt-nounset) (%sh-var-value name))
-      ((%sh-param-unset? name) (error (string-append name ": parameter not set")))
+      ((%sh-param-unset? name)
+        (%sh-expansion-error (string-append name ": parameter not set")))
       (#t (%sh-var-value name)))))
 
 ; --- Positional parameters and the function table ---------------------------
@@ -1392,15 +1405,17 @@
   (fn (_ name val fired? word)
     (match
       ((not fired?) val)
-      ((not (%sh-name? name)) (error (string-append name ": bad variable name")))
+      ((not (%sh-name? name))
+        (%sh-expansion-error (string-append name ": bad variable name")))
       (#t (do (def v (%sh-word-value word)) (%sh-var-set! name v) v)))))
 
 (def %sh-param-error
   (fn (_ name val fired? word)
     (if fired?
       (let ((v (%sh-word-value word)))
-        (error (string-append name ": "
-                 (if (= (string-length v) 0) "parameter not set" v))))
+        (%sh-expansion-error
+          (string-append name ": "
+            (if (= (string-length v) 0) "parameter not set" v))))
       val)))
 
 ; `+` fires on the opposite condition to the other three: it wants the word
@@ -1527,7 +1542,7 @@
 ; refused rather than read as a name the shell has never been given.
 (def %sh-bad-substitution
   (fn (_ inner)
-    (error (string-append "${" inner "}: bad substitution"))))
+    (%sh-expansion-error (string-append "${" inner "}: bad substitution"))))
 
 ; ${...} in full.  Answers the expanded text.
 (def %sh-brace-expand
@@ -1838,7 +1853,8 @@
         (def d (%sh-digit-value (string-ref text i)))
         (if (fx<? d base)
           (self text (fx+ i 1) n base (+ (* acc base) d))
-          (error (string-append "arithmetic: invalid number " text))))
+          (%sh-expansion-error
+            (string-append "arithmetic: invalid number " text))))
       acc)))
 
 (def %sh-ar-hex?
@@ -2112,7 +2128,8 @@
     (let ((n (string-length text)))
       (let ((r (%sh-ar-assignment text 0 n #t)))
         (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
-          (error (string-append "arithmetic: syntax error in " text))
+          (%sh-expansion-error
+            (string-append "arithmetic: syntax error in " text))
           (convert (%sh-ar-val r) %string))))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
