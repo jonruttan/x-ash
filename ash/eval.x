@@ -1813,12 +1813,10 @@
 ; seen to: 48 is the code of #\0, and a..f and A..F read as 10..15.
 (def %sh-digit-value
   (fn (_ c)
-    (do
-      (def v (char->integer c))
-      (match
-        ((%sh-digit? c) (- v 48))
-        ((fx<? c #\a) (- v 55))
-        (#t (- v 87))))))
+    (match
+      ((%sh-digit? c) (fx+ c -48))
+      ((fx<? c #\a) (fx+ c -55))
+      (#t (fx+ c -87)))))
 
 (def %sh-ar-hex-end
   (fn (self s i n)
@@ -1842,19 +1840,43 @@
       (%sh-ar-hex-end s (+ i 2) n)
       (%sh-ar-digits-end s i n))))
 
-; The digits from I, read in BASE.  A digit the base does not have is an
+; The digits from I to N, read in BASE.  A digit the base does not have is an
 ; error rather than a silent misreading: `08` is a typo for either 8 or 010,
 ; and answering one of them would be a guess.
+;
+; Fifteen digits or fewer stay inside a machine word in any base up to 16 --
+; 16^15 is 2^60 -- so they are read on the integer doors, whose sums wrap past
+; one; a longer run is read with the tower, which carries it into a bignum when
+; it has to.
 (def %sh-ar-digits-value
+  (fn (_ text i n base)
+    (if (fx<? n (fx+ i 16))
+      (%sh-ar-digits-short text i n base 0)
+      (%sh-ar-digits-long text i n base 0))))
+
+(def %sh-ar-digits-short
+  (fn (self text i n base acc)
+    (if (fx<? i n)
+      (do
+        (def d (%sh-digit-value (string-ref text i)))
+        (if (fx<? d base)
+          (self text (fx+ i 1) n base (fx+ (fx* acc base) d))
+          (%sh-ar-invalid-number text)))
+      acc)))
+
+(def %sh-ar-digits-long
   (fn (self text i n base acc)
     (if (fx<? i n)
       (do
         (def d (%sh-digit-value (string-ref text i)))
         (if (fx<? d base)
           (self text (fx+ i 1) n base (+ (* acc base) d))
-          (%sh-expansion-error
-            (string-append "arithmetic: invalid number " text))))
+          (%sh-ar-invalid-number text)))
       acc)))
+
+(def %sh-ar-invalid-number
+  (fn (_ text)
+    (%sh-expansion-error (string-append "arithmetic: invalid number " text))))
 
 (def %sh-ar-hex?
   (fn (_ text n) (and (> n 2) (%sh-ar-hex-prefix? text 0 n))))
@@ -1873,11 +1895,11 @@
     (do
       (def n (string-length text))
       (match
-        ((%sh-ar-hex? text n) (%sh-ar-digits-value text 2 n 16 0))
-        ((%sh-ar-octal? text n) (%sh-ar-digits-value text 1 n 8 0))
+        ((%sh-ar-hex? text n) (%sh-ar-digits-value text 2 n 16))
+        ((%sh-ar-octal? text n) (%sh-ar-digits-value text 1 n 8))
         ; Decimal digits by the same loop: `convert` costs several times as
         ; much, and is left for text that is not digits alone.
-        ((%all-digits? text) (%sh-ar-digits-value text 0 n 10 0))
+        ((%all-digits? text) (%sh-ar-digits-value text 0 n 10))
         (#t (do (def v (guard (_ ()) (convert text %int)))
                 (if (null? v) 0 v)))))))
 
@@ -2691,7 +2713,7 @@
 ; which costs several times as much.  Nil when S is not all digits.
 (def %sh-digits-int
   (fn (_ s)
-    (if (%all-digits? s) (%sh-ar-digits-value s 0 (string-length s) 10 0) ())))
+    (if (%all-digits? s) (%sh-ar-digits-value s 0 (string-length s) 10) ())))
 
 ; Which descriptor an operator redirects when the script names none.
 (def %sh-input-ops (list "<" "<>" "<&" "<<" "<<-"))
@@ -2974,7 +2996,7 @@
       ((= (string-ref s (fx+ i 1)) #\0)
         (do
           (def e (%sh-octal-end s (fx+ i 2) n (fx+ i 5)))
-          (def v (%sh-ar-digits-value s (fx+ i 2) e 8 0))
+          (def v (%sh-ar-digits-value s (fx+ i 2) e 8))
           (self s e n (pair (%sh-byte-string (if (fx<? v 256) v (fx+ v -256))) out))))
       (#t
         (do
@@ -3346,7 +3368,7 @@
     (match
       ((not (fx<? i n)) ())
       ((not (%all-digits-from? word i n)) ())
-      (#t (let ((v (%sh-ar-digits-value word i n 10 0)))
+      (#t (let ((v (%sh-ar-digits-value word i n 10)))
             (if negative? (- 0 v) v))))))
 
 (def %sh-test-1
