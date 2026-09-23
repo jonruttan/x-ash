@@ -158,10 +158,11 @@
 ; call before it reaches an element -- and the evaluator calls these for every
 ; word and every command: `[ a = b ]` alone asked for a length, a take and a
 ; last.  Every caller holds a proper list, so none needs the sequence
-; conversion the class exists to provide.
+; conversion the class exists to provide.  A count here is a position in such
+; a list -- never nil, never a bignum -- so it steps on the integer doors.
 (def length (fn (_ l) (%ash-len l 0)))
 (def %ash-len
-  (fn (self l n) (if (null? l) n (self (rest l) (+ n 1)))))
+  (fn (self l n) (if (null? l) n (self (rest l) (fx+ n 1)))))
 
 (def append (fn (_ a b) (%ash-rev (%ash-rev a ()) b)))
 
@@ -182,16 +183,16 @@
 (def %ash-take
   (fn (self n l acc)
     (match
-      ((<= n 0) acc)
+      ((not (fx<? 0 n)) acc)
       ((null? l) acc)
-      (#t (self (- n 1) (rest l) (pair (first l) acc))))))
+      (#t (self (fx+ n -1) (rest l) (pair (first l) acc))))))
 
 (def drop
   (fn (self n l)
     (match
-      ((<= n 0) l)
+      ((not (fx<? 0 n)) l)
       ((null? l) l)
-      (#t (self (- n 1) (rest l))))))
+      (#t (self (fx+ n -1) (rest l))))))
 
 ; Past the end is nil rather than a raise; every caller checks the length
 ; first.
