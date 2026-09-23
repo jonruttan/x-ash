@@ -5009,21 +5009,32 @@
 (def %sh-nest-delta
   (fn (_ tok)
     (match
-      ((%sh-word-among? tok %sh-block-openers) 1)
-      ((%sh-word-among? tok %sh-block-closers) -1)
+      ((not (%tok-is-keyword? tok)) 0)
+      ((%sh-word-in? (%tok-word-val tok) %sh-block-openers) 1)
+      ((%sh-word-in? (%tok-word-val tok) %sh-block-closers) -1)
       (#t 0))))
 
+; The walk goes over the token list and sets the cursor once, where it stops,
+; and not at all when it stops where it started, as it does on the `fi` after
+; a branch that ran: a cursor step is a write through the platform's pair
+; setter, and costs more than the rest of a token's turn.  The depth is a count
+; the walk keeps, never nil, so it steps on the integer doors.
 (def %sh-skip-block
-  (fn (self cur depth stop?)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (and (= depth 0) (stop? tok))
-          tok
-          (do
-            (%cursor-advance! cur)
-            (let ((d (+ depth (%sh-nest-delta tok))))
-              (self cur (if (< d 0) 0 d) stop?))))))))
+  (fn (_ cur depth stop?)
+    (do
+      (def ts (%sh-skip-block-walk (first cur) depth stop?))
+      (unless (same? ts (first cur)) (set-first! cur ts))
+      (if (null? ts) () (first ts)))))
+
+(def %sh-skip-block-walk
+  (fn (self ts depth stop?)
+    (match
+      ((null? ts) ts)
+      ((if (= depth 0) (stop? (first ts)) ()) ts)
+      (#t
+        (do
+          (def d (fx+ depth (%sh-nest-delta (first ts))))
+          (self (rest ts) (if (fx<? d 0) 0 d) stop?))))))
 
 ; Skip to a depth-0 stop token and CONSUME it.  WHAT names the construct for
 ; the error when the input runs out first.
@@ -5903,22 +5914,29 @@
 ; counts its own keywords.
 (def %sh-compound-delta
   (fn (_ tok paren?)
-    (if (not paren?)
-      (%sh-nest-delta tok)
-      (if (and (eq? (first tok) (lit tok-op)) (not (%tok-pattern-paren? tok)))
-        (let ((op (first (rest tok))))
-          (if (string=? op "(") 1 (if (string=? op ")") (- 0 1) 0)))
-        0))))
+    (match
+      ((not paren?) (%sh-nest-delta tok))
+      ((not (eq? (first tok) (lit tok-op))) 0)
+      ((%tok-pattern-paren? tok) 0)
+      ((string=? (first (rest tok)) "(") 1)
+      ((string=? (first (rest tok)) ")") -1)
+      (#t 0))))
 
 ; Read past one whole compound, leaving the cursor on whatever follows it.
 ; Entered ON the opening token with depth 0, so the opener takes the depth to
-; 1 and the matching closer brings it back to 0 and stops.
+; 1 and the matching closer brings it back to 0 and stops.  Walked over the
+; token list, with the cursor set once at the end, as %sh-skip-block is.
 (def %sh-skip-compound
-  (fn (self cur depth paren?)
-    (unless (%cursor-empty? cur)
-      (let ((d (+ depth (%sh-compound-delta (%cursor-peek cur) paren?))))
-        (%cursor-advance! cur)
-        (when (> d 0) (self cur d paren?))))))
+  (fn (_ cur depth paren?)
+    (set-first! cur (%sh-skip-compound-walk (first cur) depth paren?))))
+
+(def %sh-skip-compound-walk
+  (fn (self ts depth paren?)
+    (if (null? ts)
+      ts
+      (do
+        (def d (fx+ depth (%sh-compound-delta (first ts) paren?)))
+        (if (fx<? 0 d) (self (rest ts) d paren?) (rest ts))))))
 
 ; The redirections written after a construct: `done > log`, and `done 2> log`,
 ; whose descriptor number the tokenizer hands over as a tok-io.
