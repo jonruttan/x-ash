@@ -129,13 +129,15 @@
 ; nothing.  A character compares as its code point, and a bignum still reaches
 ; its own handler.
 ;
-; They are unchecked: a nil operand crashes the process instead of raising.
+; They are unchecked: a nil operand crashes the process instead of raising, and
+; a sum or product past a machine word wraps rather than carrying into a bignum.
 ; They are for operands that cannot be nil -- a position, a length, a character
 ; out of string-ref or handed to a reader hook -- and never for a value from
 ; the script, which converts to nil when it is not a number.  `>=` is spelled
 ; (not (fx<? a b)).
 (def fx<? (prim-ref (lit int) (lit <)))
 (def fx+ (prim-ref (lit int) (lit +)))
+(def fx* (prim-ref (lit int) (lit *)))
 
 ; REVERSE AND list->string RUN INSIDE READER CALLBACKS, so neither may be a
 ; class dispatch.  lib/x/reader/analyser.x states the rule outright: reader
