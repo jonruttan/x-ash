@@ -4979,10 +4979,10 @@
 ; malformed input cannot drive the count negative and swallow the rest.
 (def %sh-nest-delta
   (fn (_ tok)
-    (cond
+    (match
       ((%sh-word-among? tok %sh-block-openers) 1)
-      ((%sh-word-among? tok %sh-block-closers) (- 0 1))
-      (else 0))))
+      ((%sh-word-among? tok %sh-block-closers) -1)
+      (#t 0))))
 
 (def %sh-skip-block
   (fn (self cur depth stop?)
@@ -5949,51 +5949,75 @@
 ; What ends a stage -- AT DEPTH ZERO.  The same tokens inside a construct
 ; belong to the construct: `for i in 1; do echo x; done | wc` has two `;` and
 ; a stop word in its first stage, and none of them end it.
+; `;;` ends a command and is a distinct token from `;`, so it is listed apart:
+; a case stage must not swallow the clause terminator and the clauses after it.
+(def %sh-stage-end-ops (list "|" ";" ";;" "&" "&&" "||"))
+
 (def %sh-stage-end?
   (fn (_ cur tok)
-    (or
-      (%tok-is-newline? tok)
-      (%tok-is-op? tok "|")
-      (%tok-is-op? tok ";")
-      ; `;;` ends a command and is a distinct token from `;`, so the test above
-      ; does not catch it: a case stage must not swallow the clause terminator
-      ; and the clauses after it.
-      (%tok-is-op? tok ";;")
-      (%tok-is-op? tok "&")
-      (%tok-is-op? tok "&&")
-      (%tok-is-op? tok "||")
-      (and (%tok-is-word? tok) (%at-stop-word? cur)))))
+    (match
+      ((%tok-is-newline? tok) #t)
+      ((eq? (first tok) (lit tok-op))
+        (%sh-word-in? (first (rest tok)) %sh-stage-end-ops))
+      ((%tok-is-word? tok) (%at-stop-word? cur))
+      (#t ()))))
 
 ; A case pattern's parens are marked and counted by nothing (see
 ; %tok-pattern-paren?).  The floor stays under the count: malformed input can
 ; still hold a `)` that opens nothing, and a negative depth would cut the stage.
 (def %sh-paren-depth
   (fn (_ d tok)
-    (if (%tok-pattern-paren? tok)
-      d
-      (if (%tok-is-op? tok "(")
-        (+ d 1)
-        (if (and (%tok-is-op? tok ")") (> d 0)) (- d 1) d)))))
+    (match
+      ((%tok-pattern-paren? tok) d)
+      ((%tok-is-op? tok "(") (fx+ d 1))
+      ((if (fx<? 0 d) (%tok-is-op? tok ")") ()) (fx+ d -1))
+      (#t d))))
 
 ; Word nesting, floored: a stray `fi` in malformed input must not drive the
 ; count below zero and swallow the rest of the line.
 (def %sh-stage-wdepth
   (fn (_ d tok)
-    (let ((n (+ d (%sh-nest-delta tok))))
-      (if (< n 0) 0 n))))
+    (do
+      (def n (fx+ d (%sh-nest-delta tok)))
+      (if (fx<? n 0) 0 n))))
+
+; A token that ends no stage and nests nothing: a word no mark made a
+; keyword, a quoted word, a descriptor's number.  Most of a command's tokens
+; are these, so they are asked about first, and step past the questions a
+; keyword or an operator has to answer.
+(def %sh-plain-tok?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word)) (null? (rest (rest tok))))
+      ((eq? (first tok) (lit tok-sq)) #t)
+      ((eq? (first tok) (lit tok-dq)) #t)
+      ((eq? (first tok) (lit tok-io)) #t)
+      (#t ()))))
 
 (set! %collect-stage
-  (fn (self cur toks wdepth pdepth)
-    (if (%cursor-empty? cur)
-      (reverse toks)
-      (let ((tok (%cursor-peek cur)))
-        (if (and (= wdepth 0) (= pdepth 0) (%sh-stage-end? cur tok))
-          (reverse toks)
-          (do
-            (%cursor-advance! cur)
-            (self cur (pair tok toks)
-              (%sh-stage-wdepth wdepth tok)
-              (%sh-paren-depth pdepth tok))))))))
+  (fn (_ cur toks wdepth pdepth)
+    (%sh-collect-stage-from cur (first cur) toks wdepth pdepth)))
+
+; The walk itself, over the token list TS rather than a step of the cursor per
+; token: the cursor is set where the stage ends, standing on the token that
+; ends it.  %at-stop-word? reads the cursor, so it is set too before a token
+; that is not plain is asked whether it ends the stage.
+(def %sh-collect-stage-from
+  (fn (self cur ts toks wdepth pdepth)
+    (match
+      ((null? ts) (do (set-first! cur ts) (reverse toks)))
+      ((%sh-plain-tok? (first ts))
+        (self cur (rest ts) (pair (first ts) toks) wdepth pdepth))
+      ((if (= wdepth 0)
+         (if (= pdepth 0)
+           (do (set-first! cur ts) (%sh-stage-end? cur (first ts)))
+           ())
+         ())
+        (reverse toks))
+      (#t
+        (self cur (rest ts) (pair (first ts) toks)
+          (%sh-stage-wdepth wdepth (first ts))
+          (%sh-paren-depth pdepth (first ts)))))))
 ; Collect all pipeline stages
 
 (def %collect-stages ())
