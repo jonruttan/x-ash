@@ -1731,11 +1731,24 @@
         (pair "<<" (fn (_ a b) (<< a b)))
         (pair ">>" (fn (_ a b) (>> a b)))))
 
+; What `&&` and `||` answer from the left alone, or () when the right side is
+; still needed.  C settles this and POSIX defers to C: the side not taken is
+; not evaluated, which is what lets `$((n && total/n))` guard its own
+; division.
+(def %sh-ar-shorts
+  (list (pair "&&" (fn (_ a) (if (%sh-truthy? a) () 0)))
+        (pair "||" (fn (_ a) (if (%sh-truthy? a) 1 ())))))
+
 (def %sh-ar-rank-names
   (fn (self names rank out)
     (if (null? names)
       out
-      (self (rest names) rank (pair (pair (first names) rank) out)))))
+      (self (rest names) rank
+            (pair (pair (first names)
+                        (pair rank
+                              (pair (%sh-table-get (first names) %sh-ar-ops)
+                                    (%sh-table-get (first names) %sh-ar-shorts))))
+                  out)))))
 
 (def %sh-ar-rank-levels
   (fn (self levels rank out)
@@ -1744,10 +1757,13 @@
       (self (rest levels) (+ rank 1)
             (%sh-ar-rank-names (first levels) rank out)))))
 
-; Every binary operator as (name . rank), its rank being its level's place in
-; %sh-ar-levels counted from 1 at the loosest -- taken from the levels so the
-; two cannot drift apart.  Below the walks that build it because this is a
-; value read as the file loads, not a body resolved when it is called.
+; Every binary operator as (NAME RANK OP . SHORT).  RANK is its level's place
+; in %sh-ar-levels counted from 1 at the loosest, OP its function in
+; %sh-ar-ops, and SHORT its function in %sh-ar-shorts or ().  All three come
+; from those tables, which stay the one place an operator is written, and ride
+; in the entry so an operator is applied without its name being looked up
+; again.  Below the walks that build it because this is a value read as the
+; file loads, not a body resolved when it is called.
 (def %sh-ar-ranks (%sh-ar-rank-levels %sh-ar-levels 1 ()))
 
 (def %sh-ar-skip-ws
@@ -1830,14 +1846,16 @@
 ; converted.
 (def %sh-ar-hex-prefix?
   (fn (_ s i n)
-    (and (< (+ i 1) n)
-         (= (string-ref s i) #\0)
-         (let ((c (string-ref s (+ i 1)))) (or (= c #\x) (= c #\X))))))
+    (match
+      ((not (fx<? (fx+ i 1) n)) ())
+      ((not (= (string-ref s i) #\0)) ())
+      ((= (string-ref s (fx+ i 1)) #\x) #t)
+      (#t (= (string-ref s (fx+ i 1)) #\X)))))
 
 (def %sh-ar-number-end
   (fn (_ s i n)
     (if (%sh-ar-hex-prefix? s i n)
-      (%sh-ar-hex-end s (+ i 2) n)
+      (%sh-ar-hex-end s (fx+ i 2) n)
       (%sh-ar-digits-end s i n))))
 
 ; The digits from I to N, read in BASE.  A digit the base does not have is an
@@ -1879,13 +1897,14 @@
     (%sh-expansion-error (string-append "arithmetic: invalid number " text))))
 
 (def %sh-ar-hex?
-  (fn (_ text n) (and (> n 2) (%sh-ar-hex-prefix? text 0 n))))
+  (fn (_ text n) (if (fx<? 2 n) (%sh-ar-hex-prefix? text 0 n) ())))
 
 (def %sh-ar-octal?
   (fn (_ text n)
-    (and (> n 1)
-         (= (string-ref text 0) #\0)
-         (%sh-digit? (string-ref text 1)))))
+    (match
+      ((not (fx<? 1 n)) ())
+      ((not (= (string-ref text 0) #\0)) ())
+      (#t (%sh-digit? (string-ref text 1))))))
 
 ; An unset or non-numeric name is 0, which is POSIX.  `convert` answers nil
 ; for both rather than raising, so a guard alone does not catch it -- that nil
@@ -1909,11 +1928,12 @@
 ; value, is read as it stands.
 (def %sh-ar-value-num
   (fn (_ text)
-    (let ((len (string-length text)))
+    (do
+      (def len (string-length text))
       (match
         ((= len 0) 0)
         ((%sh-digit? (string-ref text 0))
-          (if (%sh-ws-char? (string-ref text (- len 1)))
+          (if (%sh-ws-char? (string-ref text (fx+ len -1)))
             (%sh-ar-padded-num text len)
             (%sh-ar-num text)))
         (#t (%sh-ar-padded-num text len))))))
@@ -1923,20 +1943,21 @@
   (fn (self s n)
     (match
       ((not (fx<? 0 n)) n)
-      ((%sh-ws-char? (string-ref s (- n 1))) (self s (- n 1)))
+      ((%sh-ws-char? (string-ref s (fx+ n -1))) (self s (fx+ n -1)))
       (#t n))))
 
 (def %sh-ar-padded-num
   (fn (_ text len)
-    (let ((n (%sh-ar-ws-before text len)))
-      (let ((i (%sh-ar-skip-ws text 0 n)))
-        (match
-          ((not (fx<? i n)) 0)
-          ((= (string-ref text i) #\-)
-            (- 0 (%sh-ar-num (substring text (fx+ i 1) n))))
-          ((= (string-ref text i) #\+)
-            (%sh-ar-num (substring text (fx+ i 1) n)))
-          (#t (%sh-ar-num (substring text i n))))))))
+    (do
+      (def n (%sh-ar-ws-before text len))
+      (def i (%sh-ar-skip-ws text 0 n))
+      (match
+        ((not (fx<? i n)) 0)
+        ((= (string-ref text i) #\-)
+          (- 0 (%sh-ar-num (substring text (fx+ i 1) n))))
+        ((= (string-ref text i) #\+)
+          (%sh-ar-num (substring text (fx+ i 1) n)))
+        (#t (%sh-ar-num (substring text i n)))))))
 
 (def %sh-ar-binary ())
 (def %sh-ar-climb ())
@@ -2010,7 +2031,7 @@
   (fn (_ entry lowest)
     (match
       ((null? entry) ())
-      ((fx<? (rest entry) lowest) ())
+      ((fx<? (first (rest entry)) lowest) ())
       (#t #t))))
 
 ; Fold each further operator onto what is already built.  LIVE? says whether
@@ -2025,37 +2046,30 @@
       (if (not (%sh-ar-binds? entry lowest))
         (%sh-ar (%sh-ar-val left) i)
         (do
-          (def op (first entry))
-          (def known (%sh-ar-known op (%sh-ar-val left) live?))
-          (def right (%sh-ar-binary s (fx+ i (string-length op)) n
-                       (fx+ (rest entry) 1) (and live? (null? known))))
+          (def known (%sh-ar-known entry (%sh-ar-val left) live?))
+          (def right (%sh-ar-binary s (fx+ i (string-length (first entry))) n
+                       (fx+ (first (rest entry)) 1) (and live? (null? known))))
           (self s
-            (%sh-ar (%sh-ar-combine op known (%sh-ar-val left)
+            (%sh-ar (%sh-ar-combine entry known (%sh-ar-val left)
                                     (%sh-ar-val right) live?)
                     (%sh-ar-pos right))
             n lowest live?))))))
 
-; What `&&` and `||` answer from the left alone, or () when the right side is
-; still needed.  C settles this and POSIX defers to C: the side not taken is
-; not evaluated, which is what lets `$((n && total/n))` guard its own
-; division.
-(def %sh-ar-shorts
-  (list (pair "&&" (fn (_ a) (if (%sh-truthy? a) () 0)))
-        (pair "||" (fn (_ a) (if (%sh-truthy? a) 1 ())))))
-
+; What ENTRY's operator answers from LEFT alone, or () when the right side is
+; still needed: only `&&` and `||` carry a SHORT.
 (def %sh-ar-known
-  (fn (_ op left live?)
-    (if (not live?)
-      ()
-      (let ((short (%sh-table-get op %sh-ar-shorts)))
-        (if (null? short) () (short left))))))
+  (fn (_ entry left live?)
+    (match
+      ((not live?) ())
+      ((null? (rest (rest (rest entry)))) ())
+      (#t ((rest (rest (rest entry))) left)))))
 
 (def %sh-ar-combine
-  (fn (_ op known left right live?)
+  (fn (_ entry known left right live?)
     (match
       ((not live?) 0)
       ((not (null? known)) known)
-      (#t ((%sh-table-get op %sh-ar-ops) left right)))))
+      (#t ((first (rest (rest entry))) left right)))))
 
 ; `c ? a : b`, looser than every binary operator and grouping to the right.
 ; Both branches are walked so the expression ends where it should; only the
@@ -2098,6 +2112,17 @@
       (def binary (%sh-ar-op-at s k n %sh-ar-ranks ()))
       (if (null? binary) () (fx<? len (string-length (first binary)))))))
 
+; Is there an `=` from K up to STOP, and before N?  Every assignment operator is
+; one to three characters ending in `=`, so an operator at K with none in its
+; first three characters is not one, and the table need not be asked.
+(def %sh-ar-eq-near?
+  (fn (self s k n stop)
+    (match
+      ((not (fx<? k n)) ())
+      ((not (fx<? k stop)) ())
+      ((= (string-ref s k) #\=) #t)
+      (#t (self s (fx+ k 1) n stop)))))
+
 ; When the text at I is an assignment, its NAME, its operator entry and where
 ; its right side starts; () when it is not one.
 (def %sh-ar-assign-target
@@ -2106,7 +2131,9 @@
       (do
         (def e (%sh-name-end s i n))
         (def k (%sh-ar-skip-ws s e n))
-        (def op (if (fx<? k n) (%sh-ar-op-at s k n %sh-ar-assign-ops ()) ()))
+        (def op (if (%sh-ar-eq-near? s k n (fx+ k 3))
+                  (%sh-ar-op-at s k n %sh-ar-assign-ops ())
+                  ()))
         (match
           ((null? op) ())
           ((%sh-ar-longer-binary? s k n (string-length (first op))) ())
@@ -2129,16 +2156,18 @@
 
 (def %sh-ar-assign
   (fn (_ s n target live?)
-    (let ((name (first target))
-          (op (first (rest target)))
-          (right (%sh-ar-assignment s (first (rest (rest target))) n live?)))
+    (do
+      (def name (first target))
+      (def op (first (rest target)))
+      (def right (%sh-ar-assignment s (first (rest (rest target))) n live?))
       (if (not live?)
         (%sh-ar 0 (%sh-ar-pos right))
-        (let ((value (if (null? (rest op))
+        (do
+          (def value (if (null? (rest op))
                        (%sh-ar-val right)
                        ((%sh-table-get (rest op) %sh-ar-ops)
                         (%sh-ar-value-num (%sh-var-value name))
-                        (%sh-ar-val right)))))
+                        (%sh-ar-val right))))
           (%sh-var-set! name (%ash-number->str value))
           (%sh-ar value (%sh-ar-pos right)))))))
 
@@ -2146,20 +2175,23 @@
 ; than text to skip, so `$((1 2))` and `$((1=2))` are refused.
 (def %sh-arith-eval
   (fn (_ text)
-    (let ((n (string-length text)))
-      (let ((r (%sh-ar-assignment text 0 n #t)))
-        (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
-          (%sh-expansion-error
-            (string-append "arithmetic: syntax error in " text))
-          (%ash-number->str (%sh-ar-val r)))))))
+    (do
+      (def n (string-length text))
+      (def r (%sh-ar-assignment text 0 n #t))
+      (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
+        (%sh-expansion-error
+          (string-append "arithmetic: syntax error in " text))
+        (%ash-number->str (%sh-ar-val r))))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
 (def %sh-arith?
   (fn (_ inner)
-    (let ((n (string-length inner)))
-      (and (>= n 2)
-           (and (= (string-ref inner 0) #\()
-                (= (string-ref inner (- n 1)) #\)))))))
+    (do
+      (def n (string-length inner))
+      (match
+        ((not (fx<? 1 n)) ())
+        ((not (= (string-ref inner 0) #\()) ())
+        (#t (= (string-ref inner (fx+ n -1)) #\)))))))
 
 ; The expression inside an arithmetic expansion's `(( ))`, with its parameters,
 ; command substitutions and nested arithmetic expanded as in double quotes
@@ -2168,11 +2200,12 @@
 ; reaches the end says there is nothing to expand without building anything.
 (def %sh-arith-text
   (fn (_ inner)
-    (let ((text (substring inner 1 (- (string-length inner) 1))))
-      (let ((n (string-length text)))
-        (if (= (%sh-run-end (%sh-plain-run text 0 n %sh-mode-dq #t ())) n)
-          text
-          (%sh-expand-str-dq text))))))
+    (do
+      (def text (substring inner 1 (fx+ (string-length inner) -1)))
+      (def n (string-length text))
+      (if (= (%sh-run-end (%sh-plain-run text 0 n %sh-mode-dq #t ())) n)
+        text
+        (%sh-expand-str-dq text)))))
 
 ; --- The walk ---------------------------------------------------------------
 ;
