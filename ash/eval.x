@@ -646,11 +646,11 @@
 ; The variables whose name is punctuation.  Thunks, because each is a question
 ; about the shell's current state rather than a stored value.
 (def %sh-special-vars
-  (list (pair "?" (fn (_) (convert %sh-status %string)))
-        (pair "$" (fn (_) (convert %sh-pid %string)))
-        (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (convert %sh-bg-pid %string))))
+  (list (pair "?" (fn (_) (%ash-number->str %sh-status)))
+        (pair "$" (fn (_) (%ash-number->str %sh-pid)))
+        (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (%ash-number->str %sh-bg-pid))))
         (pair "-" (fn (_) (%sh-flags)))
-        (pair "#" (fn (_) (convert (length %sh-args) %string)))
+        (pair "#" (fn (_) (%ash-number->str (length %sh-args))))
         ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
         ; same thing at all: `"$@"` is one field per parameter and never
         ; reaches this table -- %sh-expand-dollar answers it directly, because
@@ -1556,9 +1556,8 @@
         ; `${#:-x}` and `${##pat}`, which the arm below reads.
         ((and (> n 1) (= (string-ref inner 0) #\#)
               (= (string-length (%sh-param-name (substring inner 1 n))) (- n 1)))
-          (convert
-            (string-length (%sh-var-value-checked (substring inner 1 n)))
-            %string))
+          (%ash-number->str
+            (string-length (%sh-var-value-checked (substring inner 1 n)))))
         (else
           (let ((name (%sh-param-name inner)))
             (let ((tail (substring inner (string-length name) n)))
@@ -2118,7 +2117,7 @@
                        ((%sh-table-get (rest op) %sh-ar-ops)
                         (%sh-ar-value-num (%sh-var-value name))
                         (%sh-ar-val right)))))
-          (%sh-var-set! name (convert value %string))
+          (%sh-var-set! name (%ash-number->str value))
           (%sh-ar value (%sh-ar-pos right)))))))
 
 ; The whole text is one expression.  Anything left after it is an error rather
@@ -2130,7 +2129,7 @@
         (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
           (%sh-expansion-error
             (string-append "arithmetic: syntax error in " text))
-          (convert (%sh-ar-val r) %string))))))
+          (%ash-number->str (%sh-ar-val r)))))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
 (def %sh-arith?
@@ -4062,7 +4061,7 @@
   (fn (self text rows)
     (if (null? rows)
       ()
-      (if (string=? text (convert (rest (first rows)) %string))
+      (if (string=? text (%ash-number->str (rest (first rows))))
         (first (first rows))
         (self text (rest rows))))))
 
@@ -4258,7 +4257,7 @@
 (def %sh-getopts-save
   (fn (_ optind)
     (set! %sh-optind-seen optind)
-    (%sh-var-set! "OPTIND" (convert optind %string))))
+    (%sh-var-set! "OPTIND" (%ash-number->str optind))))
 
 ; Finish one call: park OPTIND, set NAME and OPTARG, answer the status.
 (def %sh-getopts-yield
@@ -6484,7 +6483,7 @@
       (let ((d (%sh-hd-delim line (if strip? (fx+ i 3) (fx+ i 2)) n)))
         (let ((e (first (rest d))))
           (%sh-hd-scan line e n stack () e
-            (pair (string-append "<<" (convert idx %string))
+            (pair (string-append "<<" (%ash-number->str idx))
                   (pair (substring line from i) out))
             (pair (list (first d) strip? (first (rest (rest d)))) pending)
             (fx+ idx 1)))))))

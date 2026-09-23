@@ -252,6 +252,16 @@
       ((null? (rest pieces)) (first pieces))
       (#t (%str8-join Str8 sep pieces)))))
 
+; A number's text.  A fixnum is written by %number->str, the platform's own
+; number printer, which the printer uses for every integer it writes: a tenth
+; of what `convert` costs.  It divides with the integer primitives, so any
+; other number -- a bignum out of arithmetic -- goes through `convert`.
+(def %ash-type-of (prim-ref (lit type) (lit of)))
+(def %ash-int-type (%ash-type-of 0))
+(def %ash-number->str
+  (fn (_ n)
+    (if (eq? (%ash-type-of n) %ash-int-type) (%number->str n) (convert n %string))))
+
 (def sh-fork (fn (_) (%sys-fork Sys)))
 (def sh-exec (fn (_ path args) (%sys-exec Sys path args)))
 (def sh-wait (fn (_ pid) (%sys-wait Sys pid)))
