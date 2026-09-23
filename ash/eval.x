@@ -4594,8 +4594,10 @@
 (def %sh-next-assign?
   (fn (_ assign? tok val)
     (match
+      ; A word past the leading run and no declaration's: the common case.
+      ((not assign?) ())
       ((eq? assign? (lit decl)) (lit decl))
-      ((not (and assign? (eq? (first tok) (lit tok-word)))) ())
+      ((not (eq? (first tok) (lit tok-word))) ())
       ((%is-assignment? val) #t)
       ((%sh-declaration? val) (lit decl))
       (#t ()))))
@@ -4866,57 +4868,63 @@
 ; leading run of a command, and every argument of a declaration utility.
 (set! %collect-cmd-tokens
   (fn (_ cur wds redirs assign?)
-    (if (%cursor-empty? cur)
-      (%sh-run-cmd (reverse wds) (reverse redirs))
-      (let ((tok (%cursor-peek cur)))
-        (if (%tok-is-newline? tok)
-          (%sh-run-cmd (reverse wds) (reverse redirs))
-          (let ((rop (%redir-op? tok)))
-            (if rop
-              (do
-                (%cursor-advance! cur)
-                (let ((fd (%default-fd rop)))
-                  (if (%cursor-empty? cur)
-                    (error "parse error: redirect without target")
-                    ; NOT SPLIT.  `> $f` with two fields in $f is an
-                    ; ambiguous redirect in POSIX, not two files; taking the
-                    ; unsplit reading keeps the common case right and the
-                    ; pathological one harmless.
-                    (%collect-cmd-tokens
-                      cur
-                      wds
-                      (pair (%sh-read-redir-target cur rop fd) redirs)
-                      assign?))))
-              (if (%tok-is-word? tok)
-                ; Every word after the first is an argument, reserved or not:
-                ; a command already begun is not a place a reserved word is
-                ; recognized (see %sh-mark-keywords).
-                (let ((val (%tok-word-val tok)))
-                  (do
-                    (%cursor-advance! cur)
-                    ; EXPANDED HERE, not in %sh-run-cmd, because this is the
-                    ; last place the token's QUOTING is still known.  `val`
-                    ; above stays raw: POSIX recognises reserved words before
-                    ; expansion, so a variable holding "then" must not become
-                    ; one.
-                    (%collect-cmd-tokens
-                      cur
-                      (%sh-push-fields
-                        (%sh-expand-tok tok
-                          (and assign?
-                               (eq? (first tok) (lit tok-word))
-                               (%is-assignment? val)))
-                        wds)
-                      redirs
-                      (%sh-next-assign? assign? tok val))))
-                ; `2>err`: the descriptor number the tokenizer found against
-                ; the operator.
-                (if (%tok-is-io? tok)
-                  (do
-                    (%cursor-advance! cur)
-                    (%collect-cmd-tokens
-                      cur wds (pair (%sh-io-redir cur tok) redirs) assign?))
-                  (%sh-run-cmd (reverse wds) (reverse redirs)))))))))))
+    (%sh-collect-words cur (first cur) wds redirs assign?)))
+
+; The walk over the token list TS.  A word -- the common token -- is expanded
+; and taken without a step of the cursor, which is set where the walk hands
+; over (see %sh-collect-stop).
+(def %sh-collect-words
+  (fn (self cur ts wds redirs assign?)
+    (match
+      ((null? ts) (%sh-collect-stop cur ts wds redirs assign?))
+      ; Every word after the first is an argument, reserved or not: a command
+      ; already begun is not a place a reserved word is recognized (see
+      ; %sh-mark-keywords).
+      ((%tok-is-word? (first ts))
+        (do
+          (def tok (first ts))
+          (def val (%tok-word-val tok))
+          ; EXPANDED HERE, not in %sh-run-cmd, because this is the last place
+          ; the token's QUOTING is still known.  `val` stays raw: POSIX
+          ; recognises reserved words before expansion, so a variable holding
+          ; "then" must not become one.
+          (self cur (rest ts)
+            (%sh-push-fields
+              (%sh-expand-tok tok
+                (if assign?
+                  (if (eq? (first tok) (lit tok-word)) (%is-assignment? val) ())
+                  ()))
+              wds)
+            redirs
+            (%sh-next-assign? assign? tok val))))
+      (#t (%sh-collect-stop cur ts wds redirs assign?)))))
+
+; Where the words stop, with the cursor set on the token that stopped them: a
+; redirection is read through it, and the walk goes on after; anything else
+; ends the command, which runs with the cursor standing there.
+(def %sh-collect-stop
+  (fn (_ cur ts wds redirs assign?)
+    (do
+      (set-first! cur ts)
+      (def rop (if (null? ts) () (%redir-op? (first ts))))
+      (match
+        ((not (null? rop))
+          (do
+            (%cursor-advance! cur)
+            ; NOT SPLIT.  `> $f` with two fields in $f is an ambiguous
+            ; redirect in POSIX, not two files; taking the unsplit reading
+            ; keeps the common case right and the pathological one harmless.
+            (%collect-cmd-tokens cur wds
+              (pair (%sh-read-redir-target cur rop (%default-fd rop)) redirs)
+              assign?)))
+        ; `2>err`: the descriptor number the tokenizer found against the
+        ; operator.
+        ((if (null? ts) () (%tok-is-io? (first ts)))
+          (do
+            (%cursor-advance! cur)
+            (%collect-cmd-tokens cur wds
+              (pair (%sh-io-redir cur (first ts)) redirs) assign?)))
+        (#t (%sh-run-cmd (reverse wds) (reverse redirs)))))))
 
 ; A command's words are expanded as they are collected, so this is where the
 ; command's substitutions start to count.
