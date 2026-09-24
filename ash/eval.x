@@ -4706,23 +4706,32 @@
 (def %is-assignment?
   (fn (_ word) (%sh-assign-scan word 0 (string-length word))))
 
-; The leading NAME=value words, and the command left after them.  Answers
-; (pair assignments remaining).
+; The leading assignment words, still tokens -- %sh-collect-words leaves them
+; unexpanded -- and the command's expanded words after them.  Answers
+; (pair assignments remaining).  A word that only expands to NAME=value is no
+; assignment: `x='a=1'; $x` runs a command named a=1.
 (def %sh-split-assignments
   (fn (self wds assigns)
-    (match
-      ((null? wds) (pair (reverse assigns) wds))
-      ((%is-assignment? (first wds)) (self (rest wds) (pair (first wds) assigns)))
-      (#t (pair (reverse assigns) wds)))))
+    (if (if (null? wds) () (pair? (first wds)))
+      (self (rest wds) (pair (first wds) assigns))
+      (pair (reverse assigns) wds))))
+
+; An assignment token, expanded now: after the command's other words, and after
+; every assignment before it has been made (POSIX 2.9.1, steps 2 and 4), so
+; `v=1 w=$v` sees v and `a=1 echo $a` does not.  Its value is not split or
+; globbed, and a tilde after its `=` expands.
+(def %sh-assignment-word
+  (fn (_ tok) (first (%sh-expand-tok tok #t))))
 
 ; NAME=VALUE words as ordinary assignments: what a command with no command name
 ; does, and what a special builtin's prefix does.
 (def %sh-apply-assignments
   (fn (self assigns)
     (unless (null? assigns)
-      (%sh-var-set! (%sh-assignment-name (first assigns))
-                    (%sh-assignment-value (first assigns)))
-      (self (rest assigns)))))
+      (do
+        (def word (%sh-assignment-word (first assigns)))
+        (%sh-var-set! (%sh-assignment-name word) (%sh-assignment-value word))
+        (self (rest assigns))))))
 
 ; A prefix assignment on any other command is exported to it: the variable is
 ; in the environment for as long as the command runs, and %sh-restore-values
@@ -4730,10 +4739,12 @@
 (def %sh-apply-exported
   (fn (self assigns)
     (unless (null? assigns)
-      (let ((name (%sh-assignment-name (first assigns))))
+      (do
+        (def word (%sh-assignment-word (first assigns)))
+        (def name (%sh-assignment-name word))
         (%sh-var-unset! name)
-        (sh-setenv name (%sh-assignment-value (first assigns))))
-      (self (rest assigns)))))
+        (sh-setenv name (%sh-assignment-value word))
+        (self (rest assigns))))))
 
 (def %sh-assignment-value
   (fn (_ word)
@@ -4757,7 +4768,9 @@
     (if (null? assigns)
       saved
       (self (rest assigns)
-            (pair (%sh-var-where (%sh-assignment-name (first assigns))) saved)))))
+            (pair (%sh-var-where
+                    (%sh-assignment-name (%tok-word-val (first assigns))))
+                  saved)))))
 
 (def %sh-var-where
   (fn (_ name)
@@ -4960,14 +4973,19 @@
           ; EXPANDED HERE, not in %sh-run-cmd, because this is the last place
           ; the token's QUOTING is still known.  `val` stays raw: POSIX
           ; recognises reserved words before expansion, so a variable holding
-          ; "then" must not become one.
+          ; "then" must not become one.  The command's own leading
+          ; assignments are the exception: they go on as tokens, quoting and
+          ; all, and %sh-run-cmd expands each once the words after it are
+          ; expanded and the assignments before it made.  A declaration
+          ; utility's assignment is an argument, expanded here, unsplit.
           (self cur (rest ts)
-            (%sh-push-fields
-              (%sh-expand-tok tok
-                (if assign?
-                  (if (eq? (first tok) (lit tok-word)) (%is-assignment? val) ())
-                  ()))
-              wds)
+            (match
+              ((not assign?) (%sh-push-fields (%sh-expand-tok tok ()) wds))
+              ((if (eq? (first tok) (lit tok-word)) (%is-assignment? val) ())
+                (if (eq? assign? #t)
+                  (pair tok wds)
+                  (%sh-push-fields (%sh-expand-tok tok #t) wds)))
+              (#t (%sh-push-fields (%sh-expand-tok tok ()) wds)))
             redirs
             (%sh-next-assign? assign? tok val))))
       (#t (%sh-collect-stop cur ts wds redirs assign?)))))

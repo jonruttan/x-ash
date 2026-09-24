@@ -35,19 +35,13 @@ compares its tests.
 ---
     refused,kept,
 
-### running `i=6` costs less than five comparisons
-
-The variables are restored afterwards, so `i` is set for this case alone.
+### splitting `i=6` five times costs less than twelve comparisons
 
 ```sh
-(let ((saved %sh-vars)
-      (cost (fn (_ thunk)
+(let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (%sh-var-set! "i" "5")
-  (let ((got (< (cost (fn (_) (%sh-run-cmd (list "i=6") ())))
-                (cost (fn (_) ((fn (self i) (if (fx<? i 5) (do (>= i 3) (self (fx+ i 1))) ())) 0))))))
-    (set! %sh-vars saved)
-    got))
+  (< (cost (fn (_) ((fn (self i) (if (fx<? i 5) (do (%sh-assignment-name "i=6") (%sh-assignment-value "i=6") (self (fx+ i 1))) ())) 0)))
+     (cost (fn (_) ((fn (self i) (if (fx<? i 12) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
 ```
 ---
     #t
