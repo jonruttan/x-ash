@@ -4302,8 +4302,13 @@
 ; Every way the shell or a subshell finishes comes through here.  The forks
 ; that exist to become another program or to move bytes do not: they clear the
 ; table instead, so a trap set by the script cannot fire in them.
+;
+; The exit trap sees the status the shell is leaving with as `$?`, and the
+; shell still leaves with that status, whatever the trap's commands answer,
+; unless the trap calls `exit` itself.
 (def %sh-exit-shell
   (fn (_ status)
+    (set! %sh-status status)
     (%sh-run-exit-trap)
     (sh-exit status)))
 
