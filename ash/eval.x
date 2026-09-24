@@ -1963,24 +1963,28 @@
 (def %sh-ar-climb ())
 (def %sh-ar-primary ())
 
+; The expression S is no arithmetic: an operand is missing -- the text ends, or
+; the character there starts none -- or a `(` has no `)`.  dash and bash both
+; refuse such an expression, the empty one included in dash.
+(def %sh-ar-syntax-error
+  (fn (_ s) (%sh-expansion-error (string-append "arithmetic: syntax error in " s))))
+
 (set! %sh-ar-primary
   (fn (_ s i0 n live?)
     (do
       (def i (%sh-ar-skip-ws s i0 n))
       (if (not (fx<? i n))
-        (%sh-ar 0 i)
+        (%sh-ar-syntax-error s)
         (do
           (def c (string-ref s i))
           (match
             ((= c #\()
               (do
                 (def inner (%sh-ar-assignment s (fx+ i 1) n live?))
-                ; Step over the closing paren if it is there.
                 (def e (%sh-ar-skip-ws s (%sh-ar-pos inner) n))
-                (%sh-ar (%sh-ar-val inner)
-                        (if (if (fx<? e n) (= (string-ref s e) #\)) ())
-                          (fx+ e 1)
-                          e))))
+                (if (if (fx<? e n) (= (string-ref s e) #\)) ())
+                  (%sh-ar (%sh-ar-val inner) (fx+ e 1))
+                  (%sh-ar-syntax-error s))))
             ((= c #\-)
               (do
                 (def r (%sh-ar-primary s (fx+ i 1) n live?))
@@ -2012,8 +2016,7 @@
                           (%sh-ar-value-num (%sh-var-value (substring s i e)))
                           0)
                         e)))
-            ; Anything else is not arithmetic; step over it rather than loop.
-            (#t (%sh-ar 0 (fx+ i 1)))))))))
+            (#t (%sh-ar-syntax-error s))))))))
 
 ; Operands joined by binary operators, read by rank.  An operator ranked below
 ; LOWEST belongs to an enclosing call and ends this one.  The right operand of
@@ -2179,8 +2182,7 @@
       (def n (string-length text))
       (def r (%sh-ar-assignment text 0 n #t))
       (if (fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
-        (%sh-expansion-error
-          (string-append "arithmetic: syntax error in " text))
+        (%sh-ar-syntax-error text)
         (%ash-number->str (%sh-ar-val r))))))
 
 ; Is this `$(` inner text an arithmetic expansion rather than a command one?
