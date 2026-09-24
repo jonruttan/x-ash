@@ -314,10 +314,16 @@
 ; Assign NAME where it already lives: the environment when it is exported,
 ; the table otherwise.  Under `set -a` every name assigned is exported, so one
 ; the table holds moves out of it.
+;
+; A name the table holds is not exported: every way into the environment or
+; the export marks takes a name out of the table.  So a name found there is
+; set in place, without asking the environment about it.
 (def %sh-var-set!
   (fn (_ name value)
     (when (%sh-readonly? name) (%sh-readonly-refuse name))
     (match
+      ((if (null? %sh-opt-allexport) (not (null? (%sh-table-get name %sh-vars))) ())
+        (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))
       ((%sh-var-exported? name)
         (do
           (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
@@ -4692,9 +4698,10 @@
 ; (pair assignments remaining).
 (def %sh-split-assignments
   (fn (self wds assigns)
-    (if (and (not (null? wds)) (%is-assignment? (first wds)))
-      (self (rest wds) (pair (first wds) assigns))
-      (pair (reverse assigns) wds))))
+    (match
+      ((null? wds) (pair (reverse assigns) wds))
+      ((%is-assignment? (first wds)) (self (rest wds) (pair (first wds) assigns)))
+      (#t (pair (reverse assigns) wds)))))
 
 ; NAME=VALUE words as ordinary assignments: what a command with no command name
 ; does, and what a special builtin's prefix does.
@@ -4718,18 +4725,17 @@
 
 (def %sh-assignment-value
   (fn (_ word)
-    (let ((n (string-length word)))
+    (do
+      (def n (string-length word))
       (substring word (fx+ (%sh-first-eq word 0 n) 1) n))))
 
+; The name before the first `=`, found by the same scan as the value after it.
 (def %sh-assignment-name
   (fn (_ word)
-    (let ((n (string-length word)))
-      (def find
-        (fn (self i)
-          (if (or (>= i n) (= (string-ref word i) #\=))
-            (substring word 0 i)
-            (self (+ i 1)))))
-      (find 0))))
+    (do
+      (def n (string-length word))
+      (def e (%sh-first-eq word 0 n))
+      (substring word 0 (if (fx<? e 0) n e)))))
 
 ; Where each named variable stands now, so that what a prefix assignment
 ; covered can be put back exactly: (NAME WHERE VALUE), WHERE being env, shell,
@@ -4788,23 +4794,25 @@
     ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
     ; would expand a variable's value -- `X='$Y'; echo $X` would print $Y's
     ; contents rather than the two characters it holds.
-    (let ((split (%sh-split-assignments wds ())))
-      (let ((assigns (first split)) (remaining (rest split)))
-        (if (null? remaining)
-          ; A command with no command name: bare assignments, or words that
-          ; expanded to nothing.  The values it set are the shell's from here
-          ; on, and its status is its last command substitution's, or 0 when
-          ; it performed none.
-          (do
-            (%sh-apply-assignments assigns)
-            (%sh-set-status
-              (if (null? %sh-subst-status) 0 %sh-subst-status)))
-          (do
-            (unless (null? %sh-opt-xtrace)
-              (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n"))
-            (%sh-exit-on-error
-             (%sh-set-status
-              (%sh-run-scoped assigns remaining redirs)))))))))
+    (do
+      (def split (%sh-split-assignments wds ()))
+      (def assigns (first split))
+      (def remaining (rest split))
+      (if (null? remaining)
+        ; A command with no command name: bare assignments, or words that
+        ; expanded to nothing.  The values it set are the shell's from here
+        ; on, and its status is its last command substitution's, or 0 when
+        ; it performed none.
+        (do
+          (%sh-apply-assignments assigns)
+          (%sh-set-status
+            (if (null? %sh-subst-status) 0 %sh-subst-status)))
+        (do
+          (unless (null? %sh-opt-xtrace)
+            (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n"))
+          (%sh-exit-on-error
+           (%sh-set-status
+            (%sh-run-scoped assigns remaining redirs))))))))
 
 ; A prefix assignment covers one command: it is in the environment the command
 ; runs in, and the shell's own value comes back afterwards, whether the
@@ -4812,14 +4820,16 @@
 ; what POSIX asks and what makes `X=1 export Y=2` leave X set.
 (def %sh-run-scoped
   (fn (_ assigns remaining redirs)
-    (if (or (null? assigns) (%sh-special-builtin? (first remaining)))
+    (if (if (null? assigns) #t (%sh-special-builtin? (first remaining)))
       (do
         (%sh-apply-assignments assigns)
         (%sh-dispatch remaining redirs %sh-functions))
-      (let ((saved (%sh-save-values assigns ())))
+      (do
+        (def saved (%sh-save-values assigns ()))
         (%sh-apply-exported assigns)
         (guard (e (do (%sh-restore-values saved) (error e)))
-          (let ((status (%sh-dispatch remaining redirs %sh-functions)))
+          (do
+            (def status (%sh-dispatch remaining redirs %sh-functions))
             (%sh-restore-values saved)
             status))))))
 
