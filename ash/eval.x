@@ -4630,6 +4630,26 @@
 
 ; --- External command execution ---
 
+; Whether NAME finds something that exists, when an exec of it has come back:
+; the path itself, for a name holding a `/`, or else a file in a directory of
+; PATH.  Something there that could not run -- no execute bit, a directory --
+; is status 126, and nothing there 127, as POSIX has it and dash and bash
+; answer.
+(def %sh-command-exists?
+  (fn (_ name)
+    (if (%sh-str-has-char? name #\/)
+      (not (null? (sh-path-kind name)))
+      (%sh-path-has-file? name (%sh-split-char (%sh-var-value "PATH") #\:)))))
+
+(def %sh-path-has-file?
+  (fn (self name dirs)
+    (match
+      ((null? dirs) ())
+      ((eq? (sh-path-kind (string-append (%sh-dir-of (first dirs)) "/" name))
+            (lit file))
+        #t)
+      (#t (self name (rest dirs))))))
+
 (def %sh-run-external
   (fn (_ name wds redirs)
     (let ((pid (sh-fork)))
@@ -4650,8 +4670,9 @@
                   ; `2>/dev/null` could not silence it. The redirections are
                   ; applied above, so a script that asked for 2>/dev/null gets
                   ; it.
-                  (%stderr "ash: " name ": command not found\n")
-                  127)))))
+                  (if (%sh-command-exists? name)
+                    (do (%stderr "ash: " name ": Permission denied\n") 126)
+                    (do (%stderr "ash: " name ": command not found\n") 127)))))))
         (sh-wait pid)))))
 ; --- Assignment handling ---
 
