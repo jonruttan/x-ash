@@ -468,13 +468,13 @@ spelling.
 ---
     0
 
-### [ works without its closing bracket
+### [ without its closing bracket is a usage error
 
 ```sh
-(sh-eval "[ x = x")
+(sh-eval "[ x = x 2>/dev/null")
 ```
 ---
-    0
+    2
 
 ### [ in a conditional
 

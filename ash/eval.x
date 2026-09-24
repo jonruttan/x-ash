@@ -4037,13 +4037,13 @@
     (%sh-exit-shell
       (if (null? wds) %sh-status (convert (first wds) %int)))))
 
-; `[ ... ]` is `test` with the closing bracket dropped.
+; `[ ... ]` is `test` with the closing bracket dropped.  Without one it is a
+; usage error, 2, as it is in dash and bash: `[ a = a` does not answer true.
 (def %sh-bracket
   (fn (_ wds)
-    (%sh-test
-      (if (null? wds)
-        wds
-        (if (string=? (last wds) "]") (take (fx+ (length wds) -1) wds) wds)))))
+    (if (if (null? wds) () (string=? (last wds) "]"))
+      (%sh-test (take (fx+ (length wds) -1) wds))
+      (do (%stderr "ash: [: missing ]\n") 2))))
 
 ; `eval` -- the arguments, joined by a space, read back as shell input.
 ;
