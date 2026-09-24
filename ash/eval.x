@@ -894,6 +894,13 @@
 (set! %image-recache-hooks
   (pair (fn (_) (%sh-var-set! "IFS" %sh-ifs-default)) %image-recache-hooks))
 
+; OPTIND is 1 when a shell starts, whatever the environment held, as POSIX has
+; the shell set it and dash and bash do; getopts reads it from there.  Set
+; again in a process that loads an image, as IFS is.
+(%sh-var-set! "OPTIND" "1")
+(set! %image-recache-hooks
+  (pair (fn (_) (%sh-var-set! "OPTIND" "1")) %image-recache-hooks))
+
 ; The prompts are shell variables with POSIX's defaults: PS1 before each
 ; command, `# ` for the superuser and `$ ` for anyone else; PS2 before each line
 ; that continues one; PS4 before each line `set -x` writes.  A value the
