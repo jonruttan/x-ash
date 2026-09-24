@@ -430,17 +430,13 @@
 
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
-; %sh-compound-depth is how deep inside a compound the parser is. `done` closes
-; something only when something is open, so at the top level it is an ordinary
-; word. It is bumped for the whole of any compound (see %eval-compound), so the
-; closers keep their power exactly where a construct waits for them.
-(def %sh-compound-depth 0)
 
+; A closing word ends the list in front of it wherever %sh-mark-keywords marked
+; it, which is only where a command could start: `echo done` is an argument.
+; With no construct open to take it, the list ends there all the same, and the
+; word is refused as a syntax error by %sh-refuse-leftover.
 (def %closing-word?
-  (fn (_ word)
-    (if (= %sh-compound-depth 0)
-      ()
-      (%sh-word-in? word %sh-closing-words))))
+  (fn (_ word) (%sh-word-in? word %sh-closing-words)))
 
 ; --- Stop-word helper ---
 
@@ -450,9 +446,8 @@
       #t
       (let ((tok (%cursor-peek cur)))
         (cond
-          ; The word branch is gated on the compound depth (see
-          ; %closing-word?); the OP branch is not -- `)` and `;;` are
-          ; punctuation, never words a script means literally.
+          ; A marked closing word, or `)` and `;;`: punctuation, never words
+          ; a script means literally.
           ((%tok-is-keyword? tok) (%closing-word? (first (rest tok))))
           ((eq? (first tok) (lit tok-op))
             (%sh-word-in? (first (rest tok)) %sh-stop-ops))
@@ -828,12 +823,10 @@
             (do
               (sh-close read-fd)
               (%sh-move-fd write-fd 1)
-              ; The substituted text is its own script, so it starts at the
-              ; top level however deep the expansion was reached from -- with
-              ; no traps, which a subshell does not inherit, and outside any
-              ; condition: `v=$(false; echo x) || true` still stops at the
-              ; `false` under -e, in dash and bash alike.
-              (set! %sh-compound-depth 0)
+              ; The substituted text is its own script, with no traps, which a
+              ; subshell does not inherit, and outside any condition:
+              ; `v=$(false; echo x) || true` still stops at the `false` under
+              ; -e, in dash and bash alike.
               (set! %sh-cond-depth 0)
               (set! %sh-traps ())
               ; A failing substitution answers what it managed to print, the
@@ -4027,10 +4020,8 @@
 ; expands to `echo $b` and then evaluates that.
 ;
 ; In this shell, never a subshell: `eval "v=1"` sets v for the caller and
-; `eval "exit 3"` exits. The text is a fresh top level, so %sh-compound-depth
-; is reset around it -- as %sh-call-fn resets it -- so a bare `echo done` in the
-; text is not read as an enclosing `if`'s terminator. Restored on the way out
-; and on a raise.
+; `eval "exit 3"` exits. The text is read as a script of its own, so a closing
+; word in it closes nothing outside it: `if true; then eval fi; fi` is refused.
 (def %sh-eval-builtin
   (fn (_ wds)
     (let ((src (%sh-join-args wds)))
@@ -4038,12 +4029,7 @@
         ; `eval` with nothing to read is a command that did nothing and
         ; succeeded -- POSIX, and what `eval $unset_var` relies on.
         0
-        (let ((saved-depth %sh-compound-depth))
-          (set! %sh-compound-depth 0)
-          (guard (e (do (set! %sh-compound-depth saved-depth) (error e)))
-            (sh-eval src)
-            (set! %sh-compound-depth saved-depth)
-            %sh-status))))))
+        (do (sh-eval src) %sh-status)))))
 
 ; --- exec -------------------------------------------------------------------
 ;
@@ -5714,15 +5700,6 @@
       (%expect-word cur "}")
       result)))
 
-(def %eval-compound
-  (fn (_ cur)
-    (set! %sh-compound-depth (+ %sh-compound-depth 1))
-    (guard (e
-        (do (set! %sh-compound-depth (- %sh-compound-depth 1)) (error e)))
-      (let ((r (%eval-compound-body cur)))
-        (set! %sh-compound-depth (- %sh-compound-depth 1))
-        r))))
-
 ; Which word opens which construct.  %is-compound-start? asks whether a word
 ; is a key of this table; %eval-compound-body asks what it maps to.  They were
 ; two lists of the same five words, one written as a predicate and one as a
@@ -5894,31 +5871,25 @@
 (def %sh-return? (fn (_ e) (%sh-signal? e "%sh-return")))
 
 ; Everything a call is given back on the way out, however it leaves: its
-; locals, its parameters and the depth it was called at.
+; locals and its parameters.
 (def %sh-leave-fn!
-  (fn (_ saved saved-depth)
+  (fn (_ saved)
     (%sh-pop-locals!)
     (set! %sh-args saved)
-    (set! %sh-compound-depth saved-depth)
     (set! %sh-fn-depth (- %sh-fn-depth 1))))
 
 (def %sh-call-fn
   (fn (_ body args)
-    (let ((saved %sh-args) (saved-depth %sh-compound-depth))
+    (let ((saved %sh-args))
       (set! %sh-args args)
       (set! %sh-fn-depth (+ %sh-fn-depth 1))
       (%sh-push-locals!)
-      ; A body is a fresh top level: it is one whole compound command, so
-      ; nothing in these tokens closes anything outside them, and a function
-      ; called from inside an `if` does not read a bare `echo done` in its
-      ; body as a terminator.
-      (set! %sh-compound-depth 0)
       (guard (e
           (do
-            (%sh-leave-fn! saved saved-depth)
+            (%sh-leave-fn! saved)
             (if (%sh-return? e) %sh-return-status (error e))))
         (%sh-eval-body body)
-        (%sh-leave-fn! saved saved-depth)
+        (%sh-leave-fn! saved)
         %sh-status))))
 
 ; --- A compound command's own redirections ----------------------------------
@@ -5981,11 +5952,11 @@
         (let ((after (first cur)))
           (set-first! cur start)
           (if (null? redirs)
-            (%eval-compound cur)
+            (%eval-compound-body cur)
             (let ((parked (%sh-save-fds redirs)))
               (guard (e (do (%sh-restore-fds parked) (error e)))
                 (let ((status (if (%sh-setup-redirs redirs)
-                                  (%eval-compound cur)
+                                  (%eval-compound-body cur)
                                   ; The construct is what sets the status when
                                   ; it runs, so a construct that does not run
                                   ; sets it here.
