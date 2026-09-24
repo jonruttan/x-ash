@@ -3364,22 +3364,28 @@
     (let ((p (%sh-table-get op %sh-file-ops)))
       (if (null? p) () (%sh-bool (p (sh-path-kind path) path))))))
 
+; The operands are what %sh-test-int read, integers and never nil, since
+; %sh-test-num refuses a nil first -- a bignum among them, which the integer
+; door hands to its own comparison -- so they compare on the door.
 (def %sh-num-ops
   (list (pair "-eq" (fn (_ a b) (= a b)))
         (pair "-ne" (fn (_ a b) (not (= a b))))
-        (pair "-lt" (fn (_ a b) (< a b)))
-        (pair "-le" (fn (_ a b) (<= a b)))
-        (pair "-gt" (fn (_ a b) (> a b)))
-        (pair "-ge" (fn (_ a b) (>= a b)))))
+        (pair "-lt" (fn (_ a b) (fx<? a b)))
+        (pair "-le" (fn (_ a b) (not (fx<? b a))))
+        (pair "-gt" (fn (_ a b) (fx<? b a)))
+        (pair "-ge" (fn (_ a b) (not (fx<? a b))))))
 
 ; A numeric operator's answer, nil when OP is not one, or 2 when an operand
 ; is no integer.
 (def %sh-test-num
   (fn (_ l op r)
-    (let ((p (%sh-table-get op %sh-num-ops)))
+    (do
+      (def p (%sh-table-get op %sh-num-ops))
       (if (null? p)
         ()
-        (let ((a (%sh-test-int l)) (b (%sh-test-int r)))
+        (do
+          (def a (%sh-test-int l))
+          (def b (%sh-test-int r))
           (match
             ((null? a) (%sh-test-usage l "integer expression expected"))
             ((null? b) (%sh-test-usage r "integer expression expected"))
@@ -3390,34 +3396,37 @@
 ; or nil for anything else.
 (def %sh-test-int
   (fn (_ word)
-    (let ((n (%sh-ar-ws-before word (string-length word))))
-      (let ((i (%sh-ar-skip-ws word 0 n)))
-        (match
-          ((not (fx<? i n)) ())
-          ((= (string-ref word i) #\-) (%sh-test-digits word (fx+ i 1) n #t))
-          ((= (string-ref word i) #\+) (%sh-test-digits word (fx+ i 1) n ()))
-          (#t (%sh-test-digits word i n ())))))))
+    (do
+      (def n (%sh-ar-ws-before word (string-length word)))
+      (def i (%sh-ar-skip-ws word 0 n))
+      (match
+        ((not (fx<? i n)) ())
+        ((= (string-ref word i) #\-) (%sh-test-digits word (fx+ i 1) n #t))
+        ((= (string-ref word i) #\+) (%sh-test-digits word (fx+ i 1) n ()))
+        (#t (%sh-test-digits word i n ()))))))
 
 (def %sh-test-digits
   (fn (_ word i n negative?)
     (match
       ((not (fx<? i n)) ())
       ((not (%all-digits-from? word i n)) ())
-      (#t (let ((v (%sh-ar-digits-value word i n 10)))
+      (#t (do
+            (def v (%sh-ar-digits-value word i n 10))
             (if negative? (- 0 v) v))))))
 
 (def %sh-test-1
-  (fn (_ word) (%sh-bool (> (string-length word) 0))))
+  (fn (_ word) (%sh-bool (fx<? 0 (string-length word)))))
 
 (def %sh-test-2
   (fn (_ op val)
     (match
-      ((string=? op "-n") (%sh-bool (> (string-length val) 0)))
+      ((string=? op "-n") (%sh-bool (fx<? 0 (string-length val))))
       ((string=? op "-z") (%sh-bool (= (string-length val) 0)))
       ((string=? op "-t") (%sh-bool (%sh-tty? val)))
       ((string=? op "!")  (%sh-test-not (%sh-test-1 val)))
       (#t
-        (let ((r (%sh-test-file op val)))
+        (do
+          (def r (%sh-test-file op val))
           ; An unknown unary operator is a usage error (2), not a false --
           ; `test -q x` should complain, not quietly fail.
           (if (null? r)
@@ -3464,7 +3473,8 @@
 ; strings; then `!` before two words; then one word in parentheses.
 (def %sh-test-three
   (fn (_ a b c)
-    (let ((r (%sh-test-binary a b c)))
+    (do
+      (def r (%sh-test-binary a b c))
       (match
         ((not (null? r)) r)
         ((string=? b "-a") (%sh-test-both (%sh-test-1 a) (%sh-test-1 c)))
@@ -3476,7 +3486,8 @@
 ; Four: `!` before three words, then two words in parentheses.
 (def %sh-test-four
   (fn (_ wds)
-    (let ((more (rest wds)))
+    (do
+      (def more (rest wds))
       (match
         ((string=? (first wds) "!")
           (%sh-test-not
@@ -3571,7 +3582,8 @@
 
 (def %sh-test
   (fn (_ wds)
-    (let ((n (length wds)))
+    (do
+      (def n (length wds))
       (match
         ((= n 0) 1)
         ((= n 1) (%sh-test-1 (first wds)))
@@ -4016,7 +4028,7 @@
     (%sh-test
       (if (null? wds)
         wds
-        (if (string=? (last wds) "]") (take (- (length wds) 1) wds) wds)))))
+        (if (string=? (last wds) "]") (take (fx+ (length wds) -1) wds) wds)))))
 
 ; `eval` -- the arguments, joined by a space, read back as shell input.
 ;
