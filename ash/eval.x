@@ -715,6 +715,16 @@
     (or (= c #\$) (= c #\`) (= c #\")
         (= c #\\) (= c #\newline))))
 
+; Whether a backslash escapes C in MODE: anything outside quotes, one of those
+; five inside double quotes, and the same less `"` in a here-document's body,
+; where `"` is ordinary text and `\"` stays as it is written.
+(def %sh-escapable-in?
+  (fn (_ mode c)
+    (match
+      ((= mode %sh-mode-bare) #t)
+      ((if (= c #\") (= mode %sh-mode-heredoc) ()) ())
+      (#t (%sh-dq-escapable? c)))))
+
 ; Quoting is a property of regions within a word, not of the word. `X="a b"`
 ; arrives as one word token whose raw text still carries its quotes (see
 ; %sh-word-body in tokens.x), and `pre'lit'$X` is three regions. So the walk
@@ -1297,10 +1307,13 @@
 ; splitting then splits apart again -- but with IFS empty there is no character
 ; to join on and nothing splits, so the parameters go in as fields of their own
 ; (%sh-add-params).  Where nothing is split -- an assignment, a `case` word --
-; they are the joined text either way.
+; they are the joined text either way, and so is `$@` in a here-document's
+; body, which is one text and has no fields to give it.
 (def %sh-add-all-params
   (fn (_ a name mode split?)
     (match
+      ((= mode %sh-mode-heredoc)
+        (%sh-add-expansion a mode (%sh-var-value "*") split?))
       ((= mode %sh-mode-dq)
         (if (string=? name "@")
           (%sh-add-args a %sh-args)
@@ -1323,12 +1336,13 @@
             (self (%sh-acc-break filled) (rest fields))))))))
 
 ; The word of `${x:-word}` or `${x:+word}` where the expansion stood.  Inside
-; double quotes it is one string with its own quotes taken off; outside them
+; double quotes, and in a here-document's body, where quotes inside `${ }` are
+; still quotes, it is one string with its own quotes taken off; outside them
 ; its fields splice in as they were written, so a quoted part is neither split
 ; nor globbed and an unquoted part is both.
 (def %sh-add-word
   (fn (_ a mode word split?)
-    (if (= mode %sh-mode-dq)
+    (if (if (= mode %sh-mode-dq) #t (= mode %sh-mode-heredoc))
       (let ((fs (%sh-expand-str word %sh-mode-dq () ())))
         (let ((text (if (null? fs) "" (%sh-field-plain (first fs)))))
           (%sh-acc-add-literal a text (%sh-has-glob-meta? text))))
@@ -1606,10 +1620,10 @@
         (match
           ((match
              ((= (string-ref s i) #\')
-               (match ((= mode %sh-mode-dq) ()) (#t #t)))
+               (match ((= mode %sh-mode-dq) ()) ((= mode %sh-mode-heredoc) ()) (#t #t)))
              ((= (string-ref s i) #\~) tilde?)
              ((= mode %sh-mode-sq) ())
-             ((= (string-ref s i) #\") #t)
+             ((= (string-ref s i) #\") (not (= mode %sh-mode-heredoc)))
              ((= (string-ref s i) #\\) #t)
              ((= (string-ref s i) #\`) #t)
              ((= (string-ref s i) #\$) #t)
@@ -2212,7 +2226,7 @@
     (do
       (def text (substring inner 1 (fx+ (string-length inner) -1)))
       (def n (string-length text))
-      (if (= (%sh-run-end (%sh-plain-run text 0 n %sh-mode-dq #t ())) n)
+      (if (= (%sh-run-end (%sh-plain-run text 0 n %sh-mode-heredoc #t ())) n)
         text
         (%sh-expand-str-dq text)))))
 
@@ -2224,6 +2238,11 @@
 (def %sh-mode-bare 0)          ; outside quotes
 (def %sh-mode-sq 1)            ; inside '...'
 (def %sh-mode-dq 2)            ; inside "..."
+; As inside "...", but `"` is ordinary text and no backslash escapes it: a
+; here-document's body, an arithmetic expression and a prompt read so (POSIX
+; 2.7.4, 2.6.4).  `$@` and `$*` are both the parameters joined as `$*` joins
+; them, as dash writes them there.
+(def %sh-mode-heredoc 4)
 
 ; The run of plain text a word opens with, read as the walk below would read
 ; it first: none unless the word is bare, and none when it opens with a `~`,
@@ -2282,7 +2301,7 @@
                   (do
                     (def d (string-ref s (fx+ i 1)))
                     (def text
-                      (if (if (= mode %sh-mode-bare) #t (%sh-dq-escapable? d))
+                      (if (%sh-escapable-in? mode d)
                         (substring s (fx+ i 1) (fx+ i 2))
                         (substring s i (fx+ i 2))))
                     (self (fx+ i 2) mode
@@ -2372,7 +2391,7 @@
           (match
             ((= (%sh-run-end lead) 0)
               (%sh-expand-walk s n mode0 split? assign? 0
-                (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
+                (if (= mode0 %sh-mode-bare) %sh-acc-empty (%sh-acc-open %sh-acc-empty))))
             ((= (%sh-run-end lead) n)
               (list (%sh-field s (%sh-run-meta? lead) ())))
             (#t
@@ -2826,7 +2845,7 @@
         ()
         (let ((text (if (%sh-heredoc-expand? h)
                       ; An unquoted delimiter expands the body the way a
-                      ; double-quoted string is expanded.
+                      ; double-quoted string is expanded, `"` aside.
                       (%sh-expand-str-dq (%sh-heredoc-text h))
                       (%sh-heredoc-text h))))
           (let ((p (%sh-pipe-create)))
@@ -2849,11 +2868,14 @@
         (if (null? hs) () (if (= i n) (first hs) (self (+ i 1) (rest hs))))))
     (pick 0 %sh-heredocs)))
 
-; The body of an unquoted here-document expands like a double-quoted string:
-; parameters and substitutions, but no field splitting and no globbing.
+; The body of an unquoted here-document expands like a double-quoted string --
+; parameters and substitutions, but no field splitting and no globbing -- with
+; `"` read as ordinary text (%sh-mode-heredoc).  An arithmetic expression and a
+; prompt expand the same way.
 (def %sh-expand-str-dq
   (fn (_ text)
-    (let ((fs (%sh-expand-str text %sh-mode-dq () ())))
+    (do
+      (def fs (%sh-expand-str text %sh-mode-heredoc () ()))
       (if (null? fs) "" (%sh-field-plain (first fs))))))
 
 ; A redirection that cannot be made is reported here, and answers nil.  What
