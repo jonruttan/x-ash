@@ -193,24 +193,24 @@
       (first (rest tok)))))
 ; --- Match helpers ---
 
+; Take the operator OP at the cursor, answering whether it was there.  It is
+; asked for a separator after every command, so it reads the token in place --
+; (first cur) is the token list, a token is (TYPE VALUE ...) -- and binds
+; nothing.
 (def %match-op
   (fn (_ cur op)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (and
-              (eq? (first tok) (lit tok-op))
-              (string=? (first (rest tok)) op))
-          (do (%cursor-advance! cur) #t)
-          ())))))
+    (match
+      ((null? (first cur)) ())
+      ((not (eq? (first (first (first cur))) (lit tok-op))) ())
+      ((not (string=? (first (rest (first (first cur)))) op)) ())
+      (#t (do (%cursor-advance! cur) #t)))))
 
 (def %skip-newlines
   (fn (_ cur)
-    (if (and
-          (not (%cursor-empty? cur))
-          (%tok-is-newline? (%cursor-peek cur)))
-      (do (%cursor-advance! cur) (%skip-newlines cur))
-      ())))
+    (match
+      ((null? (first cur)) ())
+      ((not (eq? (first (first (first cur))) (lit tok-newline))) ())
+      (#t (do (%cursor-advance! cur) (%skip-newlines cur))))))
 ; --- Reserved word check ---
 
 ; --- Word sets --------------------------------------------------------------
@@ -442,16 +442,17 @@
 
 (def %at-stop-word?
   (fn (_ cur)
-    (if (%cursor-empty? cur)
+    (if (null? (first cur))
       #t
-      (let ((tok (%cursor-peek cur)))
-        (cond
+      (do
+        (def tok (first (first cur)))
+        (match
           ; A marked closing word, or `)` and `;;`: punctuation, never words
           ; a script means literally.
           ((%tok-is-keyword? tok) (%closing-word? (first (rest tok))))
           ((eq? (first tok) (lit tok-op))
             (%sh-word-in? (first (rest tok)) %sh-stop-ops))
-          (else ()))))))
+          (#t ()))))))
 
 ; Nothing may be left unread.  A parser that evaluates as it reads stops in
 ; front of a token it cannot take -- a word after `fi`, a `)` that closes
@@ -4890,16 +4891,17 @@
 
 (def %is-compound-start?
   (fn (_ cur)
-    (if (%cursor-empty? cur)
+    (if (null? (first cur))
       ()
-      (let ((tok (%cursor-peek cur)))
-        (if (%tok-is-keyword? tok)
+      (do
+        (def tok (first (first cur)))
+        (match
           ; The keys of %sh-compound-table, so the two cannot disagree.  A `(`
           ; opens a subshell, which is punctuation rather than a word.
-          (not (null? (%sh-table-get (first (rest tok)) %sh-compound-table)))
-          (if (eq? (first tok) (lit tok-op))
-            (string=? (first (rest tok)) "(")
-            ()))))))
+          ((%tok-is-keyword? tok)
+            (not (null? (%sh-table-get (first (rest tok)) %sh-compound-table))))
+          ((eq? (first tok) (lit tok-op)) (string=? (first (rest tok)) "("))
+          (#t ()))))))
 
 (def %collect-cmd-tokens ())
 
@@ -5817,26 +5819,22 @@
 ; second chance to disagree with the first parse.  Unparsed, too: a
 ; redirection written after the body is expanded when the function runs, not
 ; when it is defined.
+;
+; Every pipeline is asked, and nearly every one answers at its second token, so
+; the `(` is asked first and the reserved words last.
 (def %is-fn-def?
   (fn (_ cur)
-    (let ((toks (first cur)))
-      (if (null? toks)
-        ()
-        (if (null? (rest toks))
-          ()
-          (if (null? (rest (rest toks)))
-            ()
-            (let ((a (first toks))
-                  (b (first (rest toks)))
-                  (c (first (rest (rest toks)))))
-              ; A name is an unquoted word that is not reserved.
-              (if (not (eq? (first a) (lit tok-word)))
-                ()
-                (if (%reserved-word? (%tok-word-val a))
-                  ()
-                  (if (%tok-is-op? b "(")
-                    (%tok-is-op? c ")")
-                    ()))))))))))
+    (do
+      (def toks (first cur))
+      (match
+        ((null? toks) ())
+        ((null? (rest toks)) ())
+        ((null? (rest (rest toks))) ())
+        ((not (%tok-is-op? (first (rest toks)) "(")) ())
+        ((not (%tok-is-op? (first (rest (rest toks))) ")")) ())
+        ; A name is an unquoted word that is not reserved.
+        ((not (eq? (first (first toks)) (lit tok-word))) ())
+        (#t (not (%reserved-word? (%tok-word-val (first toks)))))))))
 
 (def %eval-fn-def
   (fn (_ cur)
@@ -5987,9 +5985,10 @@
 
 (set! %eval-command
   (fn (_ cur)
-    (let ((status (if (%is-compound-start? cur)
+    (do
+      (def status (if (%is-compound-start? cur)
                     (%eval-compound-redir cur)
-                    (%eval-simple-cmd cur))))
+                    (%eval-simple-cmd cur)))
       (%sh-refuse-leftover cur)
       status)))
 ; --- Pipeline stage collection ---
@@ -6086,46 +6085,47 @@
 (def %eval-pipeline
   (fn (_ cur)
     (%skip-newlines cur)
-    ; Check for ! negation
-
-    (let ((negate
-            (if (and
-                  (not (%cursor-empty? cur))
-                  (%tok-is-word? (%cursor-peek cur))
-                  (string=? (%tok-word-val (%cursor-peek cur)) "!"))
-              (do (%cursor-advance! cur) (%skip-newlines cur) #t)
-              ())))
+    (do
+      ; Check for ! negation
+      (def negate
+        (match
+          ((null? (first cur)) ())
+          ((not (%tok-is-word? (first (first cur)))) ())
+          ((not (string=? (%tok-word-val (first (first cur))) "!")) ())
+          (#t (do (%cursor-advance! cur) (%skip-newlines cur) #t))))
       ; POSIX exempts two kinds of pipeline from -e: one that starts with `!`,
       ; whose failure is what it is for, and one that is an operand of && or
       ; || other than the last.  Once the stages are collected the cursor stands
       ; after the pipeline, so the token there says which kind this is before
       ; anything runs -- and an exempt pipeline runs as a condition, which is
       ; what a subshell or a stage forked inside it inherits.
-      (let ((result
-              ; A definition is recognised here, beside the compounds:
-              ; %collect-stages cuts the token run at the first `;` or newline,
-              ; so a cursor through it never sees a function body. Hooked into
-              ; %eval-command instead, `f() { echo hi; }` would reach
-              ; %collect-fn-body with only `f ( ) {` in hand.
-              (if (%is-fn-def? cur)
-                (%eval-fn-def cur)
-              ; A compound is a stage like any other, now that %collect-stage
-              ; counts nesting: `( echo p ) | tr p P` and
-              ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|`, not at
-              ; the `;` or `done` inside them. A single stage reaches
-              ; %eval-command, whose compound branch applies the construct's
-              ; redirections.
-              (let ((stages (%collect-stages cur ())))
-                (if (or negate (%sh-and-or-next? cur))
-                  (%sh-in-condition (fn (_) (%sh-run-stages stages)))
-                  (%sh-run-stages stages))))))
-        (match
-          (negate
-            (let ((neg-result (if (= result 0) 1 0)))
-              (set! %sh-status neg-result)
-              neg-result))
-          ((%sh-and-or-next? cur) result)
-          (#t (%sh-exit-on-error result)))))))
+      (def result
+        ; A definition is recognised here, beside the compounds:
+        ; %collect-stages cuts the token run at the first `;` or newline,
+        ; so a cursor through it never sees a function body. Hooked into
+        ; %eval-command instead, `f() { echo hi; }` would reach
+        ; %collect-fn-body with only `f ( ) {` in hand.
+        (if (%is-fn-def? cur)
+          (%eval-fn-def cur)
+          ; A compound is a stage like any other, now that %collect-stage
+          ; counts nesting: `( echo p ) | tr p P` and
+          ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|`, not at
+          ; the `;` or `done` inside them. A single stage reaches
+          ; %eval-command, whose compound branch applies the construct's
+          ; redirections.
+          (do
+            (def stages (%collect-stages cur ()))
+            (if (if negate #t (%sh-and-or-next? cur))
+              (%sh-in-condition (fn (_) (%sh-run-stages stages)))
+              (%sh-run-stages stages)))))
+      (match
+        (negate
+          (do
+            (def neg-result (if (= result 0) 1 0))
+            (set! %sh-status neg-result)
+            neg-result))
+        ((%sh-and-or-next? cur) result)
+        (#t (%sh-exit-on-error result))))))
 
 (def %sh-run-stages
   (fn (_ stages)
@@ -6139,12 +6139,10 @@
 ; operand?
 (def %sh-and-or-next?
   (fn (_ cur)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (eq? (first tok) (lit tok-op))
-          (%sh-word-in? (first (rest tok)) %sh-and-or-ops)
-          ())))))
+    (match
+      ((null? (first cur)) ())
+      ((not (eq? (first (first (first cur))) (lit tok-op))) ())
+      (#t (%sh-word-in? (first (rest (first (first cur)))) %sh-and-or-ops)))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
 ; Skip an operand without running it -- what a short-circuit does with the side
@@ -6204,18 +6202,20 @@
 
 (set! %eval-and-or-loop
   (fn (self cur result)
-    (cond
+    (match
       ((%match-op cur "&&")
-        (%skip-newlines cur)
-        (if (= result 0)
-          (self cur (%eval-pipeline cur))
-          (do (%sh-skip-operand cur 0) (self cur result))))
+        (do
+          (%skip-newlines cur)
+          (if (= result 0)
+            (self cur (%eval-pipeline cur))
+            (do (%sh-skip-operand cur 0) (self cur result)))))
       ((%match-op cur "||")
-        (%skip-newlines cur)
-        (if (= result 0)
-          (do (%sh-skip-operand cur 0) (self cur result))
-          (self cur (%eval-pipeline cur))))
-      (else result))))
+        (do
+          (%skip-newlines cur)
+          (if (= result 0)
+            (do (%sh-skip-operand cur 0) (self cur result))
+            (self cur (%eval-pipeline cur)))))
+      (#t result))))
 
 ; --- Asynchronous lists ------------------------------------------------------
 ;
@@ -6303,23 +6303,20 @@
     (%skip-newlines cur)
     (if (%at-stop-word? cur)
       (do (set! %sh-status 0) 0)
-      (let ((result (let ((amp (%sh-async-end (first cur) 0)))
-                      (if (null? amp)
-                        (%eval-and-or cur)
-                        (%sh-run-async cur amp)))))
-        (if (%cursor-empty? cur)
-          result
-          (let ((tok (%cursor-peek cur)))
-            (if (%tok-is-newline? tok)
-              (do
-                (%cursor-advance! cur)
-                (%skip-newlines cur)
-                (if (%at-stop-word? cur) result (%eval-list cur)))
-              (if (or (%match-op cur ";") (%match-op cur "&"))
-                (do
-                  (%skip-newlines cur)
-                  (if (%at-stop-word? cur) result (%eval-list cur)))
-                result))))))))
+      (do
+        (def amp (%sh-async-end (first cur) 0))
+        (def result (if (null? amp) (%eval-and-or cur) (%sh-run-async cur amp)))
+        (match
+          ((null? (first cur)) result)
+          ; A newline, `;` or `&` goes on to the next command, past any blank
+          ; lines, unless a closing word ends the list there.
+          ((if (%tok-is-newline? (first (first cur)))
+             #t
+             (if (%match-op cur ";") #t (%match-op cur "&")))
+            (do
+              (%skip-newlines cur)
+              (if (%at-stop-word? cur) result (%eval-list cur))))
+          (#t result))))))
 ; --- Here-documents ---------------------------------------------------------
 ;
 ;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
