@@ -35,7 +35,7 @@
   sh-fork sh-exec sh-wait sh-exit sh-getpid
   sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-open-new
   sh-open-existing sh-close sh-dup2 sh-pipe
-  sh-getenv sh-setenv sh-unsetenv sh-chdir sh-getcwd
+  sh-getenv sh-setenv sh-unsetenv sh-environ sh-chdir sh-getcwd
   sh-path-kind sh-path-size sh-path-mode sh-path-lkind sh-path-mtime
   sh-read-file sh-read-line sh-read-line-fd
   sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
@@ -233,6 +233,7 @@
 (def %sys-getenv (method-of Sys (lit getenv)))
 (def %sys-setenv (method-of Sys (lit setenv)))
 (def %sys-unsetenv (method-of Sys (lit unsetenv)))
+(def %sys-environ (method-of Sys (lit environ)))
 (def %sys-chdir (method-of Sys (lit chdir)))
 (def %sys-getcwd (method-of Sys (lit getcwd)))
 (def %sys-fd-read (method-of Sys (lit fd-read)))
@@ -313,6 +314,9 @@
 (def sh-chdir (fn (_ dir) (%sys-chdir Sys dir)))
 
 (def sh-unsetenv (fn (_ name) (%sys-unsetenv Sys name)))
+; The whole environment as "NAME=VALUE" strings, which is what `export -p`
+; lists.
+(def sh-environ (fn (_) (%sys-environ Sys)))
 (def sh-getcwd (fn (_) (%sys-getcwd Sys)))
 
 ; --- What `test` needs to know about a path ------------------------------

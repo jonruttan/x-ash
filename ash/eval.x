@@ -3236,6 +3236,45 @@
               (%sh-var-export! (substring word 0 eq))))
           (self (rest wds)))))))
 
+; `export -p`, and `export` with no operand, write every exported name as the
+; command that would export it again, sorted by name as dash and bash write
+; them: a name the environment holds with its value in single quotes, and a
+; name marked for export with no value yet on its own.  An environment entry
+; whose name is no shell name is left out, being nothing `export` could take
+; back in.
+(def %sh-env-names
+  (fn (self entries names)
+    (if (null? entries)
+      names
+      (do
+        (def entry (first entries))
+        (def eq (%sh-first-eq entry 0 (string-length entry)))
+        (def name (if (fx<? eq 0) entry (substring entry 0 eq)))
+        (self (rest entries) (if (%sh-name? name) (pair name names) names))))))
+
+(def %sh-export-lines
+  (fn (self names)
+    (unless (null? names)
+      (do
+        (def v (sh-getenv (first names)))
+        (display "export ")
+        (display (first names))
+        (unless (null? v)
+          (display "=")
+          (display (%sh-single-quote v)))
+        (newline)
+        (self (rest names))))))
+
+(def %sh-export-builtin
+  (fn (_ wds)
+    (if (if (null? wds) #t (string=? (first wds) "-p"))
+      (do
+        (%sh-export-lines
+          (sh-sort-strings
+            (append (%sh-env-names (sh-environ) ()) %sh-export-marks)))
+        0)
+      (%sh-export wds))))
+
 ; `local NAME[=VALUE]...` -- the shape `export` has, saving each name into the
 ; call's frame before it assigns.  A name given no value starts UNSET, which
 ; is bash and ksh; dash leaves the outer value showing through it, and that is
@@ -4580,7 +4619,7 @@
         (pair "break"  %sh-break)
         (pair "continue" %sh-continue)
         (pair "cd"     %sh-cd)
-        (pair "export" %sh-export)
+        (pair "export" %sh-export-builtin)
         (pair "unset"  %sh-unset)
         (pair "exit"   %sh-exit)
         (pair "eval"   %sh-eval-builtin)
