@@ -2348,20 +2348,22 @@
 ; character after it (see %sh-add-expansion).
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
-    (let ((n (string-length s))
-          (lead (%sh-lead-run s (string-length s) mode0 assign?)))
-      (match
-        ((eq? split? (lit fields))
-          (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty))
-        ((= (%sh-run-end lead) 0)
-          (%sh-expand-walk s n mode0 split? assign? 0
-            (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
-        ((= (%sh-run-end lead) n)
-          (list (%sh-field s (%sh-run-meta? lead) ())))
-        (#t
-          (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
-            (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
-                         (%sh-run-meta? lead))))))))
+    (do
+      (def n (string-length s))
+      (if (eq? split? (lit fields))
+        (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty)
+        (do
+          (def lead (%sh-lead-run s n mode0 assign?))
+          (match
+            ((= (%sh-run-end lead) 0)
+              (%sh-expand-walk s n mode0 split? assign? 0
+                (if (= mode0 %sh-mode-dq) (%sh-acc-open %sh-acc-empty) %sh-acc-empty)))
+            ((= (%sh-run-end lead) n)
+              (list (%sh-field s (%sh-run-meta? lead) ())))
+            (#t
+              (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
+                (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
+                             (%sh-run-meta? lead))))))))))
 
 ; Whether C names a one-character parameter: $? $$ $! $- $# $@ $* and $1..$9.
 ; A single digit only, per POSIX: `$10` is `$1` followed by a literal 0, and
@@ -2619,21 +2621,20 @@
 ; its escapes removed, the way a field that is no pattern stands.
 (def %sh-glob-field
   (fn (_ f)
-    (if (or %sh-opt-noglob
-            (not (and (%sh-field-glob? f) (%sh-glob-pattern? (%sh-field-text f)))))
-      (list (%sh-field-plain f))
-      (let ((field (%sh-field-text f))
-            (absolute? (= (string-ref (%sh-field-text f) 0) #\/))
-            (segments (%sh-glob-split (%sh-field-text f))))
-        (let ((hits (%sh-glob-walk
-                      (if absolute? (rest segments) segments)
-                      (list (if absolute? "/" "")))))
-          (let ((final (if (%sh-trailing-slash? segments)
-                         (%sh-dirs-only hits)
-                         hits)))
-            ; No match: the pattern stands, with its escapes removed.
-            ; No match: the pattern stands, as the user wrote it.
-            (if (null? final) (list (%sh-field-plain f)) final)))))))
+    (match
+      (%sh-opt-noglob (list (%sh-field-plain f)))
+      ((not (%sh-field-glob? f)) (list (%sh-field-plain f)))
+      ((not (%sh-glob-pattern? (%sh-field-text f))) (list (%sh-field-plain f)))
+      (#t
+        (do
+          (def absolute? (= (string-ref (%sh-field-text f) 0) #\/))
+          (def segments (%sh-glob-split (%sh-field-text f)))
+          (def hits (%sh-glob-walk (if absolute? (rest segments) segments)
+                                   (list (if absolute? "/" ""))))
+          (def final
+            (if (%sh-trailing-slash? segments) (%sh-dirs-only hits) hits))
+          ; No match: the pattern stands, with its escapes removed.
+          (if (null? final) (list (%sh-field-plain f)) final))))))
 
 ; GLOB TEXT THAT DID NOT COME THROUGH THE WALK -- a bare string, held by a
 ; caller with no field around it.  The two flags have to be derived by
@@ -2644,11 +2645,14 @@
     (%sh-glob-field
       (%sh-field text (%sh-glob-pattern? text) (%sh-has-backslash? text)))))
 
+; One field is the common case, and its expansion is the answer, with nothing
+; to append it to.
 (def %sh-glob-fields
   (fn (self fields)
-    (if (null? fields)
-      ()
-      (append (%sh-glob-field (first fields)) (self (rest fields))))))
+    (match
+      ((null? fields) ())
+      ((null? (rest fields)) (%sh-glob-field (first fields)))
+      (#t (append (%sh-glob-field (first fields)) (self (rest fields)))))))
 
 ; --- What the callers see ----------------------------------------------------
 ;
@@ -2673,8 +2677,9 @@
     (if (eq? (first tok) (lit tok-sq))
       ; Single quotes suppress everything, globbing included.
       (list (%tok-word-val tok))
-      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
-                  (not assign?) assign?)))
+      (do
+        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
+                  (not assign?) assign?))
         (if (not assign?)
           (%sh-glob-fields fs)
           ; Unsplit by construction above, so there is one field or none; the
@@ -2686,7 +2691,8 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (%tok-word-val tok)
-      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ())))
+      (do
+        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ()))
         ; Not globbed, but the escapes still come off -- a redirection target
         ; and a case subject are literal strings.
         (if (null? fs) "" (%sh-field-plain (first fs)))))))
@@ -2700,8 +2706,9 @@
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-sq))
       (%sh-glob-escape-all (%tok-word-val tok))
-      (let ((fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
-                  (lit pattern) ())))
+      (do
+        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
+                  (lit pattern) ()))
         (if (null? fs) "" (%sh-field-text (first fs)))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
@@ -2710,7 +2717,8 @@
   (fn (_ word)
     (if (not (string? word))
       word
-      (let ((fs (%sh-expand-str word %sh-mode-bare (lit pattern) ())))
+      (do
+        (def fs (%sh-expand-str word %sh-mode-bare (lit pattern) ()))
         ; The escapes stay on: this feeds pattern operands (`${x#pat}`), which
         ; read them. %sh-field-plain is for the sites that want literal text.
         (if (null? fs) "" (%sh-field-text (first fs)))))))
