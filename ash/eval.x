@@ -3211,6 +3211,41 @@
 (def %sh-cwd-physical
   (fn (_) (let ((d (sh-getcwd))) (if (null? d) (%sh-cwd-logical) d))))
 
+; CDPATH, POSIX's step for a cd operand whose first component is not `/`, `.`
+; or `..`: each directory CDPATH names is asked in turn whether it holds DIR,
+; an empty entry standing for the working directory.  Answers (PATH . NAMED?)
+; for the first that does, NAMED? when that entry was not empty, and nil when
+; CDPATH is unset or empty, is not asked, or holds no such directory -- the
+; operand then stands as written.
+(def %sh-cdpath
+  (fn (_ dir)
+    (let ((cdpath (%sh-var-get "CDPATH")))
+      (match
+        ((null? cdpath) ())
+        ((= (string-length cdpath) 0) ())
+        ((%sh-str-starts? dir "/") ())
+        ((%sh-leading-dot? dir) ())
+        (#t (%sh-cdpath-find dir (%sh-split-char cdpath #\:)))))))
+
+; Whether a path's first component is `.` or `..`.
+(def %sh-leading-dot?
+  (fn (_ dir)
+    (match
+      ((string=? dir ".") #t)
+      ((string=? dir "..") #t)
+      ((%sh-str-starts? dir "./") #t)
+      (#t (%sh-str-starts? dir "../")))))
+
+(def %sh-cdpath-find
+  (fn (self dir entries)
+    (if (null? entries)
+      ()
+      (do
+        (def cand (string-append (%sh-dir-of (first entries)) "/" dir))
+        (if (eq? (sh-path-kind cand) (lit dir))
+          (pair cand (fx<? 0 (string-length (first entries))))
+          (self dir (rest entries)))))))
+
 ; `cd -P` goes where the kernel takes the operand, `..` after a symlink
 ; included, and PWD becomes the resolved path; `cd -L`, the default, folds the
 ; operand against the logical directory by text.
@@ -3221,23 +3256,27 @@
         (let ((dest (%sh-cd-destination wds)))
           (if (null? dest)
             (do (%stderr "ash: cd: OLDPWD not set\n") 1)
-            (let ((base (%sh-cwd-logical)))
-              (let ((target (if physical? dest (%sh-cd-target dest base))))
-                (if (= (sh-chdir target) -1)
-                  (do
-                    (%stderr "ash: cd: " dest ": No such file or directory\n")
-                    1)
-                  (let ((now (if physical? (%sh-cwd-physical) target)))
-                    (%sh-var-set! "OLDPWD" base)
-                    (%sh-var-set! "PWD" now)
-                    (set! %sh-pwd-logical now)
-                    ; `cd -` reports where it arrived, which is how a script
-                    ; can use it without keeping its own copy of OLDPWD.
-                    (unless (null? wds)
-                      (when (string=? (first wds) "-")
+            (let ((base (%sh-cwd-logical)) (found (%sh-cdpath dest)))
+              (let ((path (if (null? found) dest (first found))))
+                (let ((target (if physical? path (%sh-cd-target path base))))
+                  (if (= (sh-chdir target) -1)
+                    (do
+                      (%stderr "ash: cd: " dest ": No such file or directory\n")
+                      1)
+                    (let ((now (if physical? (%sh-cwd-physical) target)))
+                      (%sh-var-set! "OLDPWD" base)
+                      (%sh-var-set! "PWD" now)
+                      (set! %sh-pwd-logical now)
+                      ; `cd -` reports where it arrived, which is how a script
+                      ; can use it without keeping its own copy of OLDPWD, and
+                      ; so does a cd a named CDPATH entry sent somewhere.
+                      (when (if (null? found) (%sh-cd-dash? wds) (rest found))
                         (display now)
-                        (newline)))
-                    0))))))))))
+                        (newline))
+                      0)))))))))))
+
+(def %sh-cd-dash?
+  (fn (_ wds) (if (null? wds) () (string=? (first wds) "-"))))
 
 ; `export NAME[=VALUE]...`, every operand.  A value is assigned before the name
 ; is exported, so `export x=1` and `x=1; export x` leave the same variable, and
