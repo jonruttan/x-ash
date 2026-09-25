@@ -779,14 +779,21 @@
 ; the only one, anything that comes back not-a-pair is rendered as the word it
 ; stands for. One walk of the token list buys the guarantee that the parser
 ; only ever sees tokens.
+;
+; The walk is a loop, onto an accumulator reversed at the end: a script is a
+; token list as long as the script, and a call per token nested in the last
+; one's `pair` ran out of C stack at about 30,000 tokens.
 (def %sh-normalize-tokens
-  (fn (self toks)
+  (fn (_ toks) (reverse (%sh-normalize-onto toks ()))))
+
+(def %sh-normalize-onto
+  (fn (self toks acc)
     (if (null? toks)
-      ()
-      (pair
-        (let ((tok (first toks)))
-          (if (pair? tok) tok (mk-tok-word (convert tok %string))))
-        (self (rest toks))))))
+      acc
+      (self (rest toks)
+            (pair (let ((tok (first toks)))
+                    (if (pair? tok) tok (mk-tok-word (convert tok %string))))
+                  acc)))))
 
 (def sh-tokenize
   (fn (_ input) (%sh-normalize-tokens (token-read-string %sh-base input))))
