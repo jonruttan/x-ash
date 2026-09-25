@@ -6636,18 +6636,20 @@
 (def %sh-heredoc-expand? (fn (_ h) (rest h)))
 
 ; Cut TEXT at each CH, keeping the empty pieces: the lines of a here-document
-; body, and the directories of PATH, are the same walk.
+; body, and the directories of PATH, are the same walk.  A script holding a
+; here-document is cut into lines whole, so the walk is a nested match on the
+; integer doors, the cheap spelling of a loop per character.
 (def %sh-split-char
-  (fn (_ text ch)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i start acc)
-          (if (>= i n)
-            (reverse (pair (substring text start n) acc))
-            (if (= (string-ref text i) ch)
-              (self (+ i 1) (+ i 1) (pair (substring text start i) acc))
-              (self (+ i 1) start acc)))))
-      (go 0 0 ()))))
+  (fn (_ text ch) (%sh-split-from text ch 0 0 (string-length text) ())))
+
+(def %sh-split-from
+  (fn (self text ch i start n acc)
+    (match
+      ((fx<? i n)
+        (if (= (string-ref text i) ch)
+          (self text ch (fx+ i 1) (fx+ i 1) n (pair (substring text start i) acc))
+          (self text ch (fx+ i 1) start n acc)))
+      (#t (reverse (pair (substring text start n) acc))))))
 
 (def %sh-split-lines (fn (_ text) (%sh-split-char text #\newline)))
 
@@ -6669,7 +6671,9 @@
 
 (def %sh-quote-scan
   (fn (self line i n q)
-    (if (>= i n) i (if (= (string-ref line i) q) i (self line (+ i 1) n q)))))
+    (match
+      ((fx<? i n) (if (= (string-ref line i) q) i (self line (fx+ i 1) n q)))
+      (#t i))))
 
 ; A delimiter word ends at the end of the line, a blank or an operator.
 (def %sh-hd-delim-end?
@@ -6740,23 +6744,59 @@
 
 ; The scan from I.  START? is whether a `#` there would open a comment, FROM
 ; where the text not yet copied into OUT begins, and IDX the next body's
-; number.
+; number.  Every line of a script holding a here-document passes through
+; here, so at the top level a run of characters that change nothing is passed
+; over in one walk, and a single-quoted region in one scan for its quote; the
+; `#` rule after a run is the last character's, as it would have been.
 (def %sh-hd-scan
   (fn (self line i n stack start? from out pending idx)
-    (if (not (fx<? i n))
-      (list (%ash-join "" (reverse (pair (substring line from n) out)))
-            (reverse pending)
-            stack)
-      (let ((c (string-ref line i)))
+    (match
+      ((fx<? i n)
         (match
           ((null? stack)
-            (%sh-hd-scan-bare line i n stack start? from out pending idx c))
+            (do
+              (def j (%sh-hd-plain-to line i n))
+              (if (fx<? i j)
+                (self line j n stack
+                      (%sh-comment-may-follow? (string-ref line (fx+ j -1)))
+                      from out pending idx)
+                (%sh-hd-scan-bare line i n stack start? from out pending idx
+                                  (string-ref line i)))))
           ((= (first stack) #\')
-            (self line (fx+ i 1) n (if (= c #\') (rest stack) stack) ()
-                  from out pending idx))
+            (do
+              (def j (%sh-quote-scan line i n #\'))
+              (if (fx<? j n)
+                (self line (fx+ j 1) n (rest stack) () from out pending idx)
+                (self line n n stack () from out pending idx))))
           ((= (first stack) #\")
-            (%sh-hd-scan-dq line i n stack from out pending idx c))
-          (#t (%sh-hd-scan-bare line i n stack start? from out pending idx c)))))))
+            (%sh-hd-scan-dq line i n stack from out pending idx (string-ref line i)))
+          (#t (%sh-hd-scan-bare line i n stack start? from out pending idx
+                                (string-ref line i)))))
+      (#t
+        (list (%ash-join "" (reverse (pair (substring line from n) out)))
+              (reverse pending)
+              stack)))))
+
+; The first index from I holding a character the scan must look at -- a
+; quote, a backslash, `#`, `$`, a parenthesis or `<` -- or N.
+(def %sh-hd-plain-to
+  (fn (self line i n)
+    (match
+      ((fx<? i n) (if (%sh-hd-stop? (string-ref line i)) i (self line (fx+ i 1) n)))
+      (#t n))))
+
+(def %sh-hd-stop?
+  (fn (_ c)
+    (match
+      ((= c #\') #t)
+      ((= c #\") #t)
+      ((= c #\\) #t)
+      ((= c #\#) #t)
+      ((= c #\$) #t)
+      ((= c #\() #t)
+      ((= c #\)) #t)
+      ((= c #\<) #t)
+      (#t ()))))
 
 ; Unquoted: a quote opens a frame, a backslash takes the next character with
 ; it, a `#` where a word could start is a comment to the end of the line, and
@@ -6838,38 +6878,43 @@
 ; over `EOF` is the body line `xEOF`.  A quoted body keeps its backslashes.
 (def %sh-hd-joins?
   (fn (_ line more expand?)
-    (and expand?
-         (not (null? more))
-         (%sh-line-continues? line (string-length line) ()))))
+    (if expand?
+      (if (null? more) () (%sh-line-continues? line (string-length line) ()))
+      ())))
 
-; Take a body off the front of LINES, to the terminator.
+; Take a body off the front of LINES, to the terminator.  Each line and its
+; newline go onto the pieces as they are, and the body is joined once at the
+; end, rather than a new string made for every line.  The pieces are all
+; strings, so the join is the platform's own concatenation, %str-concat, with
+; no separator to interleave and no piece to check.
 (def %sh-hd-take
   (fn (_ lines delim strip? expand?)
-    ; `remaining`, not `rest`: a parameter of that name shadows the list
-    ; primitive, so the recursive step called a LIST.  Second time in this
-    ; bundle -- see %sh-first-op.
-    (def go
-      (fn (self remaining acc)
-        (if (null? remaining)
-          ; Unterminated: what is left is the body, which is what a shell does
-          ; at end of input.
-          (list (%ash-join "" (reverse acc)) ())
-          (let ((line (if strip?
-                        (%sh-strip-tabs (first remaining))
-                        (first remaining))))
-            (match
-              ((%sh-hd-joins? line (rest remaining) expand?)
-                (self (pair (string-append
-                              (substring line 0 (- (string-length line) 1))
-                              (first (rest remaining)))
-                            (rest (rest remaining)))
-                      acc))
-              ((string=? line delim)
-                (list (%ash-join "" (reverse acc)) (rest remaining)))
-              (#t
-                (self (rest remaining)
-                  (pair (string-append line "\n") acc))))))))
-    (go lines ())))
+    (%sh-hd-take-from lines delim strip? expand? ())))
+
+; `remaining`, not `rest`: a parameter of that name shadows the list primitive,
+; so the recursive step called a LIST.  Second time in this bundle -- see
+; %sh-first-op.
+(def %sh-hd-take-from
+  (fn (self remaining delim strip? expand? acc)
+    (match
+      ; Unterminated: what is left is the body, which is what a shell does at
+      ; end of input.
+      ((null? remaining) (list (%str-concat (reverse acc)) ()))
+      (#t
+        (do
+          (def line (if strip? (%sh-strip-tabs (first remaining)) (first remaining)))
+          (match
+            ((%sh-hd-joins? line (rest remaining) expand?)
+              (self (pair (string-append
+                            (substring line 0 (- (string-length line) 1))
+                            (first (rest remaining)))
+                          (rest (rest remaining)))
+                    delim strip? expand? acc))
+            ((str=? line delim)
+              (list (%str-concat (reverse acc)) (rest remaining)))
+            (#t
+              (self (rest remaining) delim strip? expand?
+                    (pair "\n" (pair line acc))))))))))
 
 (def %sh-hd-collect
   (fn (self lines pending bodies)
@@ -6884,15 +6929,28 @@
 
 (def %sh-hd-walk
   (fn (self lines out bodies stack)
-    (if (null? lines)
-      (list (%ash-join "\n" (reverse out)) (reverse bodies))
-      (let ((scanned (%sh-hd-scan-line (first lines) (length bodies) stack)))
-        (let ((collected (%sh-hd-collect (rest lines)
-                           (first (rest scanned)) bodies)))
+    (match
+      ((null? lines) (list (%ash-join "\n" (reverse out)) (reverse bodies)))
+      ; A line at the top level holding nothing the scan must look at opens no
+      ; here-document and leaves no state behind: it passes as it is.
+      ((%sh-hd-plain-line? (first lines) stack)
+        (self (rest lines) (pair (first lines) out) bodies stack))
+      (#t
+        (do
+          (def scanned (%sh-hd-scan-line (first lines) (length bodies) stack))
+          (def collected (%sh-hd-collect (rest lines) (first (rest scanned)) bodies))
           (self (first collected)
                 (pair (first scanned) out)
                 (first (rest collected))
                 (first (rest (rest scanned)))))))))
+
+(def %sh-hd-plain-line?
+  (fn (_ line stack)
+    (if (null? stack)
+      (do
+        (def n (string-length line))
+        (= (%sh-hd-plain-to line 0 n) n))
+      ())))
 
 ; Lift every here-document out of INPUT, leaving `<<N` behind.  Answers the
 ; rewritten text; the bodies land in %sh-heredocs.
