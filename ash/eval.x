@@ -611,18 +611,10 @@
 (def %sh-dot-depth 0)
 (def %sh-return-status 0)
 
-(def %sh-join-with
-  (fn (self args sep)
-    (if (null? args)
-      ""
-      (if (null? (rest args))
-        (first args)
-        (string-append (first args)
-          (string-append sep (self (rest args) sep)))))))
-
 ; `set -x` echoes the command as a person would have typed it, so it joins
-; with a space whatever IFS happens to be.
-(def %sh-join-args (fn (_ args) (%sh-join-with args " ")))
+; with a space whatever IFS happens to be.  Both joins are one concatenation
+; however many parameters there are (%ash-join).
+(def %sh-join-args (fn (_ args) (%ash-join " " args)))
 
 ; WHAT GOES BETWEEN THE PARAMETERS in `$*`: the first character of IFS, and
 ; nothing at all when IFS is empty -- `IFS=:` makes `"$*"` `a:b:c`, `IFS=`
@@ -633,7 +625,7 @@
     (let ((ifs (%sh-ifs)))
       (if (= (string-length ifs) 0) "" (substring ifs 0 1)))))
 
-(def %sh-join-params (fn (_ args) (%sh-join-with args (%sh-ifs-join-char))))
+(def %sh-join-params (fn (_ args) (%ash-join (%sh-ifs-join-char) args)))
 
 ; $0 is the shell itself; $1 upward index into %sh-args.  Out of range is the
 ; empty string, which is POSIX and is what `test -z "$1"` relies on.
@@ -2584,13 +2576,18 @@
              (%sh-pattern-match? segment name)))
       (sh-list-dir (%sh-dir-of base)))))
 
+; A directory can hold tens of thousands of entries, so the walks over them are
+; loops onto an accumulator reversed once at the end, not a call per entry
+; nested in the last one's `pair`, which runs out of C stack.
 (def %sh-keep
-  (fn (self p xs)
-    (if (null? xs)
-      ()
-      (if (p (first xs))
-        (pair (first xs) (self p (rest xs)))
-        (self p (rest xs))))))
+  (fn (_ p xs) (reverse (%sh-keep-onto p xs ()))))
+
+(def %sh-keep-onto
+  (fn (self p xs acc)
+    (match
+      ((null? xs) acc)
+      ((p (first xs)) (self p (rest xs) (pair (first xs) acc)))
+      (#t (self p (rest xs) acc)))))
 
 ; One segment against every base reached so far.
 (def %sh-glob-step
@@ -2608,11 +2605,13 @@
             acc))))))
 
 (def %sh-map-join
-  (fn (self base names)
+  (fn (_ base names) (reverse (%sh-map-join-onto base names ()))))
+
+(def %sh-map-join-onto
+  (fn (self base names acc)
     (if (null? names)
-      ()
-      (pair (%sh-path-join base (first names))
-            (self base (rest names))))))
+      acc
+      (self base (rest names) (pair (%sh-path-join base (first names)) acc)))))
 
 (def %sh-prepend-rev
   (fn (self xs acc)
@@ -2633,13 +2632,15 @@
 ; it, which the walk skips as it does any empty one; the restriction is applied
 ; here, where the whole match is in hand.
 (def %sh-dirs-only
-  (fn (self hits)
-    (if (null? hits)
-      ()
-      (let ((tail (self (rest hits))))
-        (if (eq? (sh-path-kind (first hits)) (lit dir))
-          (pair (string-append (first hits) "/") tail)
-          tail)))))
+  (fn (_ hits) (reverse (%sh-dirs-onto hits ()))))
+
+(def %sh-dirs-onto
+  (fn (self hits acc)
+    (match
+      ((null? hits) acc)
+      ((eq? (sh-path-kind (first hits)) (lit dir))
+        (self (rest hits) (pair (string-append (first hits) "/") acc)))
+      (#t (self (rest hits) acc)))))
 
 (def %sh-trailing-slash?
   (fn (_ segments)
@@ -2680,13 +2681,21 @@
       (%sh-field text (%sh-glob-pattern? text) (%sh-has-backslash? text)))))
 
 ; One field is the common case, and its expansion is the answer, with nothing
-; to append it to.
+; to append it to.  More are gathered in a loop onto an accumulator reversed
+; once at the end: `$(cat file)` gives a field per word of the file, and a
+; call per field nested in the last one's `append` runs out of C stack.
 (def %sh-glob-fields
-  (fn (self fields)
+  (fn (_ fields)
     (match
       ((null? fields) ())
       ((null? (rest fields)) (%sh-glob-field (first fields)))
-      (#t (append (%sh-glob-field (first fields)) (self (rest fields)))))))
+      (#t (reverse (%sh-glob-fields-onto fields ()))))))
+
+(def %sh-glob-fields-onto
+  (fn (self fields acc)
+    (if (null? fields)
+      acc
+      (self (rest fields) (%sh-prepend-rev (%sh-glob-field (first fields)) acc)))))
 
 ; --- What the callers see ----------------------------------------------------
 ;
