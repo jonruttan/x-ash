@@ -125,9 +125,11 @@ being the working directory, and `cd` prints where a named one took it.
 
 `command NAME [arg...]` runs NAME as though no function had that name, and
 `command -v NAME` answers what would run: a builtin, function or reserved word
-as written, a name holding a `/` as written, and anything else as the first
-file on PATH that could be executed. `-V` says what the name is rather than
-what would run. `-p` is refused rather than ignored, a script that asks for a
+as written, an alias as the `alias` command that would define it, a name
+holding a `/` as written, and anything else as the first file on PATH that
+could be executed. A reserved word is taken before an alias of the same name,
+and an alias before a function or builtin. `-V` says what the name is rather
+than what would run. `-p` is refused rather than ignored, a script that asks for a
 trusted PATH not being one to hand the untrusted one to. `type NAME...` says
 what each name is the way `-V` does, and answers 1 when any is found nowhere.
 
