@@ -101,6 +101,8 @@ for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
 `return`, `shift`, `exit`, `true`, `false`, `:`. A word one of them takes as a
 variable's name must be a NAME — a letter or underscore, then letters, digits
 and underscores — and so must a function's name and a `for` loop's variable.
+`.` looks for a file named without a `/` in the directories of PATH, as POSIX
+has it, and not in the working directory unless PATH names it.
 
 `cd` and `pwd` work on the logical directory: the route the shell took, a
 symlink on it left as written, so `cd ..` from a link comes back past the

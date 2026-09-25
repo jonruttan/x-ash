@@ -4034,10 +4034,33 @@
     (if (null? wds)
       (do (%stderr "ash: .: filename argument required\n") 2)
       (let ((path (first wds)))
-        (let ((text (guard (e ()) (sh-read-file path))))
+        (let ((text (%sh-dot-text path)))
           (if (null? text)
             (error (string-append ".: " path ": cannot read"))
             (%sh-run-dot text)))))))
+
+; The text of the file a `.` names, or nil when there is none to read.  A name
+; holding a `/` is that path.  Any other is looked for in the directories of
+; PATH, as POSIX has it: not in the working directory unless PATH names it,
+; where bash looks last and dash does not.  The first regular file there that
+; reads is the one -- dash stops at an unreadable one, bash passes it by, and
+; POSIX asks for a readable file.
+(def %sh-dot-text
+  (fn (_ name)
+    (if (%sh-str-has-char? name #\/)
+      (guard (e ()) (sh-read-file name))
+      (%sh-dot-search name (%sh-split-char (%sh-var-value "PATH") #\:)))))
+
+(def %sh-dot-search
+  (fn (self name dirs)
+    (if (null? dirs)
+      ()
+      (do
+        (def cand (string-append (%sh-dir-of (first dirs)) "/" name))
+        (def text (if (eq? (sh-path-kind cand) (lit file))
+                    (guard (e ()) (sh-read-file cand))
+                    ()))
+        (if (null? text) (self name (rest dirs)) text)))))
 
 ; A dot script is a place `return` may end, the way a function call is: the
 ; innermost of the two catches it.
