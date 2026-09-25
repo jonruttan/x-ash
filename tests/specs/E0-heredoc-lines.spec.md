@@ -10,7 +10,8 @@ joined once.
 The first two cases compare a pass with the scan for `<<` that every text the
 shell reads is given first: extracting the here-documents of a script of 1,000
 ordinary lines costs under ten such scans (58 on main), and a body of 1,000
-lines under 25 (43 on main).  The rest are pins that hold on main too, on the
+lines under 25 (43 on main).  They measure the walk by hand, so they hold the
+compiled line base off (E1 holds that base to the walk).  The rest are pins that hold on main too, on the
 states the scan keeps: a `#` in a word, a comment, a quoted `<<`, a quote over
 a line end, a substitution, a pipeline, double quotes.  Expectations from
 `/bin/sh` and `dash`.
@@ -22,8 +23,11 @@ a line end, a substitution, a pipeline, double quotes.  Expectations from
   (def cost (fn (_ th) (do (def c (Heap count)) (th) (- (Heap count) c))))
   (def base (cost (fn (_) ())))
   (def script (string-append (Str8 repeat 1000 "echo hello world\n") "cat <<EOF\nx\nEOF\n"))
+  (def held %sh-hd-jit-threshold)
+  (set! %sh-hd-jit-threshold 100000000)
   (def scan (- (cost (fn (_) (%sh-str-has-heredoc-op? script))) base))
   (def extract (- (cost (fn (_) (%sh-heredoc-extract script))) base))
+  (set! %sh-hd-jit-threshold held)
   (write (fx<? extract (fx* 10 scan)))
   ())
 ```
@@ -37,8 +41,11 @@ a line end, a substitution, a pipeline, double quotes.  Expectations from
   (def cost (fn (_ th) (do (def c (Heap count)) (th) (- (Heap count) c))))
   (def base (cost (fn (_) ())))
   (def body (string-append "cat <<'EOF'\n" (Str8 repeat 1000 "a\n") "EOF\n"))
+  (def held %sh-hd-jit-threshold)
+  (set! %sh-hd-jit-threshold 100000000)
   (def scan (- (cost (fn (_) (%sh-has-pair? body 12 (string-length body) #\< #\<))) base))
   (def extract (- (cost (fn (_) (%sh-heredoc-extract body))) base))
+  (set! %sh-hd-jit-threshold held)
   (write (fx<? extract (fx* 25 scan)))
   ())
 ```

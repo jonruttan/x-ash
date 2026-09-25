@@ -6635,10 +6635,9 @@
 (def %sh-heredoc-text (fn (_ h) (first h)))
 (def %sh-heredoc-expand? (fn (_ h) (rest h)))
 
-; Cut TEXT at each CH, keeping the empty pieces: the lines of a here-document
-; body, and the directories of PATH, are the same walk.  A script holding a
-; here-document is cut into lines whole, so the walk is a nested match on the
-; integer doors, the cheap spelling of a loop per character.
+; Cut TEXT at each CH, keeping the empty pieces: the directories of PATH and of
+; CDPATH.  The walk is a nested match on the integer doors, the cheap spelling
+; of a loop per character.
 (def %sh-split-char
   (fn (_ text ch) (%sh-split-from text ch 0 0 (string-length text) ())))
 
@@ -6650,8 +6649,6 @@
           (self text ch (fx+ i 1) (fx+ i 1) n (pair (substring text start i) acc))
           (self text ch (fx+ i 1) start n acc)))
       (#t (reverse (pair (substring text start n) acc))))))
-
-(def %sh-split-lines (fn (_ text) (%sh-split-char text #\newline)))
 
 (def %sh-strip-tabs
   (fn (_ line)
@@ -6879,42 +6876,49 @@
 (def %sh-hd-joins?
   (fn (_ line more expand?)
     (if expand?
-      (if (null? more) () (%sh-line-continues? line (string-length line) ()))
+      (if (null? more)
+        ()
+        (%sh-line-continues? line (fx+ (string-length line) -1) ()))
       ())))
 
-; Take a body off the front of LINES, to the terminator.  Each line and its
-; newline go onto the pieces as they are, and the body is joined once at the
-; end, rather than a new string made for every line.  The pieces are all
-; strings, so the join is the platform's own concatenation, %str-concat, with
-; no separator to interleave and no piece to check.
+; A line as the line base reads it: its text, or its text in a list when the
+; scan must see it (%sh-hd-lines).
+(def %sh-hd-line-text (fn (_ t) (if (pair? t) (first t) t)))
+
+; Take a body off the front of LINES, to the terminator.  The lines keep their
+; newlines, so the terminator is the delimiter and a newline, and the body is
+; its lines joined once at the end.  The pieces are all strings, so the join
+; is the platform's own concatenation, %str-concat, with no separator to
+; interleave and no piece to check.
 (def %sh-hd-take
   (fn (_ lines delim strip? expand?)
-    (%sh-hd-take-from lines delim strip? expand? ())))
+    (%sh-hd-take-from lines (string-append delim "\n") strip? expand? ())))
 
 ; `remaining`, not `rest`: a parameter of that name shadows the list primitive,
 ; so the recursive step called a LIST.  Second time in this bundle -- see
-; %sh-first-op.
+; %sh-first-op.  A line ending in a backslash loses the backslash and its
+; newline to the line after it.
 (def %sh-hd-take-from
-  (fn (self remaining delim strip? expand? acc)
+  (fn (self remaining terminator strip? expand? acc)
     (match
       ; Unterminated: what is left is the body, which is what a shell does at
       ; end of input.
       ((null? remaining) (list (%str-concat (reverse acc)) ()))
       (#t
         (do
-          (def line (if strip? (%sh-strip-tabs (first remaining)) (first remaining)))
+          (def text (%sh-hd-line-text (first remaining)))
+          (def line (if strip? (%sh-strip-tabs text) text))
           (match
             ((%sh-hd-joins? line (rest remaining) expand?)
               (self (pair (string-append
-                            (substring line 0 (- (string-length line) 1))
-                            (first (rest remaining)))
+                            (substring line 0 (- (string-length line) 2))
+                            (%sh-hd-line-text (first (rest remaining))))
                           (rest (rest remaining)))
-                    delim strip? expand? acc))
-            ((str=? line delim)
+                    terminator strip? expand? acc))
+            ((str=? line terminator)
               (list (%str-concat (reverse acc)) (rest remaining)))
             (#t
-              (self (rest remaining) delim strip? expand?
-                    (pair "\n" (pair line acc))))))))))
+              (self (rest remaining) terminator strip? expand? (pair line acc)))))))))
 
 (def %sh-hd-collect
   (fn (self lines pending bodies)
@@ -6928,39 +6932,92 @@
                   bodies)))))))
 
 (def %sh-hd-walk
-  (fn (self lines out bodies stack)
+  (fn (self lines marked? out bodies stack)
     (match
-      ((null? lines) (list (%ash-join "\n" (reverse out)) (reverse bodies)))
-      ; A line at the top level holding nothing the scan must look at opens no
-      ; here-document and leaves no state behind: it passes as it is.
-      ((%sh-hd-plain-line? (first lines) stack)
-        (self (rest lines) (pair (first lines) out) bodies stack))
+      ((null? lines) (list (%sh-hd-text (reverse out)) (reverse bodies)))
+      ((%sh-hd-passes? (first lines) marked?)
+        (self (rest lines) marked? (pair (first lines) out) bodies stack))
       (#t
         (do
-          (def scanned (%sh-hd-scan-line (first lines) (length bodies) stack))
+          (def scanned (%sh-hd-scan-line (%sh-hd-line-text (first lines))
+                                         (length bodies) stack))
           (def collected (%sh-hd-collect (rest lines) (first (rest scanned)) bodies))
           (self (first collected)
+                marked?
                 (pair (first scanned) out)
                 (first (rest collected))
                 (first (rest (rest scanned)))))))))
 
-(def %sh-hd-plain-line?
-  (fn (_ line stack)
-    (if (null? stack)
-      (do
-        (def n (string-length line))
-        (= (%sh-hd-plain-to line 0 n) n))
-      ())))
+; The lines of TEXT, each with its newline: (MARKED? . LINES).  One newline is
+; added first, so the last line is read however TEXT ends, and the lines are
+; the pieces TEXT cuts into at its newlines, the empty one after a final
+; newline included.  The compiled line base reads them once it is active
+; (ash/tokens.x), and MARKS them: a line the scan must see comes back in a
+; list.  Until then, and wherever it cannot be, %sh-hd-cut reads them unmarked
+; -- a body is never scanned, so its lines are never asked -- and the walk asks
+; a line itself (%sh-hd-passes?).
+(def %sh-hd-lines
+  (fn (_ text)
+    (do
+      (%sh-hd-jit-tick! (string-length text))
+      (def s (string-append text "\n"))
+      (if (eq? %sh-hd-jit (lit active))
+        (pair #t (%token-read-str %sh-hd-raw s))
+        (pair () (%sh-hd-cut s 0 0 (string-length s) ()))))))
+
+; S, which ends in a newline, cut after each newline from I.
+(def %sh-hd-cut
+  (fn (self s i start n acc)
+    (match
+      ((fx<? i n)
+        (if (= (string-ref s i) 10)
+          (self s (fx+ i 1) (fx+ i 1) n (pair (substring s start (fx+ i 1)) acc))
+          (self s (fx+ i 1) start n acc)))
+      (#t (reverse acc)))))
+
+; Whether a line passes the walk whole: a plain line opens no here-document and
+; changes no state, whatever state it is read in.  A marked line is plain when
+; it is a string; an unmarked one is plain when its newline comes before any
+; character the scan looks at.
+(def %sh-hd-passes?
+  (fn (_ t marked?)
+    (match
+      ((pair? t) ())
+      (marked? #t)
+      (#t
+        (do
+          (def n (string-length t))
+          (= (%sh-hd-plain-to-nl t 0 n) (fx+ n -1)))))))
+
+; The first index from I holding a newline or a character the scan looks at.
+(def %sh-hd-plain-to-nl
+  (fn (self s i n)
+    (match
+      ((fx<? i n)
+        (if (= (string-ref s i) 10)
+          i
+          (if (%sh-hd-stop? (string-ref s i)) i (self s (fx+ i 1) n))))
+      (#t n))))
+
+; The text LINES make, less the one newline %sh-hd-lines added.
+(def %sh-hd-text
+  (fn (_ lines)
+    (do
+      (def s (%str-concat lines))
+      (substring s 0 (- (string-length s) 1)))))
 
 ; Lift every here-document out of INPUT, leaving `<<N` behind.  Answers the
-; rewritten text; the bodies land in %sh-heredocs.
+; rewritten text; the bodies land in %sh-heredocs.  The lines come from the
+; line base (ash/tokens.x).
 (def %sh-heredoc-extract
   (fn (_ input)
     ; Nothing to do for the overwhelming majority of input, so the cheap
     ; question is asked first.
     (if (not (%sh-str-has-heredoc-op? input))
       input
-      (let ((r (%sh-hd-walk (%sh-split-lines input) () () ())))
+      (do
+        (def ls (%sh-hd-lines input))
+        (def r (%sh-hd-walk (rest ls) (first ls) () () ()))
         (set! %sh-heredocs (first (rest r)))
         (first r)))))
 

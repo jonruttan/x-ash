@@ -806,3 +806,88 @@
 (%sh-base-reset!)
 (set! %image-transients (pair (lit %sh-base) %image-transients))
 (set! %image-recache-hooks (pair (fn (_) (%sh-base-reset!)) %image-recache-hooks))
+
+; --- The line base: here-documents -------------------------------------------
+;
+; A text holding a here-document is read in lines: a body is the lines up to
+; the one that is its delimiter, and every other line is scanned for the `<<`
+; that opens one.  This base reads a text into those lines, one token a line,
+; each with its newline, and its two types say which lines the scan must see:
+; a line holding none of the characters the scan looks at -- a quote, a
+; backslash, `#`, `$`, a parenthesis, `<` -- comes back as its text, any other
+; as its text in a list.  The two read a plain line to the same length, and
+; the one registered first wins the tie.
+;
+; ITS STATES ARE COMPILED, and it is made only when they are: read through
+; interpreted states it is slower than the walk in ash/eval.x (%sh-hd-cut),
+; which answers the same and reads the lines until then.  The attempt comes
+; once %sh-hd-jit-threshold bytes of text holding a here-document have been
+; read in the process -- compiling costs a few tens of milliseconds, which a
+; short script would not win back -- and runs under a guard: a refusal pins
+; `failed` and the walk reads on.  Each type is one state, entry and body
+; alike, answering itself to read on.  The compiled states are rooted in
+; %sh-hd-jit-states, since the collector cannot see an address baked into
+; code, and all of it is this process's alone: a transient, remade after an
+; image load.
+(def %sh-hd-plain-read (fn (_ . args) (buffer-token (first args))))
+(def %sh-hd-line-read (fn (_ . args) (list (buffer-token (first args)))))
+
+(def %sh-hd-raw ())             ; the raw base the lines are read with
+(def %sh-hd-cbase ())           ; roots the base
+(def %sh-hd-jit-states ())
+(def %sh-hd-jit (lit off))      ; off | active | failed
+(def %sh-hd-jit-bytes 0)
+(def %sh-hd-jit-threshold 8192)
+
+(def %sh-hd-jit-compile!
+  (fn (_)
+    (do
+      (import x/tool/compile)
+      (def jc
+        (fn (_ form)
+          (do
+            (def p (compile-asm form () #t))
+            (set! %sh-hd-jit-states (pair p %sh-hd-jit-states))
+            p)))
+      (def plain
+        (jc (lit (fn (me buffer score chr)
+          (if (= chr 10)
+            (%score-set score 1 buffer)
+            (if (or (= chr 39) (= chr 34) (= chr 92) (= chr 35)
+                    (= chr 36) (= chr 40) (= chr 41) (= chr 60))
+              ()
+              me))))))
+      (def line
+        (jc (lit (fn (me buffer score chr)
+          (if (= chr 10) (%score-set score 1 buffer) me)))))
+      (def b (make-token-base))
+      (base-make-type b "HD-PLAIN"
+        (list (pair (lit analyse) plain) (pair (lit read) %sh-hd-plain-read)))
+      (base-make-type b "HD-LINE"
+        (list (pair (lit analyse) line) (pair (lit read) %sh-hd-line-read)))
+      (set! %sh-hd-cbase b)
+      (set! %sh-hd-raw (Base raw-of b))
+      (lit active))))
+
+(def %sh-hd-jit-tick!
+  (fn (_ n)
+    (if (eq? %sh-hd-jit (lit off))
+      (do
+        (set! %sh-hd-jit-bytes (+ %sh-hd-jit-bytes n))
+        (if (< %sh-hd-jit-bytes %sh-hd-jit-threshold)
+          ()
+          (set! %sh-hd-jit (guard (e (lit failed)) (%sh-hd-jit-compile!)))))
+      ())))
+
+(def %sh-hd-reset!
+  (fn (_)
+    (do
+      (set! %sh-hd-raw ())
+      (set! %sh-hd-cbase ())
+      (set! %sh-hd-jit-states ())
+      (set! %sh-hd-jit (lit off))
+      (set! %sh-hd-jit-bytes 0))))
+(set! %image-transients
+  (pair (lit %sh-hd-raw) (pair (lit %sh-hd-cbase)
+    (pair (lit %sh-hd-jit-states) %image-transients))))
+(set! %image-recache-hooks (pair (fn (_) (%sh-hd-reset!)) %image-recache-hooks))
