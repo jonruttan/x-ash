@@ -4757,10 +4757,13 @@
 ; `command -v` and `command -V` answer what the shell would run, so they ask
 ; in the order the dispatch runs: a builtin, then a function, then the first
 ; file on PATH that could be executed.  A reserved word is asked about first,
-; because it is not a command name at all, and a name with a `/` in it is
-; already a path and stands for itself.
+; because it is not a command name at all, and an alias next, because its
+; value is read in the name's place before anything is run -- the order dash
+; asks in, where bash puts the alias ahead of the reserved word.  A name with a
+; `/` in it is already a path and stands for itself.
 ;
-; Answers (kind . text), or () for a name that would find nothing.
+; Answers (kind . text), or () for a name that would find nothing.  An alias's
+; text is its value.
 
 ; 0o111 -- owner, group and other.  Which of them applies is the kernel's
 ; question at exec time; a file with none of them is not a program.
@@ -4785,6 +4788,8 @@
       ((%sh-str-has-char? name #\/)
         (if (%sh-executable? name) (pair (lit file) name) ()))
       ((%reserved-word? name) (pair (lit keyword) name))
+      ((not (null? (%sh-table-get name %sh-aliases)))
+        (pair (lit alias) (%sh-table-get name %sh-aliases)))
       ((%sh-fn-wins? name (%sh-fn-lookup name %sh-functions))
         (pair (lit function) name))
       ((%sh-builtin? name) (pair (lit builtin) name))
@@ -4798,16 +4803,23 @@
         (pair (lit function) "a shell function")))
 
 ; -V says what the name is; -v says what would run, which for anything but a
-; file on PATH is the name as written.
+; file on PATH or an alias is the name as written.  An alias is said as dash
+; says it, "an alias for" its value, and written by -v as the command that
+; would define it (POSIX), as `alias` writes it.
 (def %sh-where-said
   (fn (_ w)
-    (let ((said (%sh-table-get (first w) %sh-where-words)))
-      (if (null? said) (rest w) said))))
+    (if (eq? (first w) (lit alias))
+      (string-append "an alias for " (rest w))
+      (let ((said (%sh-table-get (first w) %sh-where-words)))
+        (if (null? said) (rest w) said)))))
 
 (def %sh-command-v
   (fn (_ name)
     (let ((w (%sh-where name)))
-      (if (null? w) 1 (do (display (rest w)) (newline) 0)))))
+      (match
+        ((null? w) 1)
+        ((eq? (first w) (lit alias)) (do (display "alias ") (%sh-alias-write name) 0))
+        (#t (do (display (rest w)) (newline) 0))))))
 
 ; What NAME is, for `command -V` and for `type`.  WHO is the utility a name
 ; found nowhere is reported in the name of.
