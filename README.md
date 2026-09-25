@@ -175,6 +175,12 @@ An error — a syntax error, an expansion error, a special builtin's — ends su
 a script with status 2, as POSIX has a shell that is not interactive do; at a
 terminal it is reported and the prompt reads on.
 
+x collects garbage only when asked, so the shell asks: before each line at the
+prompt, and once every 64 simple commands in a session or a script, so a long
+loop keeps what it holds rather than everything it has made. A script of more
+than 25,000 tokens runs without the second: the engine cannot yet collect
+while a list that long is alive.
+
 x-ash is a **lang**: a surface syntax loaded over an x-lang dialect, so a
 spelling shared with x-lang can mean something different here — `;` separates
 commands rather than starting a comment, and `#` starts one rather than

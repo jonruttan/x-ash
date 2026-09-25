@@ -5000,12 +5000,62 @@
         (%sh-restore-fds parked)
         made))))
 
+; --- Sweeps ---
+;
+; x collects only when asked.  The prompt asks before each line (ash/repl.x),
+; but a script run with -f is one evaluation, and so is a loop typed on one
+; line, so the evaluator asks as well: once every %sh-sweep-every simple
+; commands, while %sh-sweeps? is on.  run.x turns it on for a session and a
+; script; the suite leaves it off, so a case that counts objects counts what
+; was allocated.
+;
+; A collect while a list of about 35,000 elements is alive dies in the engine,
+; which marks a list one element deeper per C frame.  So the evaluation of a
+; long script holds sweeps off until it ends (%sh-sweeps-held); a `for`
+; list or parameters past that length are not held.
+(def %sh-sweeps? ())
+(def %sh-sweep-every 64)
+(def %sh-sweep-left 64)
+(def %sh-sweep-holds 0)
+(def %sh-sweep-long 25000)
+(def %sh-collect (prim-ref (lit heap) (lit collect)))
+
+(def %sh-sweep-tick!
+  (fn (_)
+    (match
+      ((fx<? 1 %sh-sweep-left) (set! %sh-sweep-left (fx+ %sh-sweep-left -1)))
+      (#t
+        (do
+          (set! %sh-sweep-left %sh-sweep-every)
+          (when (= %sh-sweep-holds 0) (%sh-collect)))))))
+
+; THUNK's answer, with sweeps held off while it runs; a raise through it gives
+; the hold back on its way out.
+(def %sh-sweeps-held
+  (fn (_ thunk)
+    (do
+      (set! %sh-sweep-holds (fx+ %sh-sweep-holds 1))
+      (guard (e (do (set! %sh-sweep-holds (fx+ %sh-sweep-holds -1)) (error e)))
+        (do
+          (def r (thunk))
+          (set! %sh-sweep-holds (fx+ %sh-sweep-holds -1))
+          r)))))
+
+; Whether L has more than N elements, walking no further than that.
+(def %sh-list-longer?
+  (fn (self l n)
+    (match
+      ((null? l) ())
+      ((fx<? n 1) #t)
+      (#t (self (rest l) (fx+ n -1))))))
+
 (def %sh-run-cmd
   (fn (_ wds redirs)
     ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
     ; would expand a variable's value -- `X='$Y'; echo $X` would print $Y's
     ; contents rather than the two characters it holds.
     (do
+      (if (null? %sh-sweeps?) () (%sh-sweep-tick!))
       (def split (%sh-split-assignments wds ()))
       (def assigns (first split))
       (def remaining (rest split))
@@ -6969,12 +7019,19 @@
 (def sh-eval-extracted
   (fn (_ input)
     (let ((tokens (%sh-mark-keywords (sh-tokenize input))))
-      (if (null? tokens)
-        0
-        (let ((cur (%mk-cursor tokens)))
-          (let ((status (%eval-list cur)))
-            (%sh-refuse-leftover cur)
-            status))))))
+      (match
+        ((null? tokens) 0)
+        ((null? %sh-sweeps?) (%sh-eval-tokens tokens))
+        ((%sh-list-longer? tokens %sh-sweep-long)
+          (%sh-sweeps-held (fn (_) (%sh-eval-tokens tokens))))
+        (#t (%sh-eval-tokens tokens))))))
+
+(def %sh-eval-tokens
+  (fn (_ tokens)
+    (let ((cur (%mk-cursor tokens)))
+      (let ((status (%eval-list cur)))
+        (%sh-refuse-leftover cur)
+        status))))
 
 (def sh-eval
   (fn (_ input)
