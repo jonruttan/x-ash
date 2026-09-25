@@ -104,6 +104,13 @@
                     (self (+ i 2) 2 (Str8 append out "  "))
                     (self (+ i 1) (if (= c #\") 0 2)
                           (Str8 append out " "))))
+                ; Inside $'...' -- a backslash escapes the next character, so
+                ; $'it\'s' is closed.
+                ((= mode 3)
+                  (if (and (= c #\\) (< (+ i 1) n))
+                    (self (+ i 2) 3 (Str8 append out "  "))
+                    (self (+ i 1) (if (= c #\') 0 3)
+                          (Str8 append out " "))))
                 ; Outside quotes.  A backslash at the very END is the
                 ; continuation; anywhere else it just escapes one character.
                 ((= c #\\)
@@ -112,6 +119,11 @@
                     (self (+ i 2) 0 (Str8 append out "  "))))
                 ((= c #\') (self (+ i 1) 1 (Str8 append out " ")))
                 ((= c #\") (self (+ i 1) 2 (Str8 append out " ")))
+                ; `$$` is one parameter, so a quote after it is a plain one.
+                ((and (= c #\$) (and (< (+ i 1) n) (= (Str8 ref (+ i 1) s) #\$)))
+                  (self (+ i 2) 0 (Str8 append out "$$")))
+                ((and (= c #\$) (and (< (+ i 1) n) (= (Str8 ref (+ i 1) s) #\')))
+                  (self (+ i 2) 3 (Str8 append out "  ")))
                 ; A comment runs to the end of the line -- but `#` only starts
                 ; one where a word could start, the same rule the tokenizer
                 ; follows, so `echo $#` is not a comment.
