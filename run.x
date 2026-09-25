@@ -50,8 +50,14 @@
 ; is the writer's own script, which %ash-batch would run and (Sys exit) out of
 ; the writer. %image-writing is bound in that child alone; a real boot raises
 ; Unbound and answers #f, so the guard chooses the session.
+;
+; A session or a script sweeps as it runs (%sh-sweeps? in ash/eval.x).  It is
+; switched on here, past the image guard, so the image keeps it off and the
+; suite, which never runs this entry, counts objects unswept.
 (if (guard (_ #f) %image-writing)
   ()
-  (if %batch?
-    (%ash-batch)
-    (do (%ash-banner) (%ash-repl))))
+  (do
+    (set! %sh-sweeps? #t)
+    (if %batch?
+      (%ash-batch)
+      (do (%ash-banner) (%ash-repl)))))
