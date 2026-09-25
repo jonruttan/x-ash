@@ -343,8 +343,9 @@
 
 ; --- error reporting ---------------------------------------------------------
 ;
-; A shell reports to STDERR and carries on; only the status changes.  The
-; report is the one a forked child makes too (%sh-report in ash/eval.x).
+; A shell at a terminal reports to STDERR and carries on; one with no terminal
+; reports and ends, as a script does (see the loop below).  The report is the
+; one a forked child makes too (%sh-report in ash/eval.x).
 (def %ash-report %sh-report)
 
 ; --- the loop ----------------------------------------------------------------
@@ -392,7 +393,12 @@
         ((eq? line (lit cancel)) (%ash-repl-loop))
         (#t
           (do
-            (guard (err (%ash-report err))
+            (guard (err
+                (%ash-report err)
+                ; With no terminal the commands are a script, and an error
+                ; ends a script (POSIX 2.8.1), as it ends one run with -f; at
+                ; a terminal it is reported and the prompt reads on.
+                (unless (%ash-interactive?) (%sh-exit-shell %sh-error-status)))
               (let ((entry (%ash-read-entry line)))
                 (unless (= (Str8 length entry) 0) (sh-eval entry))))
             (%ash-repl-loop)))))))
@@ -421,7 +427,7 @@
       ; script simply runs out, not only when it calls `exit`.
       (guard (err
           (%ash-report err)
-          (%sh-exit-shell 1))
+          (%sh-exit-shell %sh-error-status))
         (unless (= (Str8 length src) 0) (sh-eval src))
         (%sh-exit-shell %sh-status)))))
 

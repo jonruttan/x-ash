@@ -4385,18 +4385,24 @@
     (unless (%sh-signal? err "%sh-reported")
       (%stderr "ash: " (if (str? err) err (%sh-write-to-str err)) "\n"))))
 
+; The status an error ends a shell with: a forked child, a script run with -f,
+; and a shell reading commands with no terminal.  dash says 2 for every error,
+; bash 2 for a syntax error and 1 for the others.
+(def %sh-error-status 2)
+
 ; What a forked child runs: THUNK answers the status the child exits with.  A
 ; raise ends the child here, since left to unwind it would carry on through the
 ; code of the shell that forked it, as a second copy of that shell.  A `return`
 ; or loop signal that nothing in the child caught ends it with the status the
-; signal carries; any other error is reported, and ends it with 2.
+; signal carries; any other error is reported, and ends it with
+; %sh-error-status.
 (def %sh-in-child
   (fn (_ thunk)
     (%sh-exit-shell
       (guard (e (match
                   ((%sh-return? e) %sh-return-status)
                   ((not (null? (%sh-loop-signal-kind e))) %sh-status)
-                  (#t (do (%sh-report e) 2))))
+                  (#t (do (%sh-report e) %sh-error-status))))
         (thunk)))))
 
 ; --- getopts ------------------------------------------------------------------

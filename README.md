@@ -171,6 +171,9 @@ There is a prompt when there is someone to prompt: the banner and PS1 and PS2
 appear when the shell's own input and its reports are both terminals, and the
 prompts go to standard error. A script piped in or read from a file is run
 without either, so its stdout holds what its commands wrote and nothing else.
+An error — a syntax error, an expansion error, a special builtin's — ends such
+a script with status 2, as POSIX has a shell that is not interactive do; at a
+terminal it is reported and the prompt reads on.
 
 x-ash is a **lang**: a surface syntax loaded over an x-lang dialect, so a
 spelling shared with x-lang can mean something different here — `;` separates
