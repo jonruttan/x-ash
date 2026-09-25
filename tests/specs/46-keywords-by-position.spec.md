@@ -6,9 +6,10 @@ first word of a command, as the word after a reserved word other than `case`,
 `esac` where a clause's pattern would start.  Anywhere else it is an ordinary
 word, and a quoted one never is.
 
-Before a script runs, one walk over its tokens marks each word that stands in
-such a place, and every later scan reads the mark: the stop words that end a
-command list, the nesting a skipped body counts, the `esac` a case looks for.
+Before each complete command runs, one walk over its tokens marks each word
+that stands in such a place, and every later scan reads the mark: the stop
+words that end a command list, the nesting a skipped body counts, the `esac` a
+case looks for.
 
 Expectations match `/bin/sh` and `dash`.
 

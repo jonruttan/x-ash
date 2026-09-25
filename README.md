@@ -98,11 +98,21 @@ if need be.
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
 `source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap` (EXIT only),
-`return`, `shift`, `exit`, `true`, `false`, `:`. A word one of them takes as a
-variable's name must be a NAME — a letter or underscore, then letters, digits
-and underscores — and so must a function's name and a `for` loop's variable.
-`.` looks for a file named without a `/` in the directories of PATH, as POSIX
-has it, and not in the working directory unless PATH names it.
+`return`, `shift`, `exit`, `true`, `false`, `:`, `alias`, `unalias`. A word
+one of them takes as a variable's name must be a NAME — a letter or
+underscore, then letters, digits and underscores — and so must a function's
+name and a `for` loop's variable. `.` looks for a file named without a `/` in
+the directories of PATH, as POSIX has it, and not in the working directory
+unless PATH names it.
+
+Aliases: after `alias NAME=VALUE`, an unquoted word NAME where a command's name
+stands is read as VALUE — after assignments and redirections written in front
+of the name as well, and on the word after a value that ends in a blank. A
+reserved word is recognized first, and no alias is substituted inside its own
+value. A script runs one complete command at a time, so an alias is in effect
+from the next complete command on, and a function's body keeps the aliases it
+was defined with. `alias` alone writes every definition sorted by name, in the
+form that would make it again; `unalias NAME...` and `unalias -a` remove them.
 
 `cd` and `pwd` work on the logical directory: the route the shell took, a
 symlink on it left as written, so `cd ..` from a link comes back past the

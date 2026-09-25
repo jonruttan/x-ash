@@ -50,10 +50,10 @@
 
 ; A reserved word is one only where the grammar can take one: `done` closes a
 ; loop in `echo x; done` and is an argument in `echo done`, and a quoted "done"
-; is never one.  %sh-mark-keywords walks the tokens once, as they come from the
-; tokenizer, and marks each bare word that stands where a reserved word is
-; recognized; this reads the mark, so every later scan -- stop words, nesting,
-; skipped branches -- agrees on which words are syntax.
+; is never one.  %sh-mark-walk goes over each complete command's tokens once,
+; before the command runs, and marks each bare word that stands where a
+; reserved word is recognized; this reads the mark, so every later scan -- stop
+; words, nesting, skipped branches -- agrees on which words are syntax.
 (def %tok-is-keyword?
   (fn (_ tok)
     (if (eq? (first tok) (lit tok-word)) (not (null? (rest (rest tok)))) ())))
@@ -81,6 +81,14 @@
 ;   pattern       where a clause's pattern starts, and `esac` may end the case
 ;   pattern-word  inside a pattern, before its `)`; after a `|` as well, so
 ;                 `a|esac)` is two patterns
+;
+; and, while there are aliases, two more, where no reserved word is one but an
+; alias still is (see %sh-alias-prefix?):
+;
+;   prefix        after the assignments and redirections in front of a
+;                 command's name, where the name has not come yet
+;   ptarget       the word a redirection names, when the redirection is one
+;                 of those
 (def %sh-redirect-ops (list "<" ">" ">>" "<<" "<<-" "<&" ">&" "<>" ">|"))
 
 ; Where a reserved word leaves the walk.  `for` and `case` wait for a name and
@@ -109,18 +117,36 @@
         (if (null? next) (lit cmd) next)))))
 
 (def %sh-mark-after-word
-  (fn (_ state)
+  (fn (_ tok state)
     (match
       ((eq? state (lit for-name)) (lit for-list))
       ((eq? state (lit case-subject)) (lit case-in))
       ((eq? state (lit pattern)) (lit pattern-word))
       ((eq? state (lit pattern-word)) (lit pattern-word))
+      ((null? %sh-aliases) (lit arg))
+      ((%sh-alias-prefix? tok state) (lit prefix))
       (#t (lit arg)))))
+
+; Whether a command's name is still to come after TOK: TOK is an assignment
+; word or the digits of `2>err` where the name could have stood, or the word a
+; redirection there names.  POSIX substitutes an alias for the command's name
+; wherever it stands, so `X=1 >log ll` reads `ll` as `ll` alone does.
+(def %sh-alias-prefix?
+  (fn (_ tok state)
+    (match
+      ((eq? state (lit ptarget)) #t)
+      ((not (or (eq? state (lit cmd)) (eq? state (lit prefix)))) ())
+      ((eq? (first tok) (lit tok-io)) #t)
+      ((eq? (first tok) (lit tok-word)) (%is-assignment? (first (rest tok))))
+      (#t ()))))
 
 (def %sh-mark-after-op
   (fn (_ op state)
     (match
-      ((%sh-word-in? op %sh-redirect-ops) (lit target))
+      ((%sh-word-in? op %sh-redirect-ops)
+        (if (or (eq? state (lit cmd)) (eq? state (lit prefix)))
+          (lit ptarget)
+          (lit target)))
       ((string=? op ";;") (lit pattern))
       ((eq? state (lit pattern)) (if (string=? op ")") (lit cmd) (lit pattern)))
       ((eq? state (lit pattern-word)) (if (string=? op "|") state (lit cmd)))
@@ -151,31 +177,183 @@
     (and (or (string=? op "(") (string=? op ")"))
          (or (eq? state (lit pattern)) (eq? state (lit pattern-word))))))
 
+; --- Complete commands -------------------------------------------------------
+;
+; A script runs one complete command at a time: each is read to its end and
+; run before the next is read (POSIX 2.3).  An alias defined by a command is
+; therefore in effect from the next command on, not for the rest of its own
+; line, and a function's body is read, aliases and all, when the function is
+; defined.  So the walk marks one complete command and stops: it answers
+; (MARKED . REST), the command's tokens, marked, and the tokens after it, from
+; the newline that ends it.
+;
+; A complete command ends at a newline outside every construct, unless the
+; line ends in `&&`, `||` or `|`, or in the `()` of a function whose body is
+; on the next line.  DEPTH counts the constructs open, by the nesting the skip
+; walks count (%sh-block-delta, %sh-paren-delta): a reserved word that opens or
+; closes one, and a paren, except a case pattern's.  It is not floored: past a
+; closer that closes nothing no newline ends the command, and the command is
+; refused at that closer all the same.
+
 ; Answers the tokens in order, each word that stands where a reserved word is
 ; recognized, and each paren that belongs to a case pattern, given a third
-; element, #t.
+; element, #t; and a word that names an alias where one is substituted
+; replaced by the alias's value, marked in turn.  AX is the substitutions in
+; progress (see %sh-alias-pop), nil when there are none.
 (def %sh-mark-walk
-  (fn (self toks state acc)
+  (fn (self toks state depth acc ax)
     (match
-      ((null? toks) (reverse acc))
+      ((null? toks) (pair (reverse acc) ()))
+      ((if (null? ax) () (%sh-alias-ends? ax toks))
+        (self toks state depth acc (%sh-alias-pop ax toks ())))
       ((eq? (first (first toks)) (lit tok-newline))
-        (self (rest toks) (%sh-mark-after-newline state) (pair (first toks) acc)))
+        (if (%sh-mark-ends? depth acc)
+          (pair (reverse acc) toks)
+          (self (rest toks) (%sh-mark-after-newline state) depth
+                (pair (first toks) acc) ax)))
       ((eq? (first (first toks)) (lit tok-op))
-        (let ((op (first (rest (first toks)))))
+        (do
+          (def op (first (rest (first toks))))
+          (def tok (if (%sh-mark-pattern-paren? op state)
+                     (list (lit tok-op) op #t)
+                     (first toks)))
           (self (rest toks) (%sh-mark-after-op op state)
-                (pair (if (%sh-mark-pattern-paren? op state)
-                        (list (lit tok-op) op #t)
-                        (first toks))
-                      acc))))
+                (fx+ depth (%sh-paren-delta tok)) (pair tok acc) ax)))
       ((%sh-mark-keyword? (first toks) state)
-        (self (rest toks)
-              (%sh-mark-after-keyword (first (rest (first toks))) state)
-              (pair (list (lit tok-word) (first (rest (first toks))) #t) acc)))
-      (#t (self (rest toks) (%sh-mark-after-word state)
-                (pair (first toks) acc))))))
+        (do
+          (def word (first (rest (first toks))))
+          (self (rest toks) (%sh-mark-after-keyword word state)
+                (fx+ depth (%sh-block-delta word))
+                (pair (list (lit tok-word) word #t) acc) ax)))
+      ((if (null? %sh-aliases) () (%sh-alias-here? (first toks) state toks ax))
+        (%sh-alias-substitute self toks state depth acc ax))
+      (#t (self (rest toks) (%sh-mark-after-word (first toks) state) depth
+                (pair (first toks) acc) ax)))))
 
+; Whether a newline here ends the complete command in ACC, the tokens before
+; it, latest first.
+(def %sh-mark-ends?
+  (fn (_ depth acc)
+    (match
+      ((not (= depth 0)) ())
+      ((null? acc) ())
+      ((not (eq? (first (first acc)) (lit tok-op))) #t)
+      (#t (not (%sh-mark-goes-on? (first (rest (first acc))) (rest acc)))))))
+
+(def %sh-mark-goes-on?
+  (fn (_ op before)
+    (match
+      ((string=? op "&&") #t)
+      ((string=? op "||") #t)
+      ((string=? op "|") #t)
+      ((not (string=? op ")")) ())
+      ((null? before) ())
+      (#t (%tok-is-op? (first before) "(")))))
+
+; The complete command at the head of TOKENS, marked, and the tokens after it.
+(def %sh-mark-command
+  (fn (_ tokens) (%sh-mark-walk tokens (lit cmd) 0 () ())))
+
+; Every complete command in TOKENS, marked, with the aliases in effect now.
 (def %sh-mark-keywords
-  (fn (_ tokens) (%sh-mark-walk tokens (lit cmd) ())))
+  (fn (self tokens)
+    (if (null? tokens)
+      ()
+      (do
+        (def marked (%sh-mark-command tokens))
+        (append (first marked) (self (rest marked)))))))
+
+; --- Alias substitution ------------------------------------------------------
+;
+; An unquoted word naming an alias, where a command's name stands, is read as
+; the alias's value instead (POSIX 2.3.1).  So is the word after a value that
+; ends in a blank, which is what lets `alias sudo='sudo '` reach the alias
+; after it.  A reserved word is recognized first, and a word the substitution
+; of an alias has produced is not substituted by that alias again, however
+; deep, so `alias ls='ls -F'` stops.
+;
+; AX holds the substitutions in progress, innermost first, behind the place a
+; word is substituted after a blank: (AFTER-BLANK . SUBSTITUTIONS), each
+; substitution (NAME END . BLANK?), END the tokens after the value, and nil
+; when there is nothing to hold.  A value's tokens are new, so the walk reaches
+; each END exactly once.
+;
+; The aliases are this process's, as its variables are, so a state image does
+; not carry them.
+(def %sh-aliases ())
+(set! %image-transients (pair (lit %sh-aliases) %image-transients))
+
+(def %sh-alias-here?
+  (fn (_ tok state toks ax)
+    (match
+      ((not (eq? (first tok) (lit tok-word))) ())
+      ((not (%sh-alias-place? state toks ax)) ())
+      ((null? (%sh-table-get (first (rest tok)) %sh-aliases)) ())
+      ((not (%sh-alias-plain? (first (rest tok)))) ())
+      ((null? ax) #t)
+      (#t (not (%sh-alias-in-use? (first (rest tok)) (rest ax)))))))
+
+(def %sh-alias-place?
+  (fn (_ state toks ax)
+    (match
+      ((eq? state (lit cmd)) #t)
+      ((eq? state (lit prefix)) #t)
+      ((null? ax) ())
+      (#t (same? toks (first ax))))))
+
+; A word with a quote, a backslash or an expansion in it is not the name it
+; spells, and is never substituted.
+(def %sh-alias-plain?
+  (fn (_ name)
+    (not (or (%sh-str-has-char? name #\\) (%sh-str-has-char? name #\')
+             (%sh-str-has-char? name #\") (%sh-str-has-char? name #\$)
+             (%sh-str-has-char? name #\`)))))
+
+(def %sh-alias-in-use?
+  (fn (self name subs)
+    (match
+      ((null? subs) ())
+      ((string=? name (first (first subs))) #t)
+      (#t (self name (rest subs))))))
+
+; The walk goes on over the value's tokens and then the ones after the word, in
+; the state the word was in: the value's first word stands where the name did.
+; It stands after a blank, too, if the name did.
+(def %sh-alias-substitute
+  (fn (_ walk toks state depth acc ax)
+    (do
+      (def name (first (rest (first toks))))
+      (def value (%sh-table-get name %sh-aliases))
+      (def more (append (sh-tokenize value) (rest toks)))
+      (walk more state depth acc
+        (pair more (pair (pair name (pair (rest toks) (%sh-ends-blank? value)))
+                         (if (null? ax) () (rest ax))))))))
+
+(def %sh-ends-blank?
+  (fn (_ s)
+    (do
+      (def n (string-length s))
+      (if (fx<? 0 n)
+        (or (= (string-ref s (fx+ n -1)) #\space)
+            (= (string-ref s (fx+ n -1)) #\tab))
+        ()))))
+
+(def %sh-alias-ends?
+  (fn (_ ax toks)
+    (if (null? (rest ax)) () (same? toks (first (rest (first (rest ax))))))))
+
+; The substitutions whose values end here, taken off.  If one of them ended in
+; a blank, the word here is one an alias may be substituted for.
+(def %sh-alias-pop
+  (fn (self ax toks blank?)
+    (do
+      (def subs (rest ax))
+      (if (if (null? subs) () (same? toks (first (rest (first subs)))))
+        (self (pair (first ax) (rest subs)) toks
+              (if (null? (rest (rest (first subs)))) blank? #t))
+        (do
+          (def after (if (null? blank?) (first ax) toks))
+          (if (if (null? after) (null? subs) ()) () (pair after subs)))))))
 
 (def %tok-is-op?
   (fn (_ tok op)
@@ -4702,6 +4880,87 @@
         (let ((r (self (rest wds))))
           (if (= s 0) r 1))))))
 
+; `alias NAME=VALUE...` defines each NAME (see %sh-mark-walk for where one is
+; substituted), `alias NAME...` writes each definition, and `alias` alone
+; writes all of them, sorted by name: each as the command that would make it
+; again, the value in single quotes.  A NAME with no definition is reported
+; and answers 1, and the words after it are still taken.  A word whose `=`
+; comes first, `=x`, is a name to write, as dash and bash read it.  POSIX gives
+; `alias` no options, but writes an alias named `-0` as `alias -- -0='-0 '`,
+; so a leading `--` is passed over.
+(def %sh-alias-builtin
+  (fn (_ wds)
+    (do
+      (def ws (if (if (null? wds) () (string=? (first wds) "--")) (rest wds) wds))
+      (if (null? ws)
+        (%sh-alias-each (sh-sort-strings (%sh-alias-names %sh-aliases ())) 0)
+        (%sh-alias-each ws 0)))))
+
+(def %sh-alias-names
+  (fn (self table names)
+    (if (null? table)
+      names
+      (self (rest table) (pair (first (first table)) names)))))
+
+(def %sh-alias-each
+  (fn (self ws status)
+    (if (null? ws)
+      status
+      (do
+        (def w (first ws))
+        (def eq (%sh-first-eq w 0 (string-length w)))
+        (self (rest ws)
+          (match
+            ((fx<? 0 eq)
+              (do
+                (set! %sh-aliases
+                  (pair (pair (substring w 0 eq)
+                              (substring w (fx+ eq 1) (string-length w)))
+                        (%sh-table-without (substring w 0 eq) %sh-aliases)))
+                status))
+            ((%sh-alias-write w) status)
+            (#t 1)))))))
+
+; NAME's definition written, answering #t, or reported missing, answering nil.
+(def %sh-alias-write
+  (fn (_ name)
+    (do
+      (def value (%sh-table-get name %sh-aliases))
+      (if (null? value)
+        (do (%stderr "ash: alias: " name ": not found\n") ())
+        (do
+          (display name)
+          (display "=")
+          (display (%sh-single-quote value))
+          (newline)
+          #t)))))
+
+; `unalias NAME...` removes each definition, and `unalias -a` every one.  A NAME
+; with no definition is reported and answers 1, and the names after it are
+; still taken.  With no operand at all it is a usage error answering 2, as in
+; bash: POSIX asks for a name or -a.  dash answers 0.
+(def %sh-unalias
+  (fn (_ wds)
+    (match
+      ((null? wds)
+        (do (%stderr "ash: unalias: usage: unalias [-a] name [name ...]\n") 2))
+      ((string=? (first wds) "-a") (do (set! %sh-aliases ()) 0))
+      ((string=? (first wds) "--") (%sh-unalias-each (rest wds) 0))
+      (#t (%sh-unalias-each wds 0)))))
+
+(def %sh-unalias-each
+  (fn (self ws status)
+    (match
+      ((null? ws) status)
+      ((null? (%sh-table-get (first ws) %sh-aliases))
+        (do
+          (%stderr "ash: unalias: " (first ws) ": not found\n")
+          (self (rest ws) 1)))
+      (#t
+        (do
+          (set! %sh-aliases (%sh-table-without (first ws) %sh-aliases))
+          (self (rest ws) status))))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
@@ -4736,7 +4995,9 @@
         (pair "trap"   %sh-trap-builtin)
         (pair "wait"   %sh-wait-builtin)
         (pair "type"   %sh-type)
-        (pair "source" %sh-source)))
+        (pair "source" %sh-source)
+        (pair "alias"  %sh-alias-builtin)
+        (pair "unalias" %sh-unalias)))
 
 (def %sh-builtin?
   (fn (_ name) (not (null? (%sh-table-get name %sh-builtin-table)))))
@@ -5317,10 +5578,15 @@
 ; malformed input cannot drive the count negative and swallow the rest.
 (def %sh-nest-delta
   (fn (_ tok)
+    (if (%tok-is-keyword? tok) (%sh-block-delta (%tok-word-val tok)) 0)))
+
+; The same for a reserved word, by what it is: the marking walk asks it of each
+; one as it marks it.
+(def %sh-block-delta
+  (fn (_ word)
     (match
-      ((not (%tok-is-keyword? tok)) 0)
-      ((%sh-word-in? (%tok-word-val tok) %sh-block-openers) 1)
-      ((%sh-word-in? (%tok-word-val tok) %sh-block-closers) -1)
+      ((%sh-word-in? word %sh-block-openers) 1)
+      ((%sh-word-in? word %sh-block-closers) -1)
       (#t 0))))
 
 ; The walk goes over the token list and sets the cursor once, where it stops,
@@ -6447,13 +6713,17 @@
     (and (eq? (first tok) (lit tok-op))
          (%sh-word-in? (first (rest tok)) %sh-operand-end-ops))))
 
+; An operator is told by its first character, as %sh-async-end tells it: `(`
+; and `)` are the only operators that start with either.  The marking walk
+; asks this of every operator.
 (def %sh-paren-delta
   (fn (_ tok)
-    (cond
+    (match
+      ((not (eq? (first tok) (lit tok-op))) 0)
       ((%tok-pattern-paren? tok) 0)
-      ((%tok-is-op? tok "(") 1)
-      ((%tok-is-op? tok ")") (- 0 1))
-      (else 0))))
+      ((= (string-ref (first (rest tok)) 0) #\() 1)
+      ((= (string-ref (first (rest tok)) 0) #\)) -1)
+      (#t 0))))
 
 (def %sh-skip-operand
   (fn (self cur depth)
@@ -7133,7 +7403,7 @@
 ; extraction, so a fragment's continuations went with the text around it.
 (def sh-eval-extracted
   (fn (_ input)
-    (let ((tokens (%sh-mark-keywords (sh-tokenize input))))
+    (let ((tokens (sh-tokenize input)))
       (match
         ((null? tokens) 0)
         ((null? %sh-sweeps?) (%sh-eval-tokens tokens))
@@ -7141,12 +7411,32 @@
           (%sh-sweeps-held (fn (_) (%sh-eval-tokens tokens))))
         (#t (%sh-eval-tokens tokens))))))
 
+; One complete command at a time, each marked just before it runs (see
+; %sh-mark-walk).  The status is the last command's; text with no command in
+; it answers 0.
 (def %sh-eval-tokens
   (fn (_ tokens)
-    (let ((cur (%mk-cursor tokens)))
-      (let ((status (%eval-list cur)))
-        (%sh-refuse-leftover cur)
-        status))))
+    (do
+      (def ts (%sh-drop-newlines tokens))
+      (if (null? ts)
+        (do (set! %sh-status 0) 0)
+        (%sh-eval-commands ts)))))
+
+(def %sh-eval-commands
+  (fn (self ts)
+    (do
+      (def marked (%sh-mark-command ts))
+      (def cur (%mk-cursor (first marked)))
+      (def status (%eval-list cur))
+      (%sh-refuse-leftover cur)
+      (def more (%sh-drop-newlines (rest marked)))
+      (if (null? more) status (self more)))))
+
+(def %sh-drop-newlines
+  (fn (self ts)
+    (if (if (null? ts) () (eq? (first (first ts)) (lit tok-newline)))
+      (self (rest ts))
+      ts)))
 
 (def sh-eval
   (fn (_ input)
