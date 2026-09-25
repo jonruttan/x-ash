@@ -4910,6 +4910,19 @@
 (def %sh-set-status
   (fn (_ status) (set! %sh-status status) status))
 
+; REDIRS made and then put back, answering whether all of them were made: what
+; a command with no command name does with its redirections.  `> f` creates or
+; empties f, and nothing it opens stays open.
+(def %sh-redirs-made?
+  (fn (_ redirs)
+    (if (null? redirs)
+      #t
+      (do
+        (def parked (%sh-save-fds redirs))
+        (def made (%sh-setup-redirs redirs))
+        (%sh-restore-fds parked)
+        made))))
+
 (def %sh-run-cmd
   (fn (_ wds redirs)
     ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
@@ -4920,14 +4933,18 @@
       (def assigns (first split))
       (def remaining (rest split))
       (if (null? remaining)
-        ; A command with no command name: bare assignments, or words that
-        ; expanded to nothing.  The values it set are the shell's from here
-        ; on, and its status is its last command substitution's, or 0 when
-        ; it performed none.
-        (do
-          (%sh-apply-assignments assigns)
-          (%sh-set-status
-            (if (null? %sh-subst-status) 0 %sh-subst-status)))
+        ; A command with no command name: bare assignments, redirections, or
+        ; words that expanded to nothing.  Its redirections come first, and
+        ; one that cannot be made fails the command before any assignment is
+        ; made, the order POSIX gives and dash keeps.  The values it set are
+        ; the shell's from here on, and its status is its last command
+        ; substitution's, or 0 when it performed none.
+        (if (%sh-redirs-made? redirs)
+          (do
+            (%sh-apply-assignments assigns)
+            (%sh-set-status
+              (if (null? %sh-subst-status) 0 %sh-subst-status)))
+          (%sh-set-status %sh-redir-status))
         (do
           (unless (null? %sh-opt-xtrace)
             (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n"))

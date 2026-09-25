@@ -88,10 +88,12 @@ externals — and on a builtin the descriptors are put back afterwards, so
 `echo x > log` does not leave the shell writing to `log`. A redirection
 written after a compound (`for ...; done > log`) applies to the whole
 construct. `exec` with redirections and no command applies them to the shell
-itself. A number in front of the operator names the descriptor: after
-`exec 3<file`, `read x <&3` reads the file's next line. A file `>` or `>>`
-creates has permission 0666 less the umask, and one already there keeps its
-mode; `<>` opens its file for reading and writing, creating it if need be.
+itself; redirections with no command at all (`> log`) are made and put back,
+so they create or empty the file. A number in front of the operator names the
+descriptor: after `exec 3<file`, `read x <&3` reads the file's next line. A
+file `>` or `>>` creates has permission 0666 less the umask, and one already
+there keeps its mode; `<>` opens its file for reading and writing, creating it
+if need be.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
