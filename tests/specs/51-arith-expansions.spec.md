@@ -93,7 +93,7 @@ Expectations match `/bin/sh` and `dash`.
 
 ```sh
 (let ((cost (fn (_ thunk) (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-arith-text "(count + 1)")))
+  (< (cost (fn (_) (%sh-arith-text "(count + 1)" 1 10)))
      (cost (fn (_) (%sh-expand-str-dq "count + 1")))))
 ```
 ---
