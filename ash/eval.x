@@ -460,6 +460,15 @@
 (set! %image-transients
   (pair (lit %sh-vars) (pair (lit %sh-export-marks) %image-transients)))
 
+; The commands `hash` has been asked to remember, (NAME . PATH), latest first.
+; Assigning or unsetting PATH forgets them, as it does in dash and bash (see
+; %sh-hash).
+(def %sh-hashed ())
+(set! %image-transients (pair (lit %sh-hashed) %image-transients))
+
+(def %sh-hashed-forget
+  (fn (_ name) (when (string=? name "PATH") (set! %sh-hashed ()))))
+
 ; The value of NAME, or () when it is unset.
 (def %sh-var-get
   (fn (_ name)
@@ -499,6 +508,7 @@
 (def %sh-var-set!
   (fn (_ name value)
     (when (%sh-readonly? name) (%sh-readonly-refuse name))
+    (unless (null? %sh-hashed) (%sh-hashed-forget name))
     (match
       ((if (null? %sh-opt-allexport) (not (null? (%sh-table-get name %sh-vars))) ())
         (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))
@@ -517,6 +527,7 @@
 (def %sh-var-unset!
   (fn (_ name)
     (when (%sh-readonly? name) (%sh-readonly-refuse name))
+    (unless (null? %sh-hashed) (%sh-hashed-forget name))
     (set! %sh-vars (%sh-table-without name %sh-vars))
     (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
     (sh-unsetenv name)))
@@ -4798,6 +4809,14 @@
       ((%reserved-word? name) (pair (lit keyword) name))
       ((not (null? (%sh-table-get name %sh-aliases)))
         (pair (lit alias) (%sh-table-get name %sh-aliases)))
+      (#t (%sh-command-where name)))))
+
+; Where a command NAME would be found once it is a command's name: a function,
+; a builtin, or the first file on PATH that could be executed.  `hash` asks
+; this, as a command is looked up after reserved words and aliases are read.
+(def %sh-command-where
+  (fn (_ name)
+    (match
       ((%sh-fn-wins? name (%sh-fn-lookup name %sh-functions))
         (pair (lit function) name))
       ((%sh-builtin? name) (pair (lit builtin) name))
@@ -4981,6 +5000,52 @@
           (set! %sh-aliases (%sh-table-without (first ws) %sh-aliases))
           (self (rest ws) status))))))
 
+; `hash NAME...` looks each NAME up as a command (%sh-command-where) and
+; remembers the file it is on PATH; a function or a builtin is found and not
+; remembered, and a reserved word or an alias is not a command, so it is not
+; found.  A NAME found nowhere is reported and answers 1, and the names after
+; it are still taken.  A NAME holding a `/` answers 0, as it does in dash and
+; bash; POSIX leaves it open.  `hash -r` forgets them all, as assigning or
+; unsetting PATH does, and `hash` alone writes each remembered path on a line
+; of its own, in the order they were remembered, as dash writes them.
+;
+; This shell looks along PATH for every command it runs, so what is
+; remembered changes no lookup: the table is what `hash` was asked to keep.
+(def %sh-hash
+  (fn (_ wds)
+    (match
+      ((null? wds) (do (%sh-hash-write (reverse %sh-hashed)) 0))
+      ((string=? (first wds) "-r")
+        (do (set! %sh-hashed ()) (%sh-hash-each (rest wds) 0)))
+      ((string=? (first wds) "--") (%sh-hash-each (rest wds) 0))
+      ((%sh-command-option? (first wds))
+        (do (%stderr "ash: hash: " (first wds) ": invalid option\n") 2))
+      (#t (%sh-hash-each wds 0)))))
+
+(def %sh-hash-each
+  (fn (self ws status)
+    (if (null? ws)
+      status
+      (do
+        (def name (first ws))
+        (def w (if (%sh-str-has-char? name #\/) (lit path) (%sh-command-where name)))
+        (match
+          ((null? w)
+            (do (%stderr "ash: hash: " name ": not found\n") (self (rest ws) 1)))
+          ((if (pair? w) (eq? (first w) (lit file)) ())
+            (do
+              (set! %sh-hashed
+                (pair (pair name (rest w)) (%sh-table-without name %sh-hashed)))
+              (self (rest ws) status)))
+          (#t (self (rest ws) status)))))))
+
+(def %sh-hash-write
+  (fn (self rows)
+    (unless (null? rows)
+      (display (rest (first rows)))
+      (newline)
+      (self (rest rows)))))
+
 ; --- The builtin table ------------------------------------------------------
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
@@ -5017,7 +5082,8 @@
         (pair "type"   %sh-type)
         (pair "source" %sh-source)
         (pair "alias"  %sh-alias-builtin)
-        (pair "unalias" %sh-unalias)))
+        (pair "unalias" %sh-unalias)
+        (pair "hash"   %sh-hash)))
 
 (def %sh-builtin?
   (fn (_ name) (not (null? (%sh-table-get name %sh-builtin-table)))))
