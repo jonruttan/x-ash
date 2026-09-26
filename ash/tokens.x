@@ -699,7 +699,7 @@
 ; hooks ask it of every character they are handed, which the reader passes as
 ; an integer and never as nil, so the unchecked comparison is safe here.
 (def %sh-digit?
-  (fn (_ c) (if (fx<? c #\0) () (not (fx<? #\9 c)))))
+  (fn (_ c) (match ((fx<? c #\0) ()) ((fx<? #\9 c) ()) (#t #t))))
 
 (def %sh-int-body ())
 (def %sh-int-word-body ())
