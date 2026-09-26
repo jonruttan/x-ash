@@ -39,10 +39,10 @@
 
 (def %tok-is-word?
   (fn (_ tok)
-    (or
-      (eq? (first tok) (lit tok-word))
-      (eq? (first tok) (lit tok-sq))
-      (eq? (first tok) (lit tok-dq)))))
+    (match
+      ((eq? (first tok) (lit tok-word)) #t)
+      ((eq? (first tok) (lit tok-sq)) #t)
+      (#t (eq? (first tok) (lit tok-dq))))))
 
 ; The digits of `2>err`, which the tokenizer reads apart from any other word
 ; because they run straight into a redirection operator.
@@ -52,17 +52,32 @@
 ; loop in `echo x; done` and is an argument in `echo done`, and a quoted "done"
 ; is never one.  %sh-mark-walk goes over each complete command's tokens once,
 ; before the command runs, and marks each bare word that stands where a
-; reserved word is recognized; this reads the mark, so every later scan -- stop
-; words, nesting, skipped branches -- agrees on which words are syntax.
+; reserved word is recognized with its role (%sh-keyword-role); these read the
+; mark, so every later scan -- stop words, nesting, skipped branches -- agrees
+; on which words are syntax.
 (def %tok-is-keyword?
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-word)) (not (null? (rest (rest tok)))) ())))
+    (match
+      ((eq? (first tok) (lit tok-word))
+        (match ((null? (rest (rest tok))) ()) (#t #t)))
+      (#t ()))))
+
+; The role TOK was marked with, or nil when it is no marked word.
+(def %tok-role
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word))
+        (match ((null? (rest (rest tok))) ()) (#t (first (rest (rest tok))))))
+      (#t ()))))
 
 ; The same mark on an operator: a paren the walk found where a case pattern
 ; stands, which closes no subshell and is counted by nothing.
 (def %tok-pattern-paren?
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-op)) (not (null? (rest (rest tok)))) ())))
+    (match
+      ((eq? (first tok) (lit tok-op))
+        (match ((null? (rest (rest tok))) ()) (#t #t)))
+      (#t ()))))
 
 ; --- Reserved words, by position ---------------------------------------------
 ;
@@ -190,16 +205,17 @@
 ; A complete command ends at a newline outside every construct, unless the
 ; line ends in `&&`, `||` or `|`, or in the `()` of a function whose body is
 ; on the next line.  DEPTH counts the constructs open, by the nesting the skip
-; walks count (%sh-block-delta, %sh-paren-delta): a reserved word that opens or
+; walks count (%sh-role-delta, %sh-paren-delta): a reserved word that opens or
 ; closes one, and a paren, except a case pattern's.  It is not floored: past a
 ; closer that closes nothing no newline ends the command, and the command is
 ; refused at that closer all the same.
 
 ; Answers the tokens in order, each word that stands where a reserved word is
-; recognized, and each paren that belongs to a case pattern, given a third
-; element, #t; and a word that names an alias where one is substituted
-; replaced by the alias's value, marked in turn.  AX is the substitutions in
-; progress (see %sh-alias-pop), nil when there are none.
+; recognized given a third element, its role (%sh-keyword-role), and each
+; paren that belongs to a case pattern a third element #t; and a word that
+; names an alias where one is substituted replaced by the alias's value, marked
+; in turn.  AX is the substitutions in progress (see %sh-alias-pop), nil when
+; there are none.
 (def %sh-mark-walk
   (fn (self toks state depth acc ax)
     (match
@@ -222,9 +238,10 @@
       ((%sh-mark-keyword? (first toks) state)
         (do
           (def word (first (rest (first toks))))
+          (def role (%sh-keyword-role word))
           (self (rest toks) (%sh-mark-after-keyword word state)
-                (fx+ depth (%sh-block-delta word))
-                (pair (list (lit tok-word) word #t) acc) ax)))
+                (fx+ depth (%sh-role-delta role))
+                (pair (list (lit tok-word) word role) acc) ax)))
       ((if (null? %sh-aliases) () (%sh-alias-here? (first toks) state toks ax))
         (%sh-alias-substitute self toks state depth acc ax))
       (#t (self (rest toks) (%sh-mark-after-word (first toks) state) depth
@@ -357,18 +374,18 @@
 
 (def %tok-is-op?
   (fn (_ tok op)
-    (and
-      (eq? (first tok) (lit tok-op))
-      (string=? (first (rest tok)) op))))
+    (match
+      ((eq? (first tok) (lit tok-op)) (string=? (first (rest tok)) op))
+      (#t ()))))
 
 (def %tok-is-newline?
   (fn (_ tok) (eq? (first tok) (lit tok-newline))))
 
 (def %tok-word-val
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-newline))
-      ()
-      (first (rest tok)))))
+    (match
+      ((eq? (first tok) (lit tok-newline)) ())
+      (#t (first (rest tok))))))
 ; --- Match helpers ---
 
 ; Take the operator OP at the cursor, answering whether it was there.  It is
@@ -379,16 +396,25 @@
   (fn (_ cur op)
     (match
       ((null? (first cur)) ())
-      ((not (eq? (first (first (first cur))) (lit tok-op))) ())
-      ((not (string=? (first (rest (first (first cur)))) op)) ())
-      (#t (do (%cursor-advance! cur) #t)))))
+      ((eq? (first (first (first cur))) (lit tok-op))
+        (match
+          ((string=? (first (rest (first (first cur)))) op) (%sh-take-tok cur))
+          (#t ())))
+      (#t ()))))
+
+; Step the cursor past the token there, answering that it was taken.
+(def %sh-take-tok
+  (fn (_ cur)
+    (%cursor-advance! cur)
+    #t))
 
 (def %skip-newlines
   (fn (_ cur)
     (match
       ((null? (first cur)) ())
-      ((not (eq? (first (first (first cur))) (lit tok-newline))) ())
-      (#t (do (%cursor-advance! cur) (%skip-newlines cur))))))
+      ((eq? (first (first (first cur))) (lit tok-newline))
+        (do (%cursor-advance! cur) (%skip-newlines cur)))
+      (#t ()))))
 ; --- Reserved word check ---
 
 ; --- Word sets --------------------------------------------------------------
@@ -576,18 +602,18 @@
 
 (def %sh-restore-frame
   (fn (self frame)
-    (unless (null? frame)
-      (%sh-var-restore! (first frame))
-      (self (rest frame)))))
+    (match
+      ((null? frame) ())
+      (#t (do (%sh-var-restore! (first frame)) (self (rest frame)))))))
 
 (def %sh-push-locals!
   (fn (_) (set! %sh-locals (pair () %sh-locals))))
 
 (def %sh-pop-locals!
   (fn (_)
-    (let ((frame (first %sh-locals)))
-      (set! %sh-locals (rest %sh-locals))
-      (%sh-restore-frame frame))))
+    (def frame (first %sh-locals))
+    (set! %sh-locals (rest %sh-locals))
+    (%sh-restore-frame frame)))
 
 ; Give NAME the export attribute: a value it holds in the table moves to the
 ; environment, and a name with no value is marked.
@@ -626,28 +652,51 @@
 (def %reserved-word?
   (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
 
-; A closing word ends the list in front of it wherever %sh-mark-keywords marked
-; it, which is only where a command could start: `echo done` is an argument.
-; With no construct open to take it, the list ends there all the same, and the
-; word is refused as a syntax error by %sh-refuse-leftover.
-(def %closing-word?
-  (fn (_ word) (%sh-word-in? word %sh-closing-words)))
+; What a reserved word does, as the lists above say it, read once when the
+; marking walk marks the word and kept as its mark, so that the scans that
+; follow -- every list, stage and skip, each time it runs -- answer with `eq?`:
+;
+;   opens   it opens a construct, which nests
+;   closes  it closes one, and ends the list in front of it
+;   ends    it ends the list in front of it and closes nothing: `then`, `do`
+;   stays   it does neither: `in`, `!`
+(def %sh-keyword-role
+  (fn (_ word)
+    (match
+      ((%sh-word-in? word %sh-block-openers) (lit opens))
+      ((%sh-word-in? word %sh-block-closers) (lit closes))
+      ((%sh-word-in? word %sh-closing-words) (lit ends))
+      (#t (lit stays)))))
+
+; The nesting a role contributes.
+(def %sh-role-delta
+  (fn (_ role)
+    (match ((eq? role (lit opens)) 1) ((eq? role (lit closes)) -1) (#t 0))))
+
+; Whether a role ends the command list in front of its word.
+(def %sh-role-ends?
+  (fn (_ role)
+    (match ((eq? role (lit closes)) #t) ((eq? role (lit ends)) #t) (#t ()))))
 
 ; --- Stop-word helper ---
 
 (def %at-stop-word?
   (fn (_ cur)
-    (if (null? (first cur))
-      #t
-      (do
-        (def tok (first (first cur)))
-        (match
-          ; A marked closing word, or `)` and `;;`: punctuation, never words
-          ; a script means literally.
-          ((%tok-is-keyword? tok) (%closing-word? (first (rest tok))))
-          ((eq? (first tok) (lit tok-op))
-            (%sh-word-in? (first (rest tok)) %sh-stop-ops))
-          (#t ()))))))
+    (match
+      ((null? (first cur)) #t)
+      (#t (%sh-stop-tok? (first (first cur)))))))
+
+; Whether TOK ends the command list in front of it: a closing word, or `)` or
+; `;;`, punctuation no script means literally.  A closing word ends the list
+; wherever %sh-mark-keywords marked it, which is only where a command could
+; start: `echo done` is an argument.  With no construct open to take it, the
+; list ends there all the same, and %sh-refuse-leftover refuses the word.
+(def %sh-stop-tok?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word)) (%sh-role-ends? (%tok-role tok)))
+      ((eq? (first tok) (lit tok-op)) (%sh-word-in? (first (rest tok)) %sh-stop-ops))
+      (#t ()))))
 
 ; Nothing may be left unread.  A parser that evaluates as it reads stops in
 ; front of a token it cannot take -- a word after `fi`, a `)` that closes
@@ -657,32 +706,47 @@
 ; stage, a subshell body, a function body, and the whole input.
 (def %sh-refuse-leftover
   (fn (_ cur)
-    (unless (%cursor-empty? cur)
-      (let ((tok (%cursor-peek cur)))
-        (error (string-append "parse error: unexpected "
-                              (if (%tok-is-newline? tok)
-                                "newline"
-                                (%tok-word-val tok))))))))
+    (match
+      ((null? (first cur)) ())
+      (#t (%sh-unexpected (first (first cur)))))))
+
+(def %sh-unexpected
+  (fn (_ tok)
+    (error (string-append "parse error: unexpected "
+                          (match
+                            ((%tok-is-newline? tok) "newline")
+                            (#t (%tok-word-val tok)))))))
 
 ; A body of its own -- a subshell's, a function's -- read to its end.  The
 ; status is the shell's, which the commands in the body have set.
 (def %sh-eval-body
   (fn (_ body)
-    (unless (null? body)
-      (let ((cur (%mk-cursor body)))
-        (%eval-list cur)
-        (%sh-refuse-leftover cur)))))
+    (match
+      ((null? body) ())
+      (#t (%sh-eval-body-at (%mk-cursor body))))))
 
+(def %sh-eval-body-at
+  (fn (_ cur)
+    (%eval-list cur)
+    (%sh-refuse-leftover cur)))
+
+; Take the word WORD at the cursor, or refuse what stands there instead.
 (def %expect-word
   (fn (_ cur word)
-    (if (%cursor-empty? cur)
-      (error (string-append "parse error: expected " word))
-      (let ((tok (%cursor-peek cur)))
-        (if (and
-              (eq? (first tok) (lit tok-word))
-              (string=? (first (rest tok)) word))
-          (do (%cursor-advance! cur) #t)
-          (error (string-append "parse error: expected " word)))))))
+    (match
+      ((null? (first cur)) (%sh-expected word))
+      ((%tok-spells? (first (first cur)) word) (%sh-take-tok cur))
+      (#t (%sh-expected word)))))
+
+; Whether TOK is a bare word spelled WORD, marked or not.
+(def %tok-spells?
+  (fn (_ tok word)
+    (match
+      ((eq? (first tok) (lit tok-word)) (string=? (first (rest tok)) word))
+      (#t ()))))
+
+(def %sh-expected
+  (fn (_ word) (error (string-append "parse error: expected " word))))
 ; --- Variable expansion ---
 
 ; Expansion walks the whole word, not just a leading $. What it understands:
@@ -792,7 +856,9 @@
 
 (def %sh-should-exit?
   (fn (_ status)
-    (and %sh-opt-errexit (and (not (= status 0)) (= %sh-cond-depth 0)))))
+    (match
+      (%sh-opt-errexit (match ((= status 0) ()) (#t (= %sh-cond-depth 0))))
+      (#t ()))))
 
 (def %sh-args ())
 (def %sh-functions ())
@@ -5586,30 +5652,35 @@
     ; Already expanded, at extraction (%collect-cmd-tokens). Re-expanding here
     ; would expand a variable's value -- `X='$Y'; echo $X` would print $Y's
     ; contents rather than the two characters it holds.
-    (do
-      (if (null? %sh-sweeps?) () (%sh-sweep-tick!))
-      (def split (%sh-split-assignments wds ()))
-      (def assigns (first split))
-      (def remaining (rest split))
-      (if (null? remaining)
-        ; A command with no command name: bare assignments, redirections, or
-        ; words that expanded to nothing.  Its redirections come first, and
-        ; one that cannot be made fails the command before any assignment is
-        ; made, the order POSIX gives and dash keeps.  The values it set are
-        ; the shell's from here on, and its status is its last command
-        ; substitution's, or 0 when it performed none.
-        (if (%sh-redirs-made? redirs)
-          (do
-            (%sh-apply-assignments assigns)
-            (%sh-set-status
-              (if (null? %sh-subst-status) 0 %sh-subst-status)))
-          (%sh-set-status %sh-redir-status))
-        (do
-          (unless (null? %sh-opt-xtrace)
-            (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n"))
-          (%sh-exit-on-error
-           (%sh-set-status
-            (%sh-run-scoped assigns remaining redirs))))))))
+    (match ((null? %sh-sweeps?) ()) (#t (%sh-sweep-tick!)))
+    (def split (%sh-split-assignments wds ()))
+    (match
+      ((null? (rest split)) (%sh-run-nameless (first split) redirs))
+      (#t (%sh-run-named (first split) (rest split) redirs)))))
+
+; A command with no command name: bare assignments, redirections, or words
+; that expanded to nothing.  Its redirections come first, and one that cannot
+; be made fails the command before any assignment is made, the order POSIX
+; gives and dash keeps.  The values it set are the shell's from here on, and
+; its status is its last command substitution's, or 0 when it performed none.
+(def %sh-run-nameless
+  (fn (_ assigns redirs)
+    (match
+      ((%sh-redirs-made? redirs) (%sh-assign-all assigns))
+      (#t (%sh-set-status %sh-redir-status)))))
+
+(def %sh-assign-all
+  (fn (_ assigns)
+    (%sh-apply-assignments assigns)
+    (%sh-set-status (match ((null? %sh-subst-status) 0) (#t %sh-subst-status)))))
+
+(def %sh-run-named
+  (fn (_ assigns remaining redirs)
+    (match
+      ((null? %sh-opt-xtrace) ())
+      (#t (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n")))
+    (%sh-exit-on-error
+     (%sh-set-status (%sh-run-scoped assigns remaining redirs)))))
 
 ; A prefix assignment covers one command: it is in the environment the command
 ; runs in, and the shell's own value comes back afterwards, whether the
@@ -5617,7 +5688,13 @@
 ; what POSIX asks and what makes `X=1 export Y=2` leave X set.
 (def %sh-run-scoped
   (fn (_ assigns remaining redirs)
-    (if (if (null? assigns) #t (%sh-special-builtin? (first remaining)))
+    (match
+      ((null? assigns) (%sh-dispatch remaining redirs %sh-functions))
+      (#t (%sh-run-assigned assigns remaining redirs)))))
+
+(def %sh-run-assigned
+  (fn (_ assigns remaining redirs)
+    (if (%sh-special-builtin? (first remaining))
       (do
         (%sh-apply-assignments assigns)
         (%sh-dispatch remaining redirs %sh-functions))
@@ -5632,50 +5709,57 @@
 
 (def %sh-dispatch
   (fn (_ remaining redirs fns)
-    (do
-      (def name (first remaining))
-      (def args (rest remaining))
-      (def body (%sh-fn-lookup name fns))
-      ; A function wins over a regular builtin and an external, and loses to
-      ; a special builtin, the POSIX order.  FNS is which functions are in
-      ; reach: `command` passes none, which is the whole of what it does
-      ; differently.  Redirections on a function call apply for the whole
-      ; body, and the shell's own descriptors must survive it -- the same
-      ; save/apply/restore a builtin gets.  A builtin is looked up once, and
-      ; its handler handed on.
-      (if (%sh-fn-wins? name body)
-        (%sh-run-fn-redir body args redirs)
-        (do
-          (def run (%sh-table-get name %sh-builtin-table))
-          (if (null? run)
-            (%sh-run-external name args redirs)
-            (%sh-run-builtin-redir name run args redirs)))))))
+    (def name (first remaining))
+    (def body (%sh-fn-lookup name fns))
+    ; A function wins over a regular builtin and an external, and loses to a
+    ; special builtin, the POSIX order.  FNS is which functions are in reach:
+    ; `command` passes none, which is the whole of what it does differently.
+    ; Redirections on a function call apply for the whole body, and the
+    ; shell's own descriptors must survive it -- the same save/apply/restore a
+    ; builtin gets.  A builtin is looked up once, and its handler handed on.
+    (match
+      ((%sh-fn-wins? name body) (%sh-run-fn-redir body (rest remaining) redirs))
+      (#t (%sh-dispatch-builtin name (rest remaining) redirs)))))
+
+(def %sh-dispatch-builtin
+  (fn (_ name args redirs)
+    (def run (%sh-table-get name %sh-builtin-table))
+    (match
+      ((null? run) (%sh-run-external name args redirs))
+      (#t (%sh-run-builtin-redir name run args redirs)))))
 
 ; Whether a function found as BODY runs for NAME: it does unless NAME is a
 ; special builtin.  Only a name some function has is asked about the specials.
 (def %sh-fn-wins?
   (fn (_ name body)
-    (if (null? body) () (not (%sh-special-builtin? name)))))
+    (match
+      ((null? body) ())
+      ((%sh-special-builtin? name) ())
+      (#t #t))))
 
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error
   (fn (_ status)
-    (if (%sh-should-exit? status) (%sh-exit-shell status) status)))
+    (match ((%sh-should-exit? status) (%sh-exit-shell status)) (#t status))))
 
 ; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
 ; leave the SHELL writing there.
 (def %sh-run-fn-redir
   (fn (_ body wds redirs)
-    (if (null? redirs)
-      (%sh-call-fn body wds)
-      (let ((parked (%sh-save-fds redirs)))
-        (guard (e (do (%sh-restore-fds parked) (error e)))
-          (let ((status (if (%sh-setup-redirs redirs)
-                          (%sh-call-fn body wds)
-                          %sh-redir-status)))
-            (%sh-restore-fds parked)
-            status))))))
+    (match
+      ((null? redirs) (%sh-call-fn body wds))
+      (#t (%sh-call-fn-redirected body wds redirs)))))
+
+(def %sh-call-fn-redirected
+  (fn (_ body wds redirs)
+    (let ((parked (%sh-save-fds redirs)))
+      (guard (e (do (%sh-restore-fds parked) (error e)))
+        (let ((status (if (%sh-setup-redirs redirs)
+                        (%sh-call-fn body wds)
+                        %sh-redir-status)))
+          (%sh-restore-fds parked)
+          status)))))
 ; Save C pipe primitive before we shadow it
 
 (def %sh-pipe-create sh-pipe)
@@ -5706,17 +5790,20 @@
 
 (def %is-compound-start?
   (fn (_ cur)
-    (if (null? (first cur))
-      ()
-      (do
-        (def tok (first (first cur)))
-        (match
-          ; The keys of %sh-compound-table, so the two cannot disagree.  A `(`
-          ; opens a subshell, which is punctuation rather than a word.
-          ((%tok-is-keyword? tok)
-            (not (null? (%sh-table-get (first (rest tok)) %sh-compound-table))))
-          ((eq? (first tok) (lit tok-op)) (string=? (first (rest tok)) "("))
-          (#t ()))))))
+    (match
+      ((null? (first cur)) ())
+      (#t (%sh-compound-tok? (first (first cur)))))))
+
+; Whether TOK opens a compound command: a reserved word that is a key of
+; %sh-compound-table, so the two cannot disagree, or a `(`, which opens a
+; subshell and is punctuation rather than a word.
+(def %sh-compound-tok?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-op)) (string=? (first (rest tok)) "("))
+      ((null? (%tok-role tok)) ())
+      ((null? (%sh-table-get (first (rest tok)) %sh-compound-table)) ())
+      (#t #t))))
 
 (def %collect-cmd-tokens ())
 
@@ -5839,26 +5926,20 @@
 ; Answers the token it stopped at, or nil if the input ran out.
 (def %sh-word-is?
   (fn (_ tok w)
-    (and (%tok-is-keyword? tok) (string=? (%tok-word-val tok) w))))
+    (match
+      ((null? (%tok-role tok)) ())
+      (#t (string=? (first (rest tok)) w)))))
 
 (def %sh-word-among?
   (fn (_ tok words)
-    (and (%tok-is-keyword? tok) (%sh-word-in? (%tok-word-val tok) words))))
+    (match
+      ((null? (%tok-role tok)) ())
+      (#t (%sh-word-in? (first (rest tok)) words)))))
 
 ; The nesting a token contributes.  Floored by the caller, so a stray closer in
 ; malformed input cannot drive the count negative and swallow the rest.
 (def %sh-nest-delta
-  (fn (_ tok)
-    (if (%tok-is-keyword? tok) (%sh-block-delta (%tok-word-val tok)) 0)))
-
-; The same for a reserved word, by what it is: the marking walk asks it of each
-; one as it marks it.
-(def %sh-block-delta
-  (fn (_ word)
-    (match
-      ((%sh-word-in? word %sh-block-openers) 1)
-      ((%sh-word-in? word %sh-block-closers) -1)
-      (#t 0))))
+  (fn (_ tok) (%sh-role-delta (%tok-role tok))))
 
 ; The walk goes over the token list and sets the cursor once, where it stops,
 ; and not at all when it stops where it started, as it does on the `fi` after
@@ -5867,20 +5948,21 @@
 ; the walk keeps, never nil, so it steps on the integer doors.
 (def %sh-skip-block
   (fn (_ cur depth stop?)
-    (do
-      (def ts (%sh-skip-block-walk (first cur) depth stop?))
-      (unless (same? ts (first cur)) (set-first! cur ts))
-      (if (null? ts) () (first ts)))))
+    (def ts (%sh-skip-block-walk (first cur) depth stop?))
+    (match ((same? ts (first cur)) ()) (#t (set-first! cur ts)))
+    (match ((null? ts) ()) (#t (first ts)))))
 
 (def %sh-skip-block-walk
   (fn (self ts depth stop?)
     (match
       ((null? ts) ts)
       ((if (= depth 0) (stop? (first ts)) ()) ts)
-      (#t
-        (do
-          (def d (fx+ depth (%sh-nest-delta (first ts))))
-          (self (rest ts) (if (fx<? d 0) 0 d) stop?))))))
+      (#t (self (rest ts)
+                (%sh-floored (fx+ depth (%sh-nest-delta (first ts)))) stop?)))))
+
+; A depth that malformed input cannot drive below zero.
+(def %sh-floored
+  (fn (_ d) (match ((fx<? d 0) 0) (#t d))))
 
 ; Skip to a depth-0 stop token and CONSUME it.  WHAT names the construct for
 ; the error when the input runs out first.
@@ -6533,10 +6615,10 @@
   (fn (_ cur)
     (%cursor-advance! cur)
     (%skip-newlines cur)
-    (let ((result (%eval-list cur)))
-      (%skip-newlines cur)
-      (%expect-word cur "}")
-      result)))
+    (def result (%eval-list cur))
+    (%skip-newlines cur)
+    (%expect-word cur "}")
+    result))
 
 ; Which word opens which construct.  %is-compound-start? asks whether a word
 ; is a key of this table; %eval-compound-body asks what it maps to.  They were
@@ -6552,14 +6634,16 @@
 
 (def %eval-compound-body
   (fn (_ cur)
-    (let ((tok (%cursor-peek cur)))
-      (if (eq? (first tok) (lit tok-op))
-        (%eval-subshell cur)
-        (let ((word (first (rest tok))))
-          (let ((parse (%sh-table-get word %sh-compound-table)))
-            (if (null? parse)
-              (error (string-append "parse error: unexpected " word))
-              (parse cur))))))))
+    (match
+      ((eq? (first (first (first cur))) (lit tok-op)) (%eval-subshell cur))
+      (#t (%sh-compound-by-word cur (first (rest (first (first cur)))))))))
+
+(def %sh-compound-by-word
+  (fn (_ cur word)
+    (def parse (%sh-table-get word %sh-compound-table))
+    (match
+      ((null? parse) (error (string-append "parse error: unexpected " word)))
+      (#t (parse cur)))))
 ; --- Pipeline execution ---
 
 (set! %sh-pipe-chain
@@ -6649,17 +6733,25 @@
 ; the `(` is asked first and the reserved words last.
 (def %is-fn-def?
   (fn (_ cur)
-    (do
-      (def toks (first cur))
-      (match
-        ((null? toks) ())
-        ((null? (rest toks)) ())
-        ((null? (rest (rest toks))) ())
-        ((not (%tok-is-op? (first (rest toks)) "(")) ())
-        ((not (%tok-is-op? (first (rest (rest toks))) ")")) ())
-        ; A name is an unquoted word that is not reserved.
-        ((not (eq? (first (first toks)) (lit tok-word))) ())
-        (#t (not (%reserved-word? (%tok-word-val (first toks)))))))))
+    (def toks (first cur))
+    (match
+      ((null? toks) ())
+      ((null? (rest toks)) ())
+      ((null? (rest (rest toks))) ())
+      ((%tok-is-op? (first (rest toks)) "(") (%sh-fn-def-at? toks))
+      (#t ()))))
+
+; TOKS, whose second token is `(`: a definition when the third is `)` and the
+; first a name, an unquoted word that is not reserved.
+(def %sh-fn-def-at?
+  (fn (_ toks)
+    (match
+      ((%tok-is-op? (first (rest (rest toks))) ")")
+        (match
+          ((eq? (first (first toks)) (lit tok-word))
+            (match ((%reserved-word? (%tok-word-val (first toks))) ()) (#t #t)))
+          (#t ())))
+      (#t ()))))
 
 (def %eval-fn-def
   (fn (_ cur)
@@ -6689,11 +6781,10 @@
 
 (def %sh-fn-lookup
   (fn (self name fns)
-    (if (null? fns)
-      ()
-      (if (string=? (first (first fns)) name)
-        (rest (first fns))
-        (self name (rest fns))))))
+    (match
+      ((null? fns) ())
+      ((string=? (first (first fns)) name) (rest (first fns)))
+      (#t (self name (rest fns))))))
 
 ; `return` unwinds to the call site with a non-local exit: it raises a sentinel
 ; symbol and %sh-call-fn catches exactly that one, re-raising anything else
@@ -6710,21 +6801,25 @@
   (fn (_ saved)
     (%sh-pop-locals!)
     (set! %sh-args saved)
-    (set! %sh-fn-depth (- %sh-fn-depth 1))))
+    (set! %sh-fn-depth (fx+ %sh-fn-depth -1))))
 
 (def %sh-call-fn
   (fn (_ body args)
-    (let ((saved %sh-args))
-      (set! %sh-args args)
-      (set! %sh-fn-depth (+ %sh-fn-depth 1))
-      (%sh-push-locals!)
-      (guard (e
-          (do
-            (%sh-leave-fn! saved)
-            (if (%sh-return? e) %sh-return-status (error e))))
-        (%sh-eval-body body)
-        (%sh-leave-fn! saved)
-        %sh-status))))
+    (def saved %sh-args)
+    (set! %sh-args args)
+    (set! %sh-fn-depth (fx+ %sh-fn-depth 1))
+    (%sh-push-locals!)
+    (guard (e (%sh-fn-left saved e))
+      (%sh-eval-body body)
+      (%sh-leave-fn! saved)
+      %sh-status)))
+
+; A call left by a raise E: `return` is its status, and anything else goes on
+; up once the call is given back what it saved.
+(def %sh-fn-left
+  (fn (_ saved e)
+    (%sh-leave-fn! saved)
+    (match ((%sh-return? e) %sh-return-status) (#t (error e)))))
 
 ; --- A compound command's own redirections ----------------------------------
 ;
@@ -6742,12 +6837,8 @@
 (def %sh-compound-delta
   (fn (_ tok paren?)
     (match
-      ((not paren?) (%sh-nest-delta tok))
-      ((not (eq? (first tok) (lit tok-op))) 0)
-      ((%tok-pattern-paren? tok) 0)
-      ((string=? (first (rest tok)) "(") 1)
-      ((string=? (first (rest tok)) ")") -1)
-      (#t 0))))
+      (paren? (%sh-paren-delta tok))
+      (#t (%sh-nest-delta tok)))))
 
 ; Read past one whole compound, leaving the cursor on whatever follows it.
 ; Entered ON the opening token with depth 0, so the opener takes the depth to
@@ -6759,11 +6850,14 @@
 
 (def %sh-skip-compound-walk
   (fn (self ts depth paren?)
-    (if (null? ts)
-      ts
-      (do
-        (def d (fx+ depth (%sh-compound-delta (first ts) paren?)))
-        (if (fx<? 0 d) (self (rest ts) d paren?) (rest ts))))))
+    (match
+      ((null? ts) ts)
+      (#t (%sh-skip-compound-at self ts
+            (fx+ depth (%sh-compound-delta (first ts) paren?)) paren?)))))
+
+(def %sh-skip-compound-at
+  (fn (_ walk ts d paren?)
+    (match ((fx<? 0 d) (walk (rest ts) d paren?)) (#t (rest ts)))))
 
 ; The redirections written after a construct: `done > log`, and `done 2> log`,
 ; whose descriptor number the tokenizer hands over as a tok-io.
@@ -6784,7 +6878,24 @@
                 (self cur (pair (%sh-io-redir cur tok) redirs)))
               (reverse redirs))))))))
 
+; A construct is read past first to see whether redirections follow it.  A
+; stage that ends with the construct's own closing word has none, and runs
+; with no look ahead: nothing a redirection names is marked, and a closing word
+; after the construct would have ended the stage in front of it.  A subshell's
+; `)` ends no stage, so a subshell is always read past.
 (def %eval-compound-redir
+  (fn (_ cur)
+    (match
+      ((eq? (%tok-role (%sh-last-tok (first cur))) (lit closes))
+        (%eval-compound-body cur))
+      (#t (%sh-eval-compound-redirected cur)))))
+
+; The last of the tokens TS, which are not none.
+(def %sh-last-tok
+  (fn (self ts)
+    (match ((null? (rest ts)) (first ts)) (#t (self (rest ts))))))
+
+(def %sh-eval-compound-redirected
   (fn (_ cur)
     (let ((start (first cur))
           (paren? (eq? (first (%cursor-peek cur)) (lit tok-op))))
@@ -6810,12 +6921,11 @@
 
 (set! %eval-command
   (fn (_ cur)
-    (do
-      (def status (if (%is-compound-start? cur)
-                    (%eval-compound-redir cur)
-                    (%eval-simple-cmd cur)))
-      (%sh-refuse-leftover cur)
-      status)))
+    (def status (match
+                  ((%is-compound-start? cur) (%eval-compound-redir cur))
+                  (#t (%eval-simple-cmd cur))))
+    (%sh-refuse-leftover cur)
+    status))
 ; --- Pipeline stage collection ---
 ; Collect tokens for one stage (until | or end of command)
 
@@ -6829,32 +6939,24 @@
 (def %sh-stage-end-ops (list "|" ";" ";;" "&" "&&" "||"))
 
 (def %sh-stage-end?
-  (fn (_ cur tok)
+  (fn (_ tok)
     (match
-      ((%tok-is-newline? tok) #t)
+      ((eq? (first tok) (lit tok-newline)) #t)
       ((eq? (first tok) (lit tok-op))
         (%sh-word-in? (first (rest tok)) %sh-stage-end-ops))
-      ((%tok-is-word? tok) (%at-stop-word? cur))
+      ((eq? (first tok) (lit tok-word)) (%sh-role-ends? (%tok-role tok)))
       (#t ()))))
 
 ; A case pattern's parens are marked and counted by nothing (see
 ; %tok-pattern-paren?).  The floor stays under the count: malformed input can
 ; still hold a `)` that opens nothing, and a negative depth would cut the stage.
 (def %sh-paren-depth
-  (fn (_ d tok)
-    (match
-      ((%tok-pattern-paren? tok) d)
-      ((%tok-is-op? tok "(") (fx+ d 1))
-      ((if (fx<? 0 d) (%tok-is-op? tok ")") ()) (fx+ d -1))
-      (#t d))))
+  (fn (_ d tok) (%sh-floored (fx+ d (%sh-paren-delta tok)))))
 
 ; Word nesting, floored: a stray `fi` in malformed input must not drive the
 ; count below zero and swallow the rest of the line.
 (def %sh-stage-wdepth
-  (fn (_ d tok)
-    (do
-      (def n (fx+ d (%sh-nest-delta tok)))
-      (if (fx<? n 0) 0 n))))
+  (fn (_ d tok) (%sh-floored (fx+ d (%sh-nest-delta tok)))))
 
 ; A token that ends no stage and nests nothing: a word no mark made a
 ; keyword, a quoted word, a descriptor's number.  Most of a command's tokens
@@ -6874,89 +6976,114 @@
     (%sh-collect-stage-from cur (first cur) toks wdepth pdepth)))
 
 ; The walk itself, over the token list TS rather than a step of the cursor per
-; token: the cursor is set where the stage ends, standing on the token that
-; ends it.  %at-stop-word? reads the cursor, so it is set too before a token
-; that is not plain is asked whether it ends the stage.
+; token: the cursor is set once, where the stage ends, standing on the token
+; that ends it.
 (def %sh-collect-stage-from
   (fn (self cur ts toks wdepth pdepth)
     (match
-      ((null? ts) (do (set-first! cur ts) (reverse toks)))
+      ((null? ts) (%sh-stage-cut cur ts toks))
       ((%sh-plain-tok? (first ts))
         (self cur (rest ts) (pair (first ts) toks) wdepth pdepth))
-      ((if (= wdepth 0)
-         (if (= pdepth 0)
-           (do (set-first! cur ts) (%sh-stage-end? cur (first ts)))
-           ())
-         ())
-        (reverse toks))
+      ((%sh-stage-ends-at? (first ts) wdepth pdepth) (%sh-stage-cut cur ts toks))
       (#t
         (self cur (rest ts) (pair (first ts) toks)
           (%sh-stage-wdepth wdepth (first ts))
           (%sh-paren-depth pdepth (first ts)))))))
+
+(def %sh-stage-ends-at?
+  (fn (_ tok wdepth pdepth)
+    (match
+      ((= wdepth 0) (match ((= pdepth 0) (%sh-stage-end? tok)) (#t ())))
+      (#t ()))))
+
+; The stage collected, TOKS in order, with the cursor left on TS.
+(def %sh-stage-cut
+  (fn (_ cur ts toks)
+    (set-first! cur ts)
+    (reverse toks)))
 ; Collect all pipeline stages
 
 (def %collect-stages ())
 
 (set! %collect-stages
-  (fn (_ cur stages)
-    (let ((stage (%collect-stage cur () 0 0)))
-      (if (%match-op cur "|")
-        (do
-          (%skip-newlines cur)
-          (%collect-stages cur (pair stage stages)))
-        (reverse (pair stage stages))))))
+  (fn (self cur stages)
+    (def all (pair (%collect-stage cur () 0 0) stages))
+    (match
+      ((%match-op cur "|") (do (%skip-newlines cur) (self cur all)))
+      (#t (reverse all)))))
 ; pipeline: ['!'] command ('|' command)*
 
 (def %eval-pipeline
   (fn (_ cur)
     (%skip-newlines cur)
-    (do
-      ; Check for ! negation
-      (def negate
-        (match
-          ((null? (first cur)) ())
-          ((not (%tok-is-word? (first (first cur)))) ())
-          ((not (string=? (%tok-word-val (first (first cur))) "!")) ())
-          (#t (do (%cursor-advance! cur) (%skip-newlines cur) #t))))
-      ; POSIX exempts two kinds of pipeline from -e: one that starts with `!`,
-      ; whose failure is what it is for, and one that is an operand of && or
-      ; || other than the last.  Once the stages are collected the cursor stands
-      ; after the pipeline, so the token there says which kind this is before
-      ; anything runs -- and an exempt pipeline runs as a condition, which is
-      ; what a subshell or a stage forked inside it inherits.
-      (def result
-        ; A definition is recognised here, beside the compounds:
-        ; %collect-stages cuts the token run at the first `;` or newline,
-        ; so a cursor through it never sees a function body. Hooked into
-        ; %eval-command instead, `f() { echo hi; }` would reach
-        ; %collect-fn-body with only `f ( ) {` in hand.
-        (if (%is-fn-def? cur)
-          (%eval-fn-def cur)
-          ; A compound is a stage like any other, now that %collect-stage
-          ; counts nesting: `( echo p ) | tr p P` and
-          ; `for i in 1 2; do echo $i; done | wc -l` cut at the `|`, not at
-          ; the `;` or `done` inside them. A single stage reaches
-          ; %eval-command, whose compound branch applies the construct's
-          ; redirections.
-          (do
-            (def stages (%collect-stages cur ()))
-            (if (if negate #t (%sh-and-or-next? cur))
-              (%sh-in-condition (fn (_) (%sh-run-stages stages)))
-              (%sh-run-stages stages)))))
-      (match
-        (negate
-          (do
-            (def neg-result (if (= result 0) 1 0))
-            (set! %sh-status neg-result)
-            neg-result))
-        ((%sh-and-or-next? cur) result)
-        (#t (%sh-exit-on-error result))))))
+    ; Check for ! negation
+    (def negate (%sh-take-bang cur))
+    ; POSIX exempts two kinds of pipeline from -e: one that starts with `!`,
+    ; whose failure is what it is for, and one that is an operand of && or ||
+    ; other than the last.  Once the stages are collected the cursor stands
+    ; after the pipeline, so the token there says which kind this is before
+    ; anything runs -- and an exempt pipeline runs as a condition, which is
+    ; what a subshell or a stage forked inside it inherits.
+    ;
+    ; A definition is recognised here, beside the compounds: %collect-stages
+    ; cuts the token run at the first `;` or newline, so a cursor through it
+    ; never sees a function body.  Hooked into %eval-command instead,
+    ; `f() { echo hi; }` would reach %collect-fn-body with only `f ( ) {` in
+    ; hand.
+    ;
+    ; A compound is a stage like any other, now that %collect-stage counts
+    ; nesting: `( echo p ) | tr p P` and `for i in 1 2; do echo $i; done | wc
+    ; -l` cut at the `|`, not at the `;` or `done` inside them.  A single stage
+    ; reaches %eval-command, whose compound branch applies the construct's
+    ; redirections.
+    (def result (match
+                  ((%is-fn-def? cur) (%eval-fn-def cur))
+                  (#t (%sh-run-pipeline-stages cur (%collect-stages cur ())
+                                               negate))))
+    (match
+      (negate (%sh-negated result))
+      ((%sh-and-or-next? cur) result)
+      (#t (%sh-exit-on-error result)))))
+
+; Take a `!` at the cursor, and the newlines after it, answering whether there
+; was one.
+(def %sh-take-bang
+  (fn (_ cur)
+    (match
+      ((null? (first cur)) ())
+      ((%sh-bang-tok? (first (first cur))) (%sh-take-bang-at cur))
+      (#t ()))))
+
+(def %sh-bang-tok?
+  (fn (_ tok)
+    (match
+      ((%tok-is-word? tok) (string=? (%tok-word-val tok) "!"))
+      (#t ()))))
+
+(def %sh-take-bang-at
+  (fn (_ cur)
+    (%cursor-advance! cur)
+    (%skip-newlines cur)
+    #t))
+
+(def %sh-run-pipeline-stages
+  (fn (_ cur stages negate)
+    (match
+      (negate (%sh-in-condition (fn (_) (%sh-run-stages stages))))
+      ((%sh-and-or-next? cur) (%sh-in-condition (fn (_) (%sh-run-stages stages))))
+      (#t (%sh-run-stages stages)))))
+
+(def %sh-negated
+  (fn (_ result)
+    (def neg-result (match ((= result 0) 1) (#t 0)))
+    (set! %sh-status neg-result)
+    neg-result))
 
 (def %sh-run-stages
   (fn (_ stages)
-    (if (null? (rest stages))
-      (%eval-command (%mk-cursor (first stages)))
-      (%sh-run-pipeline stages))))
+    (match
+      ((null? (rest stages)) (%eval-command (%mk-cursor (first stages))))
+      (#t (%sh-run-pipeline stages)))))
 
 (def %sh-and-or-ops (list "&&" "||"))
 
@@ -6966,8 +7093,9 @@
   (fn (_ cur)
     (match
       ((null? (first cur)) ())
-      ((not (eq? (first (first (first cur))) (lit tok-op))) ())
-      (#t (%sh-word-in? (first (rest (first (first cur)))) %sh-and-or-ops)))))
+      ((eq? (first (first (first cur))) (lit tok-op))
+        (%sh-word-in? (first (rest (first (first cur)))) %sh-and-or-ops))
+      (#t ()))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
 ; Skip an operand without running it -- what a short-circuit does with the side
@@ -6990,10 +7118,12 @@
 (def %sh-paren-delta
   (fn (_ tok)
     (match
-      ((not (eq? (first tok) (lit tok-op))) 0)
-      ((%tok-pattern-paren? tok) 0)
-      ((= (string-ref (first (rest tok)) 0) #\() 1)
-      ((= (string-ref (first (rest tok)) 0) #\)) -1)
+      ((eq? (first tok) (lit tok-op))
+        (match
+          ((%tok-pattern-paren? tok) 0)
+          ((= (string-ref (first (rest tok)) 0) #\() 1)
+          ((= (string-ref (first (rest tok)) 0) #\)) -1)
+          (#t 0)))
       (#t 0))))
 
 (def %sh-skip-operand
@@ -7097,14 +7227,22 @@
           ((string=? (first (rest (first toks))) "&") toks)
           (#t (self (rest toks) depth))))
       ((null? (rest (rest (first toks)))) (self (rest toks) depth))
-      ((%sh-word-is? (first toks) "case") (self (%sh-past-esac toks 0) depth))
-      ((%sh-word-among? (first toks) %sh-block-openers)
-        (self (rest toks) (fx+ depth 1)))
-      ((%sh-word-among? (first toks) %sh-block-closers)
-        (if (= depth 0) () (self (rest toks) (- depth 1))))
-      ((fx<? 0 depth) (self (rest toks) depth))
-      ((%sh-word-among? (first toks) %sh-closing-words) ())
-      (#t (self (rest toks) depth)))))
+      (#t (%sh-async-past-word self toks depth (%tok-role (first toks)))))))
+
+; The scan past the marked word at the head of TOKS, whose role is ROLE.
+(def %sh-async-past-word
+  (fn (_ scan toks depth role)
+    (match
+      ((eq? role (lit opens))
+        (match
+          ((string=? (first (rest (first toks))) "case")
+            (scan (%sh-past-esac toks 0) depth))
+          (#t (scan (rest toks) (fx+ depth 1)))))
+      ((eq? role (lit closes))
+        (match ((= depth 0) ()) (#t (scan (rest toks) (fx+ depth -1)))))
+      ((fx<? 0 depth) (scan (rest toks) depth))
+      ((eq? role (lit ends)) ())
+      (#t (scan (rest toks) depth)))))
 
 ; Run the list at the cursor in a child and leave the cursor on its `&`.
 (def %sh-run-async
@@ -7130,22 +7268,36 @@
 (set! %eval-list
   (fn (_ cur)
     (%skip-newlines cur)
-    (if (%at-stop-word? cur)
-      (do (set! %sh-status 0) 0)
-      (do
-        (def amp (%sh-async-end (first cur) 0))
-        (def result (if (null? amp) (%eval-and-or cur) (%sh-run-async cur amp)))
-        (match
-          ((null? (first cur)) result)
-          ; A newline, `;` or `&` goes on to the next command, past any blank
-          ; lines, unless a closing word ends the list there.
-          ((if (%tok-is-newline? (first (first cur)))
-             #t
-             (if (%match-op cur ";") #t (%match-op cur "&")))
-            (do
-              (%skip-newlines cur)
-              (if (%at-stop-word? cur) result (%eval-list cur))))
-          (#t result))))))
+    (match
+      ((%at-stop-word? cur) (%sh-set-status 0))
+      (#t (%sh-list-on cur (%sh-list-first cur (%sh-async-end (first cur) 0)))))))
+
+; The and-or list at the cursor, in a child when AMP, where %sh-async-end found
+; it ends with `&`, is not nil.
+(def %sh-list-first
+  (fn (_ cur amp)
+    (match
+      ((null? amp) (%eval-and-or cur))
+      (#t (%sh-run-async cur amp)))))
+
+; After an and-or list that answered RESULT: a newline, `;` or `&` goes on to
+; the next command, past any blank lines, unless a closing word ends the list
+; there.
+(def %sh-list-on
+  (fn (_ cur result)
+    (match
+      ((null? (first cur)) result)
+      ((%tok-is-newline? (first (first cur))) (%sh-list-rest cur result))
+      ((%match-op cur ";") (%sh-list-rest cur result))
+      ((%match-op cur "&") (%sh-list-rest cur result))
+      (#t result))))
+
+(def %sh-list-rest
+  (fn (_ cur result)
+    (%skip-newlines cur)
+    (match
+      ((%at-stop-word? cur) result)
+      (#t (%eval-list cur)))))
 ; --- Here-documents ---------------------------------------------------------
 ;
 ;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
