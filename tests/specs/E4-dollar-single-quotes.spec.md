@@ -1,18 +1,16 @@
 ## sh-eval dollar-single-quotes
 
 `$'...'` quotes its text as single quotes do, except that a backslash-escape
-in it stands for a character: `$'a\tb'` is `a`, a tab and `b` (POSIX 2.2.4).
-A `\'` does not close it.  It is one only outside quotes: inside double quotes
-and in a here-document's body `$'` is two characters.
+in it stands for a character: `$'a\tb'` is `a`, a tab and `b`.  A `\'` does not
+close it.  It is one only outside quotes: inside double quotes and in a
+here-document's body `$'` is two characters.
 
-Expectations match `/bin/sh` (bash 3.2), and POSIX where they part: `\c?` is
-delete, from the table POSIX gives `\cX`, where bash 3.2 keeps `\c?` as
-written.  `dash` has no `$'...'`: it reads `$` and then a single quote, and
-refuses `$'it\'s'` as an unterminated string.
-
-Where POSIX gives an escape no value -- `\q`, or `\x` with no hex digit -- it
-is kept as written, backslash and all, as bash keeps it.  A NUL byte ends the
-text, as it ends it in bash; POSIX allows either that or keeping the NUL.
+Expectations follow BusyBox ash, the reference (shell/ash.c
+`decode_dollar_squote`, libbb/process_escape_sequence.c): the escapes are
+`\" \' \\ \a \b \f \n \r \t \v`, `\xHH` and `\ddd`, and any other is kept as
+written, backslash and all -- `\e` and `\cX` too, which POSIX 2024 names and
+BusyBox does not.  An octal digit that would take the byte past 255 is read
+and adds nothing.  A NUL byte is dropped and the text after it kept.
 
 Bytes are compared as `od -An -tx1` writes them, with the spaces taken out.
 Cases that hold on main as well are stated as pins.
@@ -20,18 +18,18 @@ Cases that hold on main as well are stated as pins.
 ### the letter escapes
 
 ```sh
-(do (sh-eval "(printf '%s' $'\\a\\b\\e\\f\\n\\r\\t\\v\\\\\\'\\\"' | od -An -tx1 | tr -d ' \\n'; echo)") ())
+(do (sh-eval "(printf '%s' $'\\a\\b\\f\\n\\r\\t\\v\\\\\\'\\\"' | od -An -tx1 | tr -d ' \\n'; echo)") ())
 ```
 ---
-    07081b0c0a0d090b5c2722
+    07080c0a0d090b5c2722
 
-### \cX names a control character
+### \e and \cX are kept as written, as BusyBox keeps them
 
 ```sh
-(do (sh-eval "(printf '%s' $'\\cA\\cz\\c[\\c\\\\\\c?' | od -An -tx1 | tr -d ' \\n'; echo)") ())
+(do (sh-eval "(printf '[%s]\\n' $'\\e\\cA')") ())
 ```
 ---
-    011a1b1c7f
+    [\e\cA]
 
 ### \x takes one or two hex digits, \ddd one to three octal ones
 
@@ -41,7 +39,15 @@ Cases that hold on main as well are stated as pins.
 ---
     414a0467413001
 
-### an escape POSIX gives no value is kept as written
+### an octal digit that would pass 255 is read and adds nothing
+
+```sh
+(do (sh-eval "(printf '%s' $'\\400x' | od -An -tx1 | tr -d ' \\n'; echo)") ())
+```
+---
+    2078
+
+### an escape that names nothing is kept as written
 
 ```sh
 (do (sh-eval "(printf '[%s]\\n' $'\\q\\xz')") ())
@@ -73,13 +79,13 @@ Cases that hold on main as well are stated as pins.
 ---
     1
 
-### a NUL byte ends the text
+### a NUL byte is dropped and the text after it kept
 
 ```sh
-(do (sh-eval "(x=$'a\\0b'; echo \"${#x}\")") ())
+(do (sh-eval "(x=$'a\\0b'; echo \"${#x} $x\")") ())
 ```
 ---
-    1
+    2 ab
 
 ### bytes above 127 are bytes
 

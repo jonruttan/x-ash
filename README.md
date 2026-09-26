@@ -20,8 +20,8 @@ c
 
 Words and quoting: single quotes (literal), double quotes (expanding),
 backslash escapes inside and outside them, and dollar-single-quotes, where
-`$'a\tb'` is `a`, a tab and `b`: `\n \t \r \a \b \e \f \v \\ \' \"`, `\cX`
-control characters, `\xHH` and `\ddd` bytes, as POSIX has them. Quoting
+`$'a\tb'` is `a`, a tab and `b`: `\n \t \r \a \b \f \v \\ \' \"` and the
+`\xHH` and `\ddd` bytes, as BusyBox ash has them. Quoting
 applies to a *region* of a word rather than to the word, so `X="a b"`,
 `pre"mid"post`, `"$HOME"/bin` and `'a'"$b"` are each one word.
 
