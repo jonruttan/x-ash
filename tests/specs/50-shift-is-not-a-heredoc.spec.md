@@ -10,7 +10,7 @@ Expectations match `/bin/sh` and `dash`.
 ### a shift in an assignment leaves the next line a command
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "a=1; a=$((a<<2)); printf \"[%s]\" \"$a\"" "printf \"[next]\"; echo"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "a=1; a=$((a<<2)); printf \"[%s]\" \"$a\"" "printf \"[next]\"; echo"))) ())
 ```
 ---
     [4][next]

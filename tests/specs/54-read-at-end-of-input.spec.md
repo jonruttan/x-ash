@@ -34,7 +34,7 @@ Expectations match `/bin/sh` and `dash`.
 ### so a read loop leaves its variable empty
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "line=before" "while read line; do printf \"[%s]\" \"$line\"; done <<EOF" "l1" "l2" "EOF" "printf \"[after:%s]\" \"$line\"; echo"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "line=before" "while read line; do printf \"[%s]\" \"$line\"; done <<EOF" "l1" "l2" "EOF" "printf \"[after:%s]\" \"$line\"; echo"))) ())
 ```
 ---
     [l1][l2][after:]

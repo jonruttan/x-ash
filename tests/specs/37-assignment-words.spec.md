@@ -57,7 +57,7 @@ Expectations match `/bin/sh` and `dash`.
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (%is-assignment? "abcdefgh=1")))
-     (cost (fn (_) (convert #\= %int)))))
+     (cost (fn (_) (convert #\= %ash-int-type)))))
 ```
 ---
     #t

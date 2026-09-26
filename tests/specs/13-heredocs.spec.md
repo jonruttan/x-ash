@@ -8,7 +8,7 @@ newline, since a spec fence is one line per snippet.
 ### the body reaches the command
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "cat <<EOF" "one" "two" "EOF" "echo -n :end"))) (newline))
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "cat <<EOF" "one" "two" "EOF" "echo -n :end"))) (newline))
 ```
 ---
     :end
@@ -16,7 +16,7 @@ newline, since a spec fence is one line per snippet.
 ### commands after the terminator still run
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "cat <<EOF" "body" "EOF" "echo -n after"))) (newline))
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "cat <<EOF" "body" "EOF" "echo -n after"))) (newline))
 ```
 ---
     after
@@ -24,7 +24,7 @@ newline, since a spec fence is one line per snippet.
 ### an unquoted delimiter expands the body
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "V=world" "cat <<EOF" "hello $V" "EOF"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "V=world" "cat <<EOF" "hello $V" "EOF"))) ())
 ```
 ---
     hello world
@@ -32,7 +32,7 @@ newline, since a spec fence is one line per snippet.
 ### a quoted delimiter does not
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "V=world" "cat <<'EOF'" "hello $V" "EOF"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "V=world" "cat <<'EOF'" "hello $V" "EOF"))) ())
 ```
 ---
     hello $V
@@ -40,7 +40,7 @@ newline, since a spec fence is one line per snippet.
 ### a double-quoted delimiter is literal too
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "V=world" "cat <<\"EOF\"" "hello $V" "EOF"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "V=world" "cat <<\"EOF\"" "hello $V" "EOF"))) ())
 ```
 ---
     hello $V
@@ -48,7 +48,7 @@ newline, since a spec fence is one line per snippet.
 ### <<- strips leading tabs from body and terminator
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (def tab (make-string 1 (convert 9 %char))) (sh-eval (Str8 join nl (list "cat <<-EOF" (string-append tab "stripped") (string-append tab "EOF")))) ())
+(do (def nl (make-string 1 (integer->char 10))) (def tab (make-string 1 (integer->char 9))) (sh-eval (Str8 join nl (list "cat <<-EOF" (string-append tab "stripped") (string-append tab "EOF")))) ())
 ```
 ---
     stripped
@@ -56,7 +56,7 @@ newline, since a spec fence is one line per snippet.
 ### two here-documents on one line are taken in order
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "cat <<A; cat <<B" "first" "A" "second" "B" "echo -n :end"))) (newline))
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "cat <<A; cat <<B" "first" "A" "second" "B" "echo -n :end"))) (newline))
 ```
 ---
     :end
@@ -64,7 +64,7 @@ newline, since a spec fence is one line per snippet.
 ### an unterminated body runs to the end of the input
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "cat <<EOF" "no terminator"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "cat <<EOF" "no terminator"))) ())
 ```
 ---
     no terminator
@@ -72,7 +72,7 @@ newline, since a spec fence is one line per snippet.
 ### a command substitution can read one
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "X=$(cat <<EOF" "captured" "EOF" ")" "echo $X"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "X=$(cat <<EOF" "captured" "EOF" ")" "echo $X"))) ())
 ```
 ---
     captured

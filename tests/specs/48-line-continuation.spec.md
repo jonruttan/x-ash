@@ -11,7 +11,7 @@ Expectations match `/bin/sh` and `dash`.
 ### a command goes on on the next line
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "printf \"[%s]\" a \\" "b; echo"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "printf \"[%s]\" a \\" "b; echo"))) ())
 ```
 ---
     [a][b]

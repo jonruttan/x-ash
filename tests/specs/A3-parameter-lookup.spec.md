@@ -74,7 +74,7 @@ specials is given an entry of its own.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-var-value "1"))) (cost (fn (_) (convert "1" %int)))))
+  (< (cost (fn (_) (%sh-var-value "1"))) (cost (fn (_) (convert "1" %ash-int-type)))))
 ```
 ---
     #t

@@ -58,7 +58,7 @@ Expectations match `/bin/sh` and `dash`.
 ### an apostrophe in a here-document's body
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "cat <<EOF" "it's here" "EOF"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "cat <<EOF" "it's here" "EOF"))) ())
 ```
 ---
     it's here

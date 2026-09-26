@@ -184,7 +184,7 @@ Expectations match `/bin/sh` and `dash`.
 ### a pattern on its own line may be a reserved word
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (sh-eval (Str8 join nl (list "case x in" "x) printf \"[x]\";;" "for) printf \"[for]\";;" "esac" "printf \"[after]\"; echo"))) ())
+(do (def nl (make-string 1 (integer->char 10))) (sh-eval (Str8 join nl (list "case x in" "x) printf \"[x]\";;" "for) printf \"[for]\";;" "esac" "printf \"[after]\"; echo"))) ())
 ```
 ---
     [x][after]

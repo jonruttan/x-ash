@@ -1930,7 +1930,7 @@
         (pair "/"  (fn (_ a b)
                      (if (= b 0)
                        (error "arithmetic: division by 0")
-                       (convert (/ a b) %int))))
+                       (convert (/ a b) %ash-int-type))))
         (pair "%"  (fn (_ a b)
                      (if (= b 0) (error "arithmetic: division by 0") (% a b))))
         ; Int-only operators, which is all POSIX arithmetic has: the tower's
@@ -2129,7 +2129,7 @@
         ; Decimal digits by the same loop: `convert` costs several times as
         ; much, and is left for text that is not digits alone.
         ((%all-digits? text) (%sh-ar-digits-value text 0 n 10))
-        (#t (do (def v (guard (_ ()) (convert text %int)))
+        (#t (do (def v (guard (_ ()) (convert text %ash-int-type)))
                 (if (null? v) 0 v)))))))
 
 ; A variable's value is read as an integer constant with blanks around it and a
@@ -3664,7 +3664,7 @@
 ; names no descriptor, and is none.
 (def %sh-tty?
   (fn (_ word)
-    (let ((fd (convert word %int)))
+    (let ((fd (convert word %ash-int-type)))
       (if (null? fd) () (Sys isatty fd)))))
 
 ; Whether A was modified after B.  A path that is not there is older than any
@@ -4089,7 +4089,7 @@
 
 (def %sh-return
   (fn (_ wds)
-    (let ((n (if (null? wds) %sh-status (convert (first wds) %int))))
+    (let ((n (if (null? wds) %sh-status (convert (first wds) %ash-int-type))))
       (if (and (= %sh-fn-depth 0) (= %sh-dot-depth 0))
         ; Outside a function or a dot script POSIX leaves this unspecified;
         ; report and carry on rather than unwinding to somewhere there is no
@@ -4119,7 +4119,7 @@
   (fn (_ wds who)
     (if (null? wds)
       1
-      (let ((n (convert (first wds) %int)))
+      (let ((n (convert (first wds) %ash-int-type)))
         (if (< n 1)
           (do
             (%stderr (%ash-join "" (list "ash: " who ": " (first wds)
@@ -4144,7 +4144,7 @@
 ; `while shift; do` relies on to terminate.
 (def %sh-shift
   (fn (_ wds)
-    (let ((n (if (null? wds) 1 (convert (first wds) %int))))
+    (let ((n (if (null? wds) 1 (convert (first wds) %ash-int-type))))
       (if (< n 0)
         1
         (if (> n (length %sh-args))
@@ -4348,7 +4348,7 @@
   (fn (self wds status)
     (if (null? wds)
       status
-      (let ((pid (convert (first wds) %int)))
+      (let ((pid (convert (first wds) %ash-int-type)))
         (if (and (not (null? pid)) (%sh-char-in? pid %sh-bg-pids))
           (do
             (set! %sh-bg-pids (%sh-pids-without pid %sh-bg-pids))
@@ -4364,7 +4364,7 @@
 (def %sh-exit
   (fn (_ wds)
     (%sh-exit-shell
-      (if (null? wds) %sh-status (convert (first wds) %int)))))
+      (if (null? wds) %sh-status (convert (first wds) %ash-int-type)))))
 
 ; `[ ... ]` is `test` with the closing bracket dropped.  Without one it is a
 ; usage error, 2, as it is in dash and bash: `[ a = a` does not answer true.
@@ -4667,7 +4667,7 @@
 (def %sh-getopts-optind
   (fn (_)
     (let ((v (%sh-var-get "OPTIND")))
-      (let ((n (if (null? v) 1 (convert v %int))))
+      (let ((n (if (null? v) 1 (convert v %ash-int-type))))
         (unless (= n %sh-optind-seen) (set! %sh-optchar 1))
         n))))
 
