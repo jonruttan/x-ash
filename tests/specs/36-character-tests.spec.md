@@ -100,7 +100,7 @@ The reader passes its analyse hooks an integer rather than a character.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%all-digits? "12"))) (cost (fn (_) (convert #\0 %int)))))
+  (< (cost (fn (_) (%all-digits? "12"))) (cost (fn (_) (convert #\0 %ash-int-type)))))
 ```
 ---
     #t

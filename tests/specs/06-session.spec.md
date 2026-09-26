@@ -127,7 +127,7 @@
 ### a closed multi-line entry is complete
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (write (%ash-complete? (string-append (string-append "for f in a b" nl) "do echo $f; done"))))
+(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append (string-append "for f in a b" nl) "do echo $f; done"))))
 ```
 ---
     #t
@@ -148,7 +148,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### a body still open after a command is not complete
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (write (%ash-complete? (string-append "greet() {" (string-append nl "  echo hi")))))
+(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append "greet() {" (string-append nl "  echo hi")))))
 ```
 ---
     ()
@@ -156,7 +156,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### the closing brace completes it
 
 ```sh
-(do (def nl (make-string 1 (convert 10 %char))) (write (%ash-complete? (string-append "greet() {" (string-append nl (string-append "  echo hi" (string-append nl "}")))))))
+(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append "greet() {" (string-append nl (string-append "  echo hi" (string-append nl "}")))))))
 ```
 ---
     #t

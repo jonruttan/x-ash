@@ -244,13 +244,13 @@
 
 ; Both quoted-string readers take their value from buffer-token in the read
 ; handler, not by accumulating characters in the analyse callback. list->string
-; is (%cvt l %string), and %cvt inside a reader callback answers nil silently
-; (the same finding as x-python: build strings at load, not in a read handler),
-; so an accumulated value was nil for every non-empty string. buffer-token is
-; the platform's answer to "what text did this token consume", runs in the read
-; handler where allocating is safe, and is what %sh-word-reader has always
-; used. The analyse pass scans for the closing quote and scores; the read pass
-; takes the consumed run and strips the quotes.
+; is (%cvt l %ash-string-type), and %cvt inside a reader callback answers nil
+; silently (the same finding as x-python: build strings at load, not in a read
+; handler), so an accumulated value was nil for every non-empty string.
+; buffer-token is the platform's answer to "what text did this token
+; consume", runs in the read handler where allocating is safe, and is what
+; %sh-word-reader has always used. The analyse pass scans for the closing quote
+; and scores; the read pass takes the consumed run and strips the quotes.
 
 ; The consumed run is 'text' -- quotes included, since neither reader un-reads
 ; the closing quote.  Drop one from each end.
@@ -792,7 +792,9 @@
       acc
       (self (rest toks)
             (pair (let ((tok (first toks)))
-                    (if (pair? tok) tok (mk-tok-word (convert tok %string))))
+                    (if (pair? tok)
+                      tok
+                      (mk-tok-word (convert tok %ash-string-type))))
                   acc)))))
 
 (def sh-tokenize

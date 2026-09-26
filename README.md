@@ -203,10 +203,10 @@ dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 
 ## Status
 
-513 specs, all green against x-lang **v0.13.0**, the release `lang.xon`
-declares. x-lang v0.7.1 or later is required: it is the first release pinning
-an engine in which an isolated tokenizer base works, and this shell does not
-run without one.
+The specs are green against x-lang **v0.15.0**, the release `lang.xon`
+declares. v0.15.0 or later is required: this shell names the base types
+through the door that release added, `(Type named INTEGER)`, rather than the
+handles type/convert.x keeps to itself.
 
 ## Install
 

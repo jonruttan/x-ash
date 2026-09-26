@@ -36,7 +36,7 @@ The cost is compared rather than counted, as spec 36 compares its tests.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-ar-num "12"))) (cost (fn (_) (convert "12" %int)))))
+  (< (cost (fn (_) (%sh-ar-num "12"))) (cost (fn (_) (convert "12" %ash-int-type)))))
 ```
 ---
     #t

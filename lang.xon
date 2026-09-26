@@ -22,11 +22,11 @@
 (dialect he)
 
 ; The x-lang release this bundle is built and tested against; CI compares it
-; for equality. v0.7.1 or later is required, not merely paired with: it is the
-; first release pinning an engine in which an isolated tokenizer base -- which
-; a shell tokenizer cannot do without -- works at all. On anything earlier
-; this bundle does not run.
+; for equality. v0.15.0 or later is required, not merely paired with: this
+; bundle names the base types through the door that release added,
+; `(Type named INTEGER)`, where it read type/convert.x's private handles
+; before. On anything earlier this bundle does not run.
 
-(requires-release "v0.13.0")
+(requires-release "v0.15.0")
 
 (entry "run.x")

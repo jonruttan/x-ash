@@ -84,14 +84,20 @@
 (def %cvt (prim-ref (lit convert) (lit to)))
 (def convert (fn (_ v target . extra) (apply %cvt (pair v (pair target extra)))))
 
+; The base types a conversion is asked for, through the door the platform
+; names them by (x-lang v0.15.0): type/convert.x keeps its own handles private.
+(def %ash-int-type (Type named INTEGER))
+(def %ash-string-type (Type named STRING))
+
 ; The handful of Scheme-ish names tokens.x and eval.x reach for, spelled
 ; through the classes that own them now. ash is not a Scheme -- there is no
 ; alias layer -- so these are only what those two files actually call.
 ;
-; char->integer is the direct prim, not the convert dispatcher: (%cvt c %int)
-; walks the type's from/to alists and allocates, and %sh-word-break? calls this
-; six times per character inside a tokenizer callback, where a collection
-; mid-token is a hazard. lib/x/reader/analyser.x holds the same reference:
+; char->integer is the direct prim, not the convert dispatcher:
+; (%cvt c %ash-int-type) walks the type's from/to alists and allocates, and
+; %sh-word-break? calls this six times per character inside a tokenizer
+; callback, where a collection mid-token is a hazard. lib/x/reader/analyser.x
+; holds the same reference:
 ;   (def %char->integer (prim-ref (lit char) (lit ->int)))
 (def char->integer (prim-ref (lit char) (lit ->int)))
 ; Conversions are keyed on the source type, so the pair is (char ->int) and
@@ -121,7 +127,7 @@
 (def string=? (fn (_ a b) (str=? a b)))
 (def string? (fn (_ s) (str? s)))
 (def make-string (fn (_ n c) (Str8 make n c)))
-(def list->string (fn (_ l) (if (null? l) "" (%cvt l %string))))
+(def list->string (fn (_ l) (if (null? l) "" (%cvt l %ash-string-type))))
 
 ; Integer doors, for the scans the byte doors feed.  The platform's `<` is a
 ; guarded wrapper and its `>=` a wrapper around that -- a few hundred heap
@@ -261,10 +267,11 @@
 ; of what `convert` costs.  It divides with the integer primitives, so any
 ; other number -- a bignum out of arithmetic -- goes through `convert`.
 (def %ash-type-of (prim-ref (lit type) (lit of)))
-(def %ash-int-type (%ash-type-of 0))
 (def %ash-number->str
   (fn (_ n)
-    (if (eq? (%ash-type-of n) %ash-int-type) (%number->str n) (convert n %string))))
+    (if (eq? (%ash-type-of n) %ash-int-type)
+      (%number->str n)
+      (convert n %ash-string-type))))
 
 (def sh-fork (fn (_) (%sys-fork Sys)))
 (def sh-exec (fn (_ path args) (%sys-exec Sys path args)))

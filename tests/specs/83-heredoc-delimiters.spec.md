@@ -66,7 +66,7 @@ Expectations match `/bin/sh` and `dash`.
 ### <<- with a quoted delimiter strips tabs and does not expand
 
 ```sh
-(do (def tab (make-string 1 (convert 9 %char))) (sh-eval (Str8 join "" (list "( cat <<-\\EOF\n" tab tab "tabbed $HOME\n" tab "EOF\n)"))) ())
+(do (def tab (make-string 1 (integer->char 9))) (sh-eval (Str8 join "" (list "( cat <<-\\EOF\n" tab tab "tabbed $HOME\n" tab "EOF\n)"))) ())
 ```
 ---
     tabbed $HOME

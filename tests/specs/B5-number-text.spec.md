@@ -46,7 +46,7 @@ counted, as spec 36 compares its tests.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-var-value "?"))) (cost (fn (_) (convert 0 %string)))))
+  (< (cost (fn (_) (%sh-var-value "?"))) (cost (fn (_) (convert 0 %ash-string-type)))))
 ```
 ---
     #t

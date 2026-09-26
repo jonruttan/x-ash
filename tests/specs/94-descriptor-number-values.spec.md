@@ -31,7 +31,7 @@ than one conversion of it.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_ ) (%sh-digits-int "2"))) (cost (fn (_) (convert "2" %int)))))
+  (< (cost (fn (_ ) (%sh-digits-int "2"))) (cost (fn (_) (convert "2" %ash-int-type)))))
 ```
 ---
     #t

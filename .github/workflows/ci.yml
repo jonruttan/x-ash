@@ -24,7 +24,7 @@ jobs:
       matrix:
         # Keep the pinned row equal to lang.xon's (requires-release ...); the
         # step below fails the build if they drift.
-        x-lang: ['v0.13.0', 'main']
+        x-lang: ['v0.15.0', 'main']
 
     steps:
       - uses: actions/checkout@v4
