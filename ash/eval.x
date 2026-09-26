@@ -7535,19 +7535,19 @@
         text))))
 
 ; What S from I to E stands for inside a dollar-single-quote, each
-; backslash-escape replaced by what it yields (POSIX 2.2.4):
+; backslash-escape replaced by what it yields, as BusyBox ash has them
+; (shell/ash.c decode_dollar_squote, libbb/process_escape_sequence.c):
 ;
 ;   \" \' \\          the character
-;   \a \b \e \f \n \r \t \v   alert, backspace, escape, form feed, newline,
-;                     carriage return, tab, vertical tab
-;   \cX               the control character X names: a letter of either case,
-;                     `[` `\\` `]` `^` `_`, or `?` for delete
+;   \a \b \f \n \r \t \v   alert, backspace, form feed, newline, carriage
+;                     return, tab, vertical tab
 ;   \xHH              the byte of one or two hex digits
-;   \ddd              the byte of one to three octal digits
+;   \ddd              the byte of one to three octal digits; a digit that
+;                     would take the byte past 255 is read and adds nothing
 ;
-; Any other escape is kept as written, backslash and all, as bash keeps it.  A
-; NUL byte ends the text: POSIX leaves open whether the rest is kept, and bash
-; drops it.
+; Any other escape is kept as written, backslash and all -- `\e` and `\cX`
+; too, which POSIX 2024 also names and BusyBox does not.  A NUL byte is
+; dropped and the text after it kept.
 (def %sh-dsq-text
   (fn (self s i e out)
     (match
@@ -7564,7 +7564,7 @@
           (def v (%sh-dsq-escape-value s (fx+ i 1) end c))
           (match
             ((null? v) (self s end e (pair (substring s i end) out)))
-            ((= v 0) (self s e e out))
+            ((= v 0) (self s end e out))
             (#t (self s end e (pair (%sh-byte-string v) out)))))))))
 
 ; Where the escape whose letter C is at I ends.
@@ -7573,38 +7573,27 @@
     (match
       ((= c #\x) (%sh-hex-end s (fx+ i 1) e (fx+ i 3)))
       ((if (fx<? c #\0) () (fx<? c #\8)) (%sh-octal-end s i e (fx+ i 3)))
-      ((not (= c #\c)) (fx+ i 1))
-      ((not (fx<? (fx+ i 1) e)) (fx+ i 1))
-      ((if (= (string-ref s (fx+ i 1)) #\\) (%sh-hd-char-at? s (fx+ i 2) e #\\) ())
-        (fx+ i 3))
-      (#t (fx+ i 2)))))
+      (#t (fx+ i 1)))))
 
-; The byte the escape at I to END yields, or nil for one POSIX gives no value:
-; `\x` with no digit, `\c` with nothing it names, or a letter that names
-; nothing.
+; The byte the escape at I to END yields, or nil for one that yields none:
+; `\x` with no digit, or a letter that names nothing.
 (def %sh-dsq-escape-value
   (fn (_ s i end c)
     (match
       ((= c #\x) (if (fx<? (fx+ i 1) end) (%sh-ar-digits-value s (fx+ i 1) end 16) ()))
-      ((if (fx<? c #\0) () (fx<? c #\8))
-        (do (def v (%sh-ar-digits-value s i end 8)) (if (fx<? v 256) v (fx+ v -256))))
-      ((= c #\c) (if (fx<? (fx+ i 1) end) (%sh-control-code (string-ref s (fx+ i 1))) ()))
-      ((= c #\e) 27)
+      ((if (fx<? c #\0) () (fx<? c #\8)) (%sh-dsq-octal s i end 0))
       ((= c #\') 39)
       ((= c #\") 34)
       (#t (%sh-echo-escape-code c)))))
 
-; The control character `\cX` names: `@` to `_` less 64, a lower-case letter
-; less 96, and `?` delete.
-(def %sh-control-code
-  (fn (_ x)
+; The byte the octal digits from I to END make, as BusyBox reads them: a digit
+; that would take it past 255 stops it there.
+(def %sh-dsq-octal
+  (fn (self s i end v)
     (match
-      ((= x #\?) 127)
-      ((fx<? x #\@) ())
-      ((not (fx<? #\_ x)) (fx+ x -64))
-      ((fx<? x #\a) ())
-      ((fx<? #\z x) ())
-      (#t (fx+ x -96)))))
+      ((not (fx<? i end)) v)
+      ((fx<? 255 (fx+ (fx* v 8) (fx+ (string-ref s i) -48))) v)
+      (#t (self s (fx+ i 1) end (fx+ (fx* v 8) (fx+ (string-ref s i) -48)))))))
 
 ; The end of the run of hex digits from I, stopping by N and by LIMIT.
 (def %sh-hex-end
