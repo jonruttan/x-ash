@@ -3950,38 +3950,95 @@
       ((string=? (first wds) "-v") (%sh-unset-each (rest wds) ()))
       (#t (%sh-unset-each wds ())))))
 
-; `read [-r] VAR...` -- one line from stdin, split on IFS across the names,
-; with the LAST name taking everything that is left, separators and all.  A
-; bare `read` with no names still consumes the line.
+; `read [-r] [-d DELIM] VAR...` -- one line from stdin, split on IFS across the
+; names, with the LAST name taking everything that is left, separators and
+; all.  A bare `read` with no names still consumes the line.  -d ends the line
+; at DELIM's first byte rather than at a newline, and `-d ''` at a NUL byte
+; (POSIX 2024), so a newline is data, as BusyBox ash reads -d.
 ;
 ; Without -r a backslash quotes the character after it: the backslash goes
 ; away, the character keeps no special meaning, and a backslash at the end of
-; a line joins the next one.  With -r a backslash is an ordinary character,
-; which is what reading arbitrary data needs.
+; a line joins the next one.  With -d a backslash before the delimiter keeps
+; the delimiter as data, and one before a newline still joins the lines --
+; POSIX leaves open which of the two is the continuation, and this is
+; BusyBox's.
+; With -r a backslash is an ordinary character, which is what reading
+; arbitrary data needs.
 ;
 ; The status is non-zero at end of input, including when a final line arrives
 ; without a terminator -- the line is still assigned, but `while read line`
 ; stops rather than seeing it twice.
+; The options and then the names: (RAW? DELIM . NAMES), DELIM a byte.  Or what
+; was wrong: (bad . LETTER) for a letter read does not take, and (missing . d)
+; for a -d with nothing after it.  The letters cluster as a utility's do, so
+; `-rd :` is `-r -d :`, and -d takes the rest of its word when there is some,
+; `-d:`; `--` ends them.
 (def %sh-read-options
-  (fn (self wds raw?)
+  (fn (self wds raw? delim)
     (if (null? wds)
-      (pair raw? ())
+      (pair raw? (pair delim ()))
       (let ((w (first wds)))
         (match
-          ((string=? w "-r") (self (rest wds) #t))
-          ((string=? w "--") (pair raw? (rest wds)))
-          ((and (%sh-str-starts? w "-") (> (string-length w) 1)) ())
-          (#t (pair raw? wds)))))))
+          ((string=? w "--") (pair raw? (pair delim (rest wds))))
+          ((and (%sh-str-starts? w "-") (> (string-length w) 1))
+            (%sh-read-letters self w 1 (rest wds) raw? delim))
+          (#t (pair raw? (pair delim wds))))))))
 
-; A line, joined with the ones after it while it ends in a quoting backslash.
+(def %sh-read-letters
+  (fn (self options w i wds raw? delim)
+    (match
+      ((not (fx<? i (string-length w))) (options wds raw? delim))
+      ((= (string-ref w i) #\r) (self options w (fx+ i 1) wds #t delim))
+      ((not (= (string-ref w i) #\d)) (pair (lit bad) (substring w i (fx+ i 1))))
+      ((fx<? (fx+ i 1) (string-length w))
+        (options wds raw?
+                 (%sh-read-delim (substring w (fx+ i 1) (string-length w)))))
+      ((null? wds) (pair (lit missing) "d"))
+      (#t (options (rest wds) raw? (%sh-read-delim (first wds)))))))
+
+; The byte a line ends at for `-d S`: S's first, or NUL for the empty string.
+; POSIX asks for one byte and leaves a longer S open; BusyBox takes the first.
+(def %sh-read-delim
+  (fn (_ s) (if (= (string-length s) 0) 0 (char->integer (string-ref s 0)))))
+
+; A line, to DELIM, joined with the ones after it while it ends in a quoting
+; backslash.  At a newline the backslash and the newline both go; at any other
+; delimiter the backslash goes and the delimiter stays in the line as data, and
+; a backslash-newline pair inside the line goes as a continuation.
 (def %sh-read-logical-line
-  (fn (self raw?)
-    (let ((line (sh-read-line-fd 0)))
-      (if (or (null? line) raw? (not (%sh-read-continues? line)))
-        line
-        (let ((head (substring line 0 (- (string-length line) 1))))
-          (let ((tail (self raw?)))
-            (if (null? tail) head (string-append head tail))))))))
+  (fn (self raw? delim)
+    (let ((line (sh-read-line-fd 0 delim)))
+      (match
+        ((null? line) line)
+        (raw? line)
+        ((not (%sh-read-continues? line)) (if (= delim 10) line (%sh-read-unfold line)))
+        (#t
+          (do
+            (def head (substring line 0 (- (string-length line) 1)))
+            (def kept
+              (if (= delim 10)
+                head
+                (string-append (%sh-read-unfold head) (%sh-byte-string delim))))
+            (def tail (self raw? delim))
+            (if (null? tail) kept (string-append kept tail))))))))
+
+; LINE without each backslash-newline pair whose backslash is not itself
+; quoted.
+(def %sh-read-unfold
+  (fn (_ line)
+    (if (%sh-has-pair? line 0 (string-length line) #\\ #\newline)
+      (%sh-read-unfold-from line 0 (string-length line) 0 ())
+      line)))
+
+(def %sh-read-unfold-from
+  (fn (self line i n from out)
+    (match
+      ((not (fx<? i n)) (%ash-join "" (reverse (pair (substring line from n) out))))
+      ((not (= (string-ref line i) #\\)) (self line (fx+ i 1) n from out))
+      ((not (fx<? (fx+ i 1) n)) (self line n n from out))
+      ((= (string-ref line (fx+ i 1)) #\newline)
+        (self line (fx+ i 2) n (fx+ i 2) (pair (substring line from i) out)))
+      (#t (self line (fx+ i 2) n from out)))))
 
 ; A trailing backslash continues the line only when it is not itself quoted,
 ; so an even number of them at the end is data.
@@ -4069,23 +4126,30 @@
 ; ash/prims.x for why the two are not interchangeable.
 (def %sh-read
   (fn (_ wds)
-    (let ((opts (%sh-read-options wds ())))
-      (if (null? opts)
-        (do (%stderr "ash: read: " (first wds) ": invalid option\n") 2)
-        (let ((raw? (first opts)) (names (rest opts)))
-          (let ((line (%sh-read-logical-line raw?)))
-            ; At the end of the input with nothing read, the names are still
-            ; assigned, all empty, and the status is 1: that is what leaves
-            ; `line` empty after `while read line; do ...; done`.
-            (let ((text (if (null? line) "" line)))
-              ; `read` is not a special builtin, so a name that may not be
-              ; assigned is this command's failure and not the shell's end:
-              ; the refusal has been written, and the status is 1.
-              (guard (e 1)
-                (unless (null? names)
-                  (%sh-read-assign names text 0 (string-length text)
-                                   (%sh-ifs) raw?))
-                (if (and (not (null? line)) (null? sh-read-hit-eof)) 0 1)))))))))
+    (let ((opts (%sh-read-options wds () 10)))
+      (match
+        ((eq? (first opts) (lit bad))
+          (do (%stderr "ash: read: -" (rest opts) ": invalid option\n") 2))
+        ((eq? (first opts) (lit missing))
+          (do (%stderr "ash: read: -d: option requires an argument\n") 2))
+        (#t (%sh-read-into (rest (rest opts)) (first opts) (first (rest opts))))))))
+
+; Read one line to DELIM and assign it across NAMES.
+(def %sh-read-into
+  (fn (_ names raw? delim)
+    (let ((line (%sh-read-logical-line raw? delim)))
+      ; At the end of the input with nothing read, the names are still
+      ; assigned, all empty, and the status is 1: that is what leaves
+      ; `line` empty after `while read line; do ...; done`.
+      (let ((text (if (null? line) "" line)))
+        ; `read` is not a special builtin, so a name that may not be
+        ; assigned is this command's failure and not the shell's end:
+        ; the refusal has been written, and the status is 1.
+        (guard (e 1)
+          (unless (null? names)
+            (%sh-read-assign names text 0 (string-length text)
+                             (%sh-ifs) raw?))
+          (if (and (not (null? line)) (null? sh-read-hit-eof)) 0 1))))))
 
 (def %sh-return
   (fn (_ wds)

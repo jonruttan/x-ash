@@ -400,15 +400,15 @@
 ; ahead would swallow bytes past the newline that belong to the NEXT reader of
 ; that descriptor -- the engine's own, when input is a script.  A shell's read
 ; is specified to consume exactly the line it returns, and this is what that
-; costs.
-; Set when the last read ended at end of input rather than at a newline.  The
-; `read` builtin answers a non-zero status in that case even though it has a
-; line to assign, which is what stops `while read line` on a file whose last
+; costs.  The line ends at the byte DELIM: a newline, or what `read -d` names.
+; Set when the last read ended at end of input rather than at its delimiter.
+; The `read` builtin answers a non-zero status in that case even though it has
+; a line to assign, which is what stops `while read line` on a file whose last
 ; line has no terminator.
 (def sh-read-hit-eof ())
 
 (def sh-read-line-fd
-  (fn (_ fd)
+  (fn (_ fd delim)
     (def go
       (fn (self acc)
         (let ((b (%sys-fd-read Sys fd 1)))
@@ -417,7 +417,7 @@
               (set! sh-read-hit-eof #t)
               (if (null? acc) () (bytes->str (reverse acc))))
             (let ((c (first b)))
-              (if (= c 10)
+              (if (= c delim)
                 (bytes->str (reverse acc))
                 (self (pair (integer->char c) acc))))))))
     (set! sh-read-hit-eof ())
