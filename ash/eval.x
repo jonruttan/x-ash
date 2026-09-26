@@ -943,6 +943,14 @@
           ((= c #\")
             (self s (%sh-skip-quoted s (+ i 1) n #\") n depth))
           ((= c #\\) (self s (+ i 2) n depth))
+          ; A dollar-single-quote to its closing quote, past any `\'` in it;
+          ; `$$` whole, so the quote after it is a single quote.
+          ((= c #\$)
+            (match
+              ((%sh-hd-char-at? s (+ i 1) n #\')
+                (self s (fx+ (%sh-dsq-end s (+ i 2) n) 1) n depth))
+              ((%sh-hd-char-at? s (+ i 1) n #\$) (self s (+ i 2) n depth))
+              (#t (self s (+ i 1) n depth))))
           (#t (self s (+ i 1) n depth)))))))
 
 ; The index of the closing backtick, or -1.  A backslash escapes one character.
@@ -7006,10 +7014,12 @@
       (- 0 1))))
 
 ; The scan for here-document operators keeps its frames on a list, innermost
-; first: a quote character for a quoted region, and these for a `$(` and for a
-; parenthesis inside one.  An empty list is the top level.
+; first: a quote character for a quoted region, and these for a `$(`, for a
+; parenthesis inside one, and for a dollar-single-quote.  An empty list is the
+; top level.
 (def %sh-hd-subst 1)
 (def %sh-hd-paren 2)
+(def %sh-hd-dsq 3)
 
 ; Rewrite one line, collecting the here-documents it opens.  STACK is the scan
 ; state the line starts in, carried over from the line before: a quoted string
@@ -7044,6 +7054,12 @@
           ((= (first stack) #\')
             (do
               (def j (%sh-quote-scan line i n #\'))
+              (if (fx<? j n)
+                (self line (fx+ j 1) n (rest stack) () from out pending idx)
+                (self line n n stack () from out pending idx))))
+          ((= (first stack) %sh-hd-dsq)
+            (do
+              (def j (%sh-dsq-end line i n))
               (if (fx<? j n)
                 (self line (fx+ j 1) n (rest stack) () from out pending idx)
                 (self line n n stack () from out pending idx))))
@@ -7112,7 +7128,10 @@
       (#t (%sh-hd-scan line (fx+ i 1) n stack () from out pending idx)))))
 
 ; An arithmetic expansion is passed over whole, so the `<<` in `$((a<<2))`
-; stays a shift; a `$(` opens a frame.
+; stays a shift; a `$(` opens a frame.  Outside double quotes a `$'` opens a
+; dollar-single-quote, which `\'` does not close: it is passed over to its
+; closing quote, or opens a frame when that is on a later line.  `$$` is passed
+; over whole, so the `'` after it opens a single quote.
 (def %sh-hd-scan-dollar
   (fn (_ line i n stack from out pending idx)
     (let ((e (%sh-hd-arith-end line i n)))
@@ -7121,6 +7140,12 @@
         ((%sh-hd-char-at? line (fx+ i 1) n #\()
           (%sh-hd-scan line (fx+ i 2) n (pair %sh-hd-subst stack) #t
             from out pending idx))
+        ((%sh-hd-char-at? line (fx+ i 1) n #\$)
+          (%sh-hd-scan line (fx+ i 2) n stack () from out pending idx))
+        ((if (%sh-hd-char-at? line (fx+ i 1) n #\')
+           (if (null? stack) #t (not (= (first stack) #\")))
+           ())
+          (%sh-hd-scan line (fx+ i 2) n (pair %sh-hd-dsq stack) () from out pending idx))
         (#t (%sh-hd-scan line (fx+ i 1) n stack () from out pending idx))))))
 
 (def %sh-hd-char-at?
@@ -7322,13 +7347,23 @@
 (def %sh-str-has-heredoc-op?
   (fn (_ text) (%sh-has-pair? text 0 (string-length text) #\< #\<)))
 
-; --- Line continuation -------------------------------------------------------
+; --- Line continuation and dollar-single-quotes --------------------------------
 ;
-; A backslash before a newline joins the two lines: the pair is removed before
-; the text is tokenized, wherever a backslash is an escape -- outside quotes and
-; inside double quotes, but not inside single quotes or a comment (POSIX 2.2.1).
-; Here-documents are lifted out first, so a quoted body keeps its backslashes
-; and an unquoted one has joined its lines already (%sh-hd-take).
+; Two things are done to the text between lifting out its here-documents and
+; tokenizing it, each wherever it is unquoted: POSIX 2.2.1 and 2.2.4.
+;
+;   - A backslash before a newline joins the two lines: the pair is removed,
+;     wherever a backslash is an escape -- outside quotes and inside double
+;     quotes, but not inside single quotes or a comment.
+;   - A dollar-single-quote, `$'a\tb'`, is spelled out as the single-quoted
+;     text it stands for, its backslash-escapes replaced by what they yield.
+;     It is one only outside quotes: inside double quotes `$'` is two
+;     characters.  So the tokenizer and the expansions read ordinary single
+;     quotes, as they read an ordinary redirection for a here-document.
+;
+; Here-documents are lifted out first, so a quoted body keeps its backslashes,
+; an unquoted one has joined its lines already (%sh-hd-take), and `$'` in a
+; body is text.
 
 ; A `#` opens a comment where a token could start: at the start of the text,
 ; or after a blank, a newline or an operator character.
@@ -7348,61 +7383,171 @@
 
 (def %sh-mode-comment 3)
 
-; The index of each backslash that joins its line to the next, latest first.
-; MODE is bare, single-quoted, double-quoted or a comment, and START? is whether
-; a `#` here would open a comment.  A command substitution is walked as text of
-; its own, up to the parenthesis that closes it, so its quotes do not count
-; against the ones around it.
-(def %sh-continuations
-  (fn (self s i n mode start? cuts)
+; The edits S needs, latest first: the index of each backslash that joins its
+; line to the next, and (START . END) for each dollar-single-quote, from its `$`
+; to its closing quote.  MODE is bare, single-quoted, double-quoted or a
+; comment, and START? is whether a `#` here would open a comment.  A command
+; substitution is walked as text of its own, up to the parenthesis that closes
+; it, so its quotes do not count against the ones around it.  `$$` is passed
+; over whole, so the `'` after it opens a single quote.  A dollar-single-quote
+; with no closing quote is left as it is written, for the tokenizer to refuse.
+(def %sh-text-edits
+  (fn (self s i n mode start? edits)
     (if (not (fx<? i n))
-      cuts
+      edits
       (let ((c (string-ref s i)))
         (match
           ((= mode %sh-mode-sq)
-            (self s (fx+ i 1) n (if (= c #\') %sh-mode-bare mode) () cuts))
+            (self s (fx+ i 1) n (if (= c #\') %sh-mode-bare mode) () edits))
           ((= mode %sh-mode-comment)
             (if (= c #\newline)
-              (self s (fx+ i 1) n %sh-mode-bare #t cuts)
-              (self s (fx+ i 1) n mode () cuts)))
+              (self s (fx+ i 1) n %sh-mode-bare #t edits)
+              (self s (fx+ i 1) n mode () edits)))
           ((= c #\\)
             (match
-              ((not (fx<? (fx+ i 1) n)) cuts)
+              ((not (fx<? (fx+ i 1) n)) edits)
               ((= (string-ref s (fx+ i 1)) #\newline)
-                (self s (fx+ i 2) n mode start? (pair i cuts)))
-              (#t (self s (fx+ i 2) n mode () cuts))))
+                (self s (fx+ i 2) n mode start? (pair i edits)))
+              (#t (self s (fx+ i 2) n mode () edits))))
           ((= c #\$)
-            (let ((e (%sh-subst-close s i n)))
-              (if (fx<? i e)
-                ; Past the `)`, still inside the word the substitution is in.
-                (self s (fx+ e 1) n mode ()
-                  (self s (fx+ i 2) e %sh-mode-bare #t cuts))
-                (self s (fx+ i 1) n mode () cuts))))
+            (match
+              ((if (= mode %sh-mode-bare) (%sh-hd-char-at? s (fx+ i 1) n #\') ())
+                (do
+                  (def e (%sh-dsq-end s (fx+ i 2) n))
+                  (if (fx<? e n)
+                    (self s (fx+ e 1) n mode () (pair (pair i e) edits))
+                    edits)))
+              ((%sh-hd-char-at? s (fx+ i 1) n #\$) (self s (fx+ i 2) n mode () edits))
+              (#t
+                (do
+                  (def e (%sh-subst-close s i n))
+                  (if (fx<? i e)
+                    ; Past the `)`, still inside the word the substitution is in.
+                    (self s (fx+ e 1) n mode ()
+                      (self s (fx+ i 2) e %sh-mode-bare #t edits))
+                    (self s (fx+ i 1) n mode () edits))))))
           ((= mode %sh-mode-dq)
-            (self s (fx+ i 1) n (if (= c #\") %sh-mode-bare mode) () cuts))
-          ((= c #\') (self s (fx+ i 1) n %sh-mode-sq () cuts))
-          ((= c #\") (self s (fx+ i 1) n %sh-mode-dq () cuts))
-          ((and (= c #\#) start?) (self s (fx+ i 1) n %sh-mode-comment () cuts))
-          (#t (self s (fx+ i 1) n mode (%sh-comment-may-follow? c) cuts)))))))
+            (self s (fx+ i 1) n (if (= c #\") %sh-mode-bare mode) () edits))
+          ((= c #\') (self s (fx+ i 1) n %sh-mode-sq () edits))
+          ((= c #\") (self s (fx+ i 1) n %sh-mode-dq () edits))
+          ((and (= c #\#) start?) (self s (fx+ i 1) n %sh-mode-comment () edits))
+          (#t (self s (fx+ i 1) n mode (%sh-comment-may-follow? c) edits)))))))
 
-; S without the backslash-newline pair at each of CUTS, latest first.
-(def %sh-cut-pairs
-  (fn (self s cuts end acc)
-    (if (null? cuts)
-      (%ash-join "" (pair (substring s 0 end) acc))
-      (self s (rest cuts) (first cuts)
-            (pair (substring s (fx+ (first cuts) 2) end) acc)))))
+; The closing quote of a dollar-single-quote whose text starts at I, or N: a
+; backslash takes the character after it, so `\'` does not close it.
+(def %sh-dsq-end
+  (fn (self s i n)
+    (match
+      ((not (fx<? i n)) n)
+      ((= (string-ref s i) #\') i)
+      ((= (string-ref s i) #\\) (self s (fx+ i 2) n))
+      (#t (self s (fx+ i 1) n)))))
 
-; Most text holds no backslash before a newline, quoted or not, so that is asked
-; before the walk.
-(def %sh-join-lines
+; S with EDITS made, latest first: a backslash-newline pair gone, and a
+; dollar-single-quote replaced by its text in single quotes.
+(def %sh-apply-edits
+  (fn (self s edits end acc)
+    (match
+      ((null? edits) (%ash-join "" (pair (substring s 0 end) acc)))
+      ((pair? (first edits))
+        (do
+          (def from (first (first edits)))
+          (def to (rest (first edits)))
+          (self s (rest edits) from
+                (pair (%sh-single-quote (%sh-dsq-text s (fx+ from 2) to ()))
+                      (pair (substring s (fx+ to 1) end) acc)))))
+      (#t (self s (rest edits) (first edits)
+                (pair (substring s (fx+ (first edits) 2) end) acc))))))
+
+; Most text holds neither a backslash before a newline nor `$'`, quoted or not,
+; so that is asked before the walk.
+(def %sh-edit-text
   (fn (_ text)
     (let ((n (string-length text)))
-      (if (not (%sh-has-pair? text 0 n #\\ #\newline))
-        text
-        (%sh-cut-pairs text
-          (%sh-continuations text 0 n %sh-mode-bare #t ())
-          n ())))))
+      (if (if (%sh-has-pair? text 0 n #\\ #\newline) #t (%sh-has-pair? text 0 n #\$ #\'))
+        (%sh-apply-edits text (%sh-text-edits text 0 n %sh-mode-bare #t ()) n ())
+        text))))
+
+; What S from I to E stands for inside a dollar-single-quote, each
+; backslash-escape replaced by what it yields (POSIX 2.2.4):
+;
+;   \" \' \\          the character
+;   \a \b \e \f \n \r \t \v   alert, backspace, escape, form feed, newline,
+;                     carriage return, tab, vertical tab
+;   \cX               the control character X names: a letter of either case,
+;                     `[` `\\` `]` `^` `_`, or `?` for delete
+;   \xHH              the byte of one or two hex digits
+;   \ddd              the byte of one to three octal digits
+;
+; Any other escape is kept as written, backslash and all, as bash keeps it.  A
+; NUL byte ends the text: POSIX leaves open whether the rest is kept, and bash
+; drops it.
+(def %sh-dsq-text
+  (fn (self s i e out)
+    (match
+      ((not (fx<? i e)) (%ash-join "" (reverse out)))
+      ((not (= (string-ref s i) #\\))
+        (do
+          (def j (%sh-backslash-from s i e))
+          (self s j e (pair (substring s i j) out))))
+      ((not (fx<? (fx+ i 1) e)) (self s e e (pair "\\" out)))
+      (#t
+        (do
+          (def c (string-ref s (fx+ i 1)))
+          (def end (%sh-dsq-escape-end s (fx+ i 1) e c))
+          (def v (%sh-dsq-escape-value s (fx+ i 1) end c))
+          (match
+            ((null? v) (self s end e (pair (substring s i end) out)))
+            ((= v 0) (self s e e out))
+            (#t (self s end e (pair (%sh-byte-string v) out)))))))))
+
+; Where the escape whose letter C is at I ends.
+(def %sh-dsq-escape-end
+  (fn (_ s i e c)
+    (match
+      ((= c #\x) (%sh-hex-end s (fx+ i 1) e (fx+ i 3)))
+      ((if (fx<? c #\0) () (fx<? c #\8)) (%sh-octal-end s i e (fx+ i 3)))
+      ((not (= c #\c)) (fx+ i 1))
+      ((not (fx<? (fx+ i 1) e)) (fx+ i 1))
+      ((if (= (string-ref s (fx+ i 1)) #\\) (%sh-hd-char-at? s (fx+ i 2) e #\\) ())
+        (fx+ i 3))
+      (#t (fx+ i 2)))))
+
+; The byte the escape at I to END yields, or nil for one POSIX gives no value:
+; `\x` with no digit, `\c` with nothing it names, or a letter that names
+; nothing.
+(def %sh-dsq-escape-value
+  (fn (_ s i end c)
+    (match
+      ((= c #\x) (if (fx<? (fx+ i 1) end) (%sh-ar-digits-value s (fx+ i 1) end 16) ()))
+      ((if (fx<? c #\0) () (fx<? c #\8))
+        (do (def v (%sh-ar-digits-value s i end 8)) (if (fx<? v 256) v (fx+ v -256))))
+      ((= c #\c) (if (fx<? (fx+ i 1) end) (%sh-control-code (string-ref s (fx+ i 1))) ()))
+      ((= c #\e) 27)
+      ((= c #\') 39)
+      ((= c #\") 34)
+      (#t (%sh-echo-escape-code c)))))
+
+; The control character `\cX` names: `@` to `_` less 64, a lower-case letter
+; less 96, and `?` delete.
+(def %sh-control-code
+  (fn (_ x)
+    (match
+      ((= x #\?) 127)
+      ((fx<? x #\@) ())
+      ((not (fx<? #\_ x)) (fx+ x -64))
+      ((fx<? x #\a) ())
+      ((fx<? #\z x) ())
+      (#t (fx+ x -96)))))
+
+; The end of the run of hex digits from I, stopping by N and by LIMIT.
+(def %sh-hex-end
+  (fn (self s i n limit)
+    (match
+      ((not (fx<? i n)) i)
+      ((not (fx<? i limit)) i)
+      ((%sh-hex-digit? (string-ref s i)) (self s (fx+ i 1) n limit))
+      (#t i))))
 
 ; --- Public API ---
 
@@ -7411,8 +7556,9 @@
 ; still carries the `<<N` markers, and running the pass again would find `N`,
 ; consume no body, and overwrite %sh-heredocs. So the substitution path
 ; evaluates already-extracted text; reading a file (`.` / source) is fresh and
-; goes through the full entry.  Lines are joined there as well, after the
-; extraction, so a fragment's continuations went with the text around it.
+; goes through the full entry.  The text is edited there as well, after the
+; extraction (%sh-edit-text), so a fragment's continuations and
+; dollar-single-quotes went with the text around it.
 (def sh-eval-extracted
   (fn (_ input)
     (let ((tokens (sh-tokenize input)))
@@ -7452,4 +7598,4 @@
 
 (def sh-eval
   (fn (_ input)
-    (sh-eval-extracted (%sh-join-lines (%sh-heredoc-extract input)))))
+    (sh-eval-extracted (%sh-edit-text (%sh-heredoc-extract input)))))
