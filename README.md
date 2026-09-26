@@ -98,7 +98,8 @@ there keeps its mode; `<>` opens its file for reading and writing, creating it
 if need be.
 
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
-for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
+for functions, `-v` for variables), `read` (`-r`, and `-d DELIM` to read to a
+byte other than newline, `-d ''` to a NUL), `set`, `test` / `[`, `.` /
 `source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap` (EXIT only),
 `return`, `shift`, `exit`, `true`, `false`, `:`, `alias`, `unalias`, `hash`.
 A word one of them takes as a variable's name must be a NAME — a letter or
