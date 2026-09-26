@@ -100,12 +100,15 @@ if need be.
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read`, `set`, `test` / `[`, `.` /
 `source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap` (EXIT only),
-`return`, `shift`, `exit`, `true`, `false`, `:`, `alias`, `unalias`. A word
-one of them takes as a variable's name must be a NAME — a letter or
+`return`, `shift`, `exit`, `true`, `false`, `:`, `alias`, `unalias`, `hash`.
+A word one of them takes as a variable's name must be a NAME — a letter or
 underscore, then letters, digits and underscores — and so must a function's
 name and a `for` loop's variable. `.` looks for a file named without a `/` in
 the directories of PATH, as POSIX has it, and not in the working directory
-unless PATH names it.
+unless PATH names it. `hash NAME...` answers 1 for a name that is no command
+and remembers where one on PATH is; `hash` lists what it remembers, and
+`hash -r` or assigning PATH forgets it. Every command is still looked for
+along PATH.
 
 Aliases: after `alias NAME=VALUE`, an unquoted word NAME where a command's name
 stands is read as VALUE — after assignments and redirections written in front
