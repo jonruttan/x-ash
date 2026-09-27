@@ -874,11 +874,19 @@
 
 (def %sh-in-condition
   (fn (_ thunk)
-    (set! %sh-cond-depth (+ %sh-cond-depth 1))
-    (guard (e (do (set! %sh-cond-depth (- %sh-cond-depth 1)) (error e)))
-      (let ((r (thunk)))
-        (set! %sh-cond-depth (- %sh-cond-depth 1))
-        r))))
+    (set! %sh-cond-depth (fx+ %sh-cond-depth 1))
+    (guard (e (%sh-condition-raised e))
+      (%sh-condition-ran (thunk)))))
+
+(def %sh-condition-ran
+  (fn (_ r)
+    (set! %sh-cond-depth (fx+ %sh-cond-depth -1))
+    r))
+
+(def %sh-condition-raised
+  (fn (_ e)
+    (set! %sh-cond-depth (fx+ %sh-cond-depth -1))
+    (error e)))
 
 (def %sh-should-exit?
   (fn (_ status)
@@ -3283,12 +3291,14 @@
 ; split nor globbed, being one pattern rather than a list of filenames.
 (def %sh-expand-pattern
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-sq))
-      (%sh-glob-escape-all (%tok-word-val tok))
-      (do
-        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
-                  (lit pattern) ()))
-        (if (null? fs) "" (%sh-field-text (first fs)))))))
+    (match
+      ((eq? (first tok) (lit tok-sq)) (%sh-glob-escape-all (%tok-word-val tok)))
+      (#t (%sh-first-text
+            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
+                            (lit pattern) ()))))))
+
+(def %sh-first-text
+  (fn (_ fs) (match ((null? fs) "") (#t (%sh-field-text (first fs))))))
 
 ; Still string-in, string-out, for the sites that hold a value rather than a
 ; token.  Unsplit by construction.
@@ -6053,10 +6063,6 @@
 
 (def %skip-to-fi ())
 
-(def %skip-body-to-elif-else-fi ())
-
-(def %eval-elif-chain ())
-
 (def %skip-to-done ())
 
 (def %eval-while-body ())
@@ -6064,8 +6070,6 @@
 (def %eval-until-body ())
 
 (def %eval-for-body ())
-
-(def %eval-case-clauses ())
 ; --- Compound command detection ---
 
 (def %is-compound-start?
@@ -6199,47 +6203,122 @@
     (set! %sh-subst-status ())
     (%collect-cmd-tokens cur () () #t)))
 ; --- Compound commands: parse structure, evaluate directly ---
-; if cond; then body [elif cond; then body]... [else body] fi
+;
+; A construct's own words -- `then`, `do`, `in`, `done` -- are read from the
+; token list, and the cursor is written once for each, past the newlines
+; around it: a cursor step is a write through the platform's pair setter,
+; which costs more than the rest of a word's turn.
 
+; TS past the newlines at its head.
+(def %sh-past-newlines
+  (fn (self ts)
+    (match
+      ((null? ts) ts)
+      ((eq? (first (first ts)) (lit tok-newline)) (self (rest ts)))
+      (#t ts))))
+
+; Past the newlines at the cursor and the word WORD there, which is a parse
+; error when it is not.  An opener -- `then`, `do`, `in`, a list after it --
+; is taken with the newlines after it as well.
+(def %sh-take-word!
+  (fn (_ cur word) (%sh-take-at cur (%sh-past-newlines (first cur)) word ())))
+
+(def %sh-take-opener!
+  (fn (_ cur word) (%sh-take-at cur (%sh-past-newlines (first cur)) word #t)))
+
+(def %sh-take-at
+  (fn (_ cur ts word opener?)
+    (match
+      ((null? ts) (%sh-expected word))
+      ((%tok-spells? (first ts) word)
+        (set-first! cur
+          (match (opener? (%sh-past-newlines (rest ts))) (#t (rest ts)))))
+      (#t (%sh-expected word)))))
+
+; The word WORD past the newlines at the cursor, asked about and left there.
+(def %sh-check-word
+  (fn (_ cur word) (%sh-check-word-at (%sh-past-newlines (first cur)) word)))
+
+(def %sh-check-word-at
+  (fn (_ ts word)
+    (match
+      ((null? ts) (%sh-expected word))
+      ((%tok-spells? (first ts) word) #t)
+      (#t (%sh-expected word)))))
+
+; if cond; then body [elif cond; then body]... [else body] fi
+;
+; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
+; `while test ...` run commands whose failure is the point.
 (def %eval-if
   (fn (_ cur)
-    (%cursor-advance! cur)
-    ; consume 'if'
+    (set-first! cur (%sh-past-newlines (rest (first cur))))
+    (%sh-if-then cur (%sh-in-condition (fn (_) (%eval-list cur))))))
 
-    (%skip-newlines cur)
-    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
-    ; `while test ...` run commands whose failure is the point.
-    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
-      (%skip-newlines cur)
-      (%expect-word cur "then")
-      (%skip-newlines cur)
-      (if (= cond-result 0)
-        ; True: eval body, skip remaining
+; After a condition that answered STATUS: its `then`, and the branch STATUS
+; picks.  A false one's body is skipped to the elif, else or fi after it.
+(def %sh-if-then
+  (fn (_ cur status)
+    (%sh-take-opener! cur "then")
+    (match
+      ((= status 0) (%sh-if-ran cur (%eval-list cur)))
+      (#t (%sh-elif-at cur (%sh-skip-block-walk (first cur) 0 %sh-elif-else-fi?))))))
 
-        (let ((result (%eval-list cur)))
-          (%skip-to-fi cur 0)
-          (set! %sh-status result)
-          result)
-        ; False: skip body, try elif/else
+(def %sh-if-ran
+  (fn (_ cur result)
+    (%skip-to-fi cur 0)
+    (set! %sh-status result)
+    result))
 
-        (do
-          (%skip-body-to-elif-else-fi cur 0)
-          (%eval-elif-chain cur))))))
-; Skip balanced tokens to elif/else/fi at depth 0
+; At TS, the elif, else or fi a false branch was skipped to, or the end of the
+; input.
+(def %sh-elif-at
+  (fn (_ cur ts)
+    (match
+      ((null? ts) (%sh-eof-in cur ts "if"))
+      ((%tok-spells? (first ts) "elif") (%sh-elif cur (rest ts)))
+      ((%tok-spells? (first ts) "else") (%sh-else cur (rest ts)))
+      (#t (%sh-if-none-ran cur (rest ts))))))
+
+(def %sh-elif
+  (fn (_ cur ts)
+    (set-first! cur (%sh-past-newlines ts))
+    (%sh-if-then cur (%sh-in-condition (fn (_) (%eval-list cur))))))
+
+(def %sh-else
+  (fn (_ cur ts)
+    (set-first! cur (%sh-past-newlines ts))
+    (%sh-else-ran cur (%eval-list cur))))
+
+(def %sh-else-ran
+  (fn (_ cur result)
+    (%sh-take-word! cur "fi")
+    (set! %sh-status result)
+    result))
+
+(def %sh-if-none-ran
+  (fn (_ cur ts)
+    (set-first! cur ts)
+    (set! %sh-status 0)
+    0))
+
+; Out of input inside WHAT: a parse error, with the cursor at the end.
+(def %sh-eof-in
+  (fn (_ cur ts what)
+    (set-first! cur ts)
+    (error (string-append "parse error: unexpected EOF in " what))))
 
 ; --- Skipping a balanced token run -------------------------------------------
 ;
-; The five skippers below were five copies of one walk: advance through tokens
-; keeping a nesting count, stop at the first DEPTH-0 token the caller cares
-; about.  What differed was three lines each -- which token stops it, whether
-; that token is consumed, and whether running out of input is an error.  So
-; that is what they pass, and the walk is written once.
+; One walk serves every skipper: through the tokens keeping a nesting count,
+; to the first DEPTH-0 token the caller's STOP? takes.  What the skippers
+; differ in is which token stops them, whether they take it, and whether
+; running out of input is an error.
 ;
-; The cursor is left ON the stopping token; consuming it is the caller's
-; business, because %skip-body-to-elif-else-fi must NOT (%eval-elif-chain runs
-; next and its whole job is to look at that word).
-;
-; Answers the token it stopped at, or nil if the input ran out.
+; %sh-skip-block leaves the cursor ON the stopping token and answers it, or
+; nil if the input ran out.  A false branch of an `if` is walked without the
+; cursor: %sh-elif-at looks at the word it stopped at and writes the cursor
+; once, past it.
 (def %sh-word-is?
   (fn (_ tok w)
     (match
@@ -6280,85 +6359,42 @@
 (def %sh-floored
   (fn (_ d) (match ((fx<? d 0) 0) (#t d))))
 
-; Skip to a depth-0 stop token and CONSUME it.  WHAT names the construct for
-; the error when the input runs out first.
+; Skip to a depth-0 stop token and TAKE it, the cursor written once, past it.
+; WHAT names the construct for the error when the input runs out first.
 (def %sh-skip-past
-  (fn (_ cur stop? what)
-    (if (null? (%sh-skip-block cur 0 stop?))
-      (error (string-append "parse error: unexpected EOF in " what))
-      (%cursor-advance! cur))))
+  (fn (_ cur stop? what) (%sh-skip-past-from cur (first cur) stop? what)))
+
+(def %sh-skip-past-from
+  (fn (_ cur ts stop? what)
+    (%sh-past-stop cur (%sh-skip-block-walk ts 0 stop?) what)))
+
+(def %sh-past-stop
+  (fn (_ cur ts what)
+    (match
+      ((null? ts) (%sh-eof-in cur ts what))
+      (#t (set-first! cur (rest ts))))))
 
 ; The same, but running out of input is simply the end -- what the case
 ; skippers have always done.
 (def %sh-skip-past-or-end
   (fn (_ cur stop?)
-    (unless (null? (%sh-skip-block cur 0 stop?)) (%cursor-advance! cur))))
+    (set-first! cur (%sh-past-or-end (%sh-skip-block-walk (first cur) 0 stop?)))))
 
-; Skip a false branch's body, stopping on the elif/else/fi that follows it --
-; not consuming it, so %eval-elif-chain sees the terminator. Swallowing the
-; `fi` would make `if false; then echo yes; fi` a parse error.
+(def %sh-past-or-end
+  (fn (_ ts) (match ((null? ts) ts) (#t (rest ts)))))
+
+; A false branch's body ends at the elif, else or fi after it.  Taking the
+; `fi` with the body would make `if false; then echo yes; fi` a parse error.
 (def %sh-elif-else-fi (list "elif" "else" "fi"))
 
-(set! %skip-body-to-elif-else-fi
-  (fn (_ cur depth)
-    (if (null? (%sh-skip-block cur 0
-                 (fn (_ tok) (%sh-word-among? tok %sh-elif-else-fi))))
-      (error "parse error: unexpected EOF in if")
-      ())))
+(def %sh-elif-else-fi?
+  (fn (_ tok) (%sh-word-among? tok %sh-elif-else-fi)))
+
+(def %sh-fi? (fn (_ tok) (%sh-word-is? tok "fi")))
+
 ; Skip to matching fi (after we evaluated the true branch)
-
 (set! %skip-to-fi
-  (fn (_ cur depth)
-    (%sh-skip-past cur (fn (_ tok) (%sh-word-is? tok "fi")) "if")))
-; Handle elif/else chain after condition was false
-
-(set! %eval-elif-chain
-  (fn (_ cur)
-    (if (%cursor-empty? cur)
-      (error "parse error: expected fi")
-      (let ((tok (%cursor-peek cur)))
-        (if (and
-              (%tok-is-keyword? tok)
-              (string=? (%tok-word-val tok) "elif"))
-          ; elif: evaluate its condition
-
-          (do
-            (%cursor-advance! cur)
-            (%skip-newlines cur)
-            ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
-    ; `while test ...` run commands whose failure is the point.
-    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
-              (%skip-newlines cur)
-              (%expect-word cur "then")
-              (%skip-newlines cur)
-              (if (= cond-result 0)
-                (let ((result (%eval-list cur)))
-                  (%skip-to-fi cur 0)
-                  (set! %sh-status result)
-                  result)
-                (do
-                  (%skip-body-to-elif-else-fi cur 0)
-                  (%eval-elif-chain cur)))))
-          (if (and
-                (%tok-is-keyword? tok)
-                (string=? (%tok-word-val tok) "else"))
-            ; else: evaluate body, expect fi
-
-            (do
-              (%cursor-advance! cur)
-              (%skip-newlines cur)
-              (let ((result (%eval-list cur)))
-                (%skip-newlines cur)
-                (%expect-word cur "fi")
-                (set! %sh-status result)
-                result))
-            (if (and
-                  (%tok-is-keyword? tok)
-                  (string=? (%tok-word-val tok) "fi"))
-              ; fi: no else, return 0
-
-              (do (%cursor-advance! cur) (set! %sh-status 0) 0)
-              (error "parse error: expected elif, else, or fi"))))))))
+  (fn (_ cur depth) (%sh-skip-past cur %sh-fi? "if")))
 ; --- One iteration, under the loop-control guard ----------------------------
 ;
 ; Answers (pair HOW status): HOW is `ran` when the body reached its `done`,
@@ -6386,171 +6422,216 @@
 
 (def %sh-run-loop-body
   (fn (_ cur)
-    (set! %sh-loop-depth (+ %sh-loop-depth 1))
-    (guard (e
-        (do (set! %sh-loop-depth (- %sh-loop-depth 1)) (%sh-loop-catch e)))
-      (let ((result (%eval-list cur)))
-        (set! %sh-loop-depth (- %sh-loop-depth 1))
-        (pair (lit ran) result)))))
+    (set! %sh-loop-depth (fx+ %sh-loop-depth 1))
+    (guard (e (%sh-loop-raised e))
+      (%sh-loop-ran (%eval-list cur)))))
 
-; Leave the cursor just past this loop's `done`.  A body that ran is standing
-; on it; one cut short by a signal is somewhere inside, so walk from the
-; loop's own start -- the same balanced skip the false-condition path takes.
-(def %sh-loop-after-body
-  (fn (_ cur start how)
-    (if (eq? how (lit ran))
-      (do (%skip-newlines cur) (%expect-word cur "done"))
-      (do (set-first! cur start) (%skip-to-done cur 0)))))
+(def %sh-loop-ran
+  (fn (_ result)
+    (set! %sh-loop-depth (fx+ %sh-loop-depth -1))
+    (pair (lit ran) result)))
+
+(def %sh-loop-raised
+  (fn (_ e)
+    (set! %sh-loop-depth (fx+ %sh-loop-depth -1))
+    (%sh-loop-catch e)))
 
 ; while cond; do body; done
-
+; until cond; do body; done, which goes round while its condition fails
+;
+; SAVED is the loop past its opening word, where each time round starts.
 (def %eval-while
-  (fn (_ cur)
-    (%cursor-advance! cur)
-    ; consume 'while'
-
-    ; Save position to loop back
-
-    (let ((saved (first cur))) (%eval-while-body cur saved))))
+  (fn (_ cur) (%eval-while-body cur (rest (first cur)))))
 
 (set! %eval-while-body
   (fn (_ cur saved)
     (set-first! cur saved)
-    ; reset cursor to condition
-
-    (%skip-newlines cur)
-    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
-    ; `while test ...` run commands whose failure is the point.
-    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
-      (%skip-newlines cur)
-      (%expect-word cur "do")
-      (%skip-newlines cur)
-      (if (= cond-result 0)
-        (let ((r (%sh-run-loop-body cur)))
-          (%sh-loop-after-body cur saved (first r))
-          (if (eq? (first r) (lit break))
-            (do (set! %sh-status (rest r)) (rest r))
-            (%eval-while-body cur saved)))
-        ; Condition false: skip body, done
-
-        (do (%skip-to-done cur 0) (set! %sh-status 0) 0)))))
-; until cond; do body; done (loops while condition fails)
+    (%sh-loop-test cur saved %eval-while-body
+      (= (%sh-in-condition (fn (_) (%eval-list cur))) 0))))
 
 (def %eval-until
-  (fn (_ cur)
-    (%cursor-advance! cur)
-    ; consume 'until'
-
-    (let ((saved (first cur))) (%eval-until-body cur saved))))
+  (fn (_ cur) (%eval-until-body cur (rest (first cur)))))
 
 (set! %eval-until-body
   (fn (_ cur saved)
     (set-first! cur saved)
-    ; reset cursor to condition
+    (%sh-loop-test cur saved %eval-until-body
+      (not (= (%sh-in-condition (fn (_) (%eval-list cur))) 0)))))
 
-    (%skip-newlines cur)
-    ; A CONDITION, so `set -e` must not fire on it -- `if false; then` and
-    ; `while test ...` run commands whose failure is the point.
-    (let ((cond-result (%sh-in-condition (fn (_) (%eval-list cur)))))
-      (%skip-newlines cur)
-      (%expect-word cur "do")
-      (%skip-newlines cur)
-      (if (not (= cond-result 0))
-        (let ((r (%sh-run-loop-body cur)))
-          (%sh-loop-after-body cur saved (first r))
-          (if (eq? (first r) (lit break))
-            (do (set! %sh-status (rest r)) (rest r))
-            (%eval-until-body cur saved)))
-        ; Condition succeeded: skip body, done
+; After the condition: its `do`, then the body when RUN? says so and AGAIN,
+; the loop's own step, after it; else past the loop's `done`.
+(def %sh-loop-test
+  (fn (_ cur saved again run?)
+    (%sh-take-opener! cur "do")
+    (match
+      (run? (%sh-loop-went cur saved again (%sh-run-loop-body cur)))
+      (#t (%sh-loop-over cur)))))
 
-        (do (%skip-to-done cur 0) (set! %sh-status 0) 0)))))
-; Skip to matching done
+; R is how the body ended.  One that ran stopped at its `done`, which is
+; checked and left, as the loop goes round from its start.  One cut short by
+; `continue` or `break` is somewhere inside, so the loop is walked from its
+; start past its `done`, the same balanced skip a false condition's body
+; takes; `break` ends the loop there.
+(def %sh-loop-went
+  (fn (_ cur saved again r)
+    (match
+      ((eq? (first r) (lit ran)) (%sh-loop-again cur saved again))
+      ((eq? (first r) (lit break)) (%sh-loop-broke cur saved r))
+      (#t (%sh-loop-continued cur saved again)))))
 
-(set! %skip-to-done
-  (fn (_ cur depth)
-    (%sh-skip-past cur (fn (_ tok) (%sh-word-is? tok "done")) "while")))
-; Collect for-in word list from cursor
+(def %sh-loop-again
+  (fn (_ cur saved again)
+    (%sh-check-word cur "done")
+    (again cur saved)))
 
-(def %collect-for-words ())
+(def %sh-loop-continued
+  (fn (_ cur saved again)
+    (%sh-skip-past-from cur saved %sh-done? "while")
+    (again cur saved)))
 
-(set! %collect-for-words
-  (fn (_ cur ws)
-    (if (or
-          (%cursor-empty? cur)
-          (%tok-is-newline? (%cursor-peek cur))
-          (and
-            (eq? (first (%cursor-peek cur)) (lit tok-op))
-            (string=? (first (rest (%cursor-peek cur))) ";")))
-      (reverse ws)
-      (let ((fs (%sh-expand-tok (%cursor-peek cur) ())))
-        (%cursor-advance! cur)
-        ; SPLICED, which is what makes `for f in $(cat list)` iterate once per
-        ; line instead of once over the whole file.
-        (%collect-for-words cur (%sh-push-fields fs ws))))))
-; for var [in words...]; do body; done
+(def %sh-loop-broke
+  (fn (_ cur start r)
+    (%sh-skip-past-from cur start %sh-done? "while")
+    (set! %sh-status (rest r))
+    (rest r)))
 
-(def %eval-for
+(def %sh-loop-over
   (fn (_ cur)
-    (%cursor-advance! cur)
-    ; consume 'for'
+    (%skip-to-done cur 0)
+    (set! %sh-status 0)
+    0))
 
-    (%skip-newlines cur)
-    (if (%cursor-empty? cur)
-      (error "parse error: for without variable")
-      (let ((var (%tok-word-val (%cursor-peek cur))))
-        (unless (%sh-name? var)
-          (error (string-append "parse error: bad for loop variable " var)))
-        (%cursor-advance! cur)
-        (%skip-newlines cur)
-        ; Collect in-list if present
+(def %sh-done? (fn (_ tok) (%sh-word-is? tok "done")))
 
-        (let ((words
-                (if (and
-                      (not (%cursor-empty? cur))
-                      (eq? (first (%cursor-peek cur)) (lit tok-word))
-                      (string=? (first (rest (%cursor-peek cur))) "in"))
-                  (do
-                    (%cursor-advance! cur)
-                    ; consume 'in'
+; Skip to matching done
+(set! %skip-to-done
+  (fn (_ cur depth) (%sh-skip-past cur %sh-done? "while")))
 
-                    (%collect-for-words cur ()))
-                  ; No `in` means the positional parameters as they stand when
-                  ; the loop starts: `for i; do` is `for i in "$@"; do`.  A
-                  ; `set --` in the body rebinds %sh-args and leaves this list
-                  ; alone.
-                  %sh-args)))
-          ; Skip separator
+; for var [in words...]; do body; done
+;
+; The words are read from the token list, and the cursor is first written
+; where the body starts.
+(def %eval-for
+  (fn (_ cur) (%sh-for-at cur (%sh-past-newlines (rest (first cur))))))
 
-          (%skip-newlines cur)
-          (if (not (%cursor-empty? cur))
-            (if (%match-op cur ";") (%skip-newlines cur) ())
-            ())
-          (%expect-word cur "do")
-          (%skip-newlines cur)
-          ; Save position for looping
+; TS stands on the loop's variable.
+(def %sh-for-at
+  (fn (_ cur ts)
+    (match
+      ((null? ts) (%sh-for-refused cur ts "parse error: for without variable"))
+      ((%sh-name? (%tok-word-val (first ts)))
+        (%sh-for-list cur (%tok-word-val (first ts)) (%sh-past-newlines (rest ts))))
+      (#t (%sh-for-refused cur ts
+            (string-append "parse error: bad for loop variable "
+                           (%tok-word-val (first ts))))))))
 
-          (let ((body-start (first cur))
-                 (expanded words))
-            (%eval-for-body cur var expanded body-start)))))))
+(def %sh-for-refused
+  (fn (_ cur ts message)
+    (set-first! cur ts)
+    (error message)))
 
+; No `in` means the positional parameters as they stand when the loop starts:
+; `for i; do` is `for i in "$@"; do`.  A `set --` in the body rebinds %sh-args
+; and leaves this list alone.
+(def %sh-for-list
+  (fn (_ cur var ts)
+    (match
+      ((null? ts) (%sh-for-do cur var %sh-args ts))
+      ((%tok-spells? (first ts) "in") (%sh-for-words cur var (rest ts) ()))
+      (#t (%sh-for-do cur var %sh-args ts)))))
+
+; The words of the list, to the newline or `;` that ends it, each expanded as
+; it is reached and SPLICED, which is what makes `for f in $(cat list)` go
+; round once a line rather than once over the whole file.
+(def %sh-for-words
+  (fn (self cur var ts ws)
+    (match
+      ((%sh-for-list-end? ts) (%sh-for-do cur var (reverse ws) ts))
+      (#t (self cur var (rest ts)
+                (%sh-push-fields (%sh-expand-tok (first ts) ()) ws))))))
+
+(def %sh-for-list-end?
+  (fn (_ ts)
+    (match
+      ((null? ts) #t)
+      ((%tok-is-newline? (first ts)) #t)
+      (#t (%tok-is-op? (first ts) ";")))))
+
+; Past the newlines and the `;` that end the list, and the `do`, to the body.
+(def %sh-for-do
+  (fn (_ cur var words ts)
+    (%sh-for-do-at cur var words (%sh-past-semicolon (%sh-past-newlines ts)))))
+
+(def %sh-past-semicolon
+  (fn (_ ts)
+    (match
+      ((null? ts) ts)
+      ((%tok-is-op? (first ts) ";") (%sh-past-newlines (rest ts)))
+      (#t ts))))
+
+(def %sh-for-do-at
+  (fn (_ cur var words ts)
+    (%sh-check-word-at ts "do")
+    (%eval-for-body cur var words (%sh-past-newlines (rest ts)))))
+
+; Once round for each of WORDS.  No words is no iterations, and the body is
+; still to be stepped over, from BODY-START, where it starts.
 (set! %eval-for-body
   (fn (_ cur var words body-start)
-    (if (null? words)
-      ; No words is no iterations, and the body is still to be stepped over:
-      ; the cursor stands after the `do`, where nothing has read it.
-      (do (%skip-to-done cur 0) (set! %sh-status 0) 0)
-      (do
-        (%sh-var-set! var (first words))
-        (set-first! cur body-start)
-        ; reset to body
+    (match
+      ((null? words) (%sh-for-none cur body-start))
+      (#t (%sh-for-each cur var words body-start)))))
 
-        (let ((r (%sh-run-loop-body cur)))
-          (%sh-loop-after-body cur body-start (first r))
-          (if (eq? (first r) (lit break))
-            (do (set! %sh-status (rest r)) (rest r))
-            (if (null? (rest words))
-              (do (set! %sh-status 0) 0)
-              (%eval-for-body cur var (rest words) body-start))))))))
+(def %sh-for-none
+  (fn (_ cur body-start)
+    (%sh-skip-past-from cur body-start %sh-done? "while")
+    (set! %sh-status 0)
+    0))
+
+(def %sh-for-each
+  (fn (_ cur var words body-start)
+    (%sh-var-set! var (first words))
+    (set-first! cur body-start)
+    (%sh-for-went cur var (rest words) body-start (%sh-run-loop-body cur))))
+
+; R is how the body ended, as in %sh-loop-went, and MORE the words left.  The
+; `done` a body that ran stopped at is taken after the last word, and only
+; checked before the others, as the next time round starts at BODY-START.
+(def %sh-for-went
+  (fn (_ cur var more body-start r)
+    (match
+      ((eq? (first r) (lit break)) (%sh-loop-broke cur body-start r))
+      ((eq? (first r) (lit ran)) (%sh-for-ran cur var more body-start))
+      (#t (%sh-for-continued cur var more body-start)))))
+
+(def %sh-for-ran
+  (fn (_ cur var more body-start)
+    (match
+      ((null? more) (%sh-for-last cur))
+      (#t (%sh-for-next cur var more body-start)))))
+
+(def %sh-for-next
+  (fn (_ cur var more body-start)
+    (%sh-check-word cur "done")
+    (%eval-for-body cur var more body-start)))
+
+(def %sh-for-last
+  (fn (_ cur)
+    (%sh-take-word! cur "done")
+    (set! %sh-status 0)
+    0))
+
+(def %sh-for-continued
+  (fn (_ cur var more body-start)
+    (%sh-skip-past-from cur body-start %sh-done? "while")
+    (match
+      ((null? more) (%sh-for-over))
+      (#t (%eval-for-body cur var more body-start)))))
+
+(def %sh-for-over
+  (fn (_)
+    (set! %sh-status 0)
+    0))
 ; case WORD in PATTERN[|PATTERN]...) BODY;; ... esac
 
 ; case patterns are globs, matched with %sh-glob-match -- `a*)`, `*.txt)`,
@@ -6828,104 +6909,103 @@
   (fn (_ pat word)
     (%sh-glob-at pat 0 (string-length pat) word 0 (string-length word))))
 
-(def %collect-case-patterns ())
-
-(set! %collect-case-patterns
-  (fn (_ cur pats)
-    (if (%cursor-empty? cur)
-      (error "parse error: expected ) in case")
-      (let ((tok (%cursor-peek cur)))
-        (if (and
-              (eq? (first tok) (lit tok-op))
-              (string=? (first (rest tok)) ")"))
-          (do (%cursor-advance! cur) (reverse pats))
-          (if (or
-                (and (eq? (first tok) (lit tok-op))
-                     (string=? (first (rest tok)) "|"))
-                ; The `(` a clause may open with is punctuation, not a
-                ; pattern: `case "(" in (x)` matches the `x` clause for a
-                ; subject that is a parenthesis, and nothing else.
-                (%tok-pattern-paren? tok))
-            (do
-              (%cursor-advance! cur)
-              (%collect-case-patterns cur pats))
-            (do
-              (%cursor-advance! cur)
-              (%collect-case-patterns cur (pair tok pats)))))))))
-
 ; Each pattern is expanded when its turn comes, and the first that matches
 ; ends it: in `a|$(cmd))` the substitution runs only when `a` did not match.
 (def %case-match?
-  (fn (_ pats word)
-    (if (null? pats)
-      ()
-      (if (%sh-pattern-match? (%sh-expand-pattern (first pats)) word)
-        #t
-        (%case-match? (rest pats) word)))))
+  (fn (self pats word)
+    (match
+      ((null? pats) ())
+      ((%sh-pattern-match? (%sh-expand-pattern (first pats)) word) #t)
+      (#t (self (rest pats) word)))))
 
-(def %skip-case-body ())
-
-; One clause's body: to its `;;`, or to the `esac` that ends the whole case
-; when the last clause omits it.
-(set! %skip-case-body
-  (fn (_ cur depth)
-    (%sh-skip-past-or-end cur
-      (fn (_ tok)
-        (or (%sh-word-is? tok "esac") (%tok-is-op? tok ";;"))))))
-(def %skip-to-esac ())
-
-(set! %skip-to-esac
-  (fn (_ cur depth)
-    (%sh-skip-past-or-end cur (fn (_ tok) (%sh-word-is? tok "esac")))))
-(set! %eval-case-clauses
-  (fn (_ cur word)
-    (%skip-newlines cur)
-    (if (%cursor-empty? cur)
-      (do (set! %sh-status 0) 0)
-      (let ((tok (%cursor-peek cur)))
-        (if (and
-              (%tok-is-keyword? tok)
-              (string=? (first (rest tok)) "esac"))
-          (do (%cursor-advance! cur) (set! %sh-status 0) 0)
-          (let ((pats (%collect-case-patterns cur ())))
-            (%skip-newlines cur)
-            (if (%case-match? pats word)
-              ; Match: evaluate body, skip remaining
-
-              (let ((result (%eval-list cur)))
-                ; Consume ;; if present
-
-                (if (and
-                      (not (%cursor-empty? cur))
-                      (not (eq? (first (%cursor-peek cur)) (lit tok-word))))
-                  (if (and
-                        (eq? (first (%cursor-peek cur)) (lit tok-op))
-                        (string=? (first (rest (%cursor-peek cur))) ";;"))
-                    (%cursor-advance! cur)
-                    ())
-                  ())
-                (%skip-to-esac cur 0)
-                (set! %sh-status result)
-                result)
-              ; No match: skip body, try next clause
-
-              (do (%skip-case-body cur 0) (%eval-case-clauses cur word)))))))))
-
+; The clauses are read from the token list, and the cursor is written where a
+; matching clause's body starts and where the case ends.
 (def %eval-case
-  (fn (_ cur)
-    (%cursor-advance! cur)
-    ; consume 'case'
+  (fn (_ cur) (%sh-case-subject cur (rest (first cur)))))
 
-    (let ((word-tok (%cursor-peek cur)))
-      (%cursor-advance! cur)
-      ; consume WORD
+; TS stands on the SUBJECT, which is expanded without field splitting (POSIX).
+(def %sh-case-subject
+  (fn (_ cur ts)
+    (match
+      ((null? ts) (%sh-case-refused cur ts "parse error: case without a word"))
+      (#t (%sh-case-in cur (%sh-expand-tok-1 (first ts))
+                       (%sh-past-newlines (rest ts)))))))
 
-      ; The case SUBJECT is expanded without field splitting (POSIX).
-      (let ((word (%sh-expand-tok-1 word-tok)))
-        (%skip-newlines cur)
-        (%expect-word cur "in")
-        (%skip-newlines cur)
-        (%eval-case-clauses cur word)))))
+(def %sh-case-in
+  (fn (_ cur word ts)
+    (%sh-check-word-at ts "in")
+    (%sh-case-clauses cur word (rest ts))))
+
+; The clause at TS, past the newlines before it, or the case's end.
+(def %sh-case-clauses
+  (fn (_ cur word ts) (%sh-case-clause-at cur word (%sh-past-newlines ts))))
+
+(def %sh-case-clause-at
+  (fn (_ cur word ts)
+    (match
+      ((null? ts) (%sh-case-over cur ts))
+      ((%sh-word-is? (first ts) "esac") (%sh-case-over cur (rest ts)))
+      (#t (%sh-case-patterns cur word ts ())))))
+
+(def %sh-case-over
+  (fn (_ cur ts)
+    (set-first! cur ts)
+    (set! %sh-status 0)
+    0))
+
+(def %sh-case-refused
+  (fn (_ cur ts message)
+    (set-first! cur ts)
+    (error message)))
+
+; The patterns of the clause at TS, to the `)` that ends them.  The `(` a
+; clause may open with is punctuation, not a pattern: `case "(" in (x)`
+; matches the `x` clause for a subject that is a parenthesis, and nothing else.
+(def %sh-case-patterns
+  (fn (self cur word ts pats)
+    (match
+      ((null? ts) (%sh-case-refused cur ts "parse error: expected ) in case"))
+      ((%tok-is-op? (first ts) ")")
+        (%sh-case-clause cur word (reverse pats) (rest ts)))
+      ((%tok-is-op? (first ts) "|") (self cur word (rest ts) pats))
+      ((%tok-pattern-paren? (first ts)) (self cur word (rest ts) pats))
+      (#t (self cur word (rest ts) (pair (first ts) pats))))))
+
+; A clause whose patterns are PATS and whose body starts at TS: run when one of
+; them matches WORD; else skipped to its `;;`, or to the `esac` that ends the
+; case when the last clause omits it, and the next clause tried.
+(def %sh-case-clause
+  (fn (_ cur word pats ts)
+    (match
+      ((%case-match? pats word) (%sh-case-run cur (%sh-past-newlines ts)))
+      (#t (%sh-case-clauses cur word
+            (%sh-past-or-end (%sh-skip-block-walk ts 0 %sh-case-body-end?)))))))
+
+(def %sh-case-body-end?
+  (fn (_ tok) (match ((%sh-word-is? tok "esac") #t) (#t (%tok-is-op? tok ";;")))))
+
+(def %sh-esac? (fn (_ tok) (%sh-word-is? tok "esac")))
+
+(def %sh-case-run
+  (fn (_ cur ts)
+    (set-first! cur ts)
+    (%sh-case-ran cur (%eval-list cur))))
+
+; After the body that ran: past its `;;`, if it has one, and past the `esac`.
+(def %sh-case-ran
+  (fn (_ cur result)
+    (set-first! cur
+      (%sh-past-or-end
+        (%sh-skip-block-walk (%sh-past-dsemi (first cur)) 0 %sh-esac?)))
+    (set! %sh-status result)
+    result))
+
+(def %sh-past-dsemi
+  (fn (_ ts)
+    (match
+      ((null? ts) ts)
+      ((%tok-is-op? (first ts) ";;") (rest ts))
+      (#t ts))))
 ; ( list ) — subshell
 
 ; The subshell body is collected first, in the one process, and the child
@@ -7004,11 +7084,9 @@
 ; brace -- a reserved word is only reserved where a command could start.
 (def %eval-brace-group
   (fn (_ cur)
-    (%cursor-advance! cur)
-    (%skip-newlines cur)
+    (set-first! cur (%sh-past-newlines (rest (first cur))))
     (def result (%eval-list cur))
-    (%skip-newlines cur)
-    (%expect-word cur "}")
+    (%sh-take-word! cur "}")
     result))
 
 ; Which word opens which construct.  %is-compound-start? asks whether a word
