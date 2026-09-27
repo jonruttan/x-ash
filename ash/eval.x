@@ -35,6 +35,11 @@
   (fn (_ cur) (set-first! cur (rest (first cur))) ()))
 
 (def %cursor-empty? (fn (_ cur) (null? (first cur))))
+
+; The cursor set to TS, which a walk over the token list found, and left alone
+; when it stands there already.
+(def %sh-cursor-to!
+  (fn (_ cur ts) (match ((same? ts (first cur)) ()) (#t (set-first! cur ts)))))
 ; --- Token predicates ---
 
 (def %tok-is-word?
@@ -7470,6 +7475,17 @@
   (fn (_ cur ts toks)
     (set-first! cur ts)
     (reverse toks)))
+
+; Where the stage at TS ends, by the same walk, collecting nothing: a
+; pipeline that is one simple command runs where it stands.
+(def %sh-stage-end
+  (fn (self ts wdepth pdepth)
+    (match
+      ((null? ts) ts)
+      ((%sh-plain-tok? (first ts)) (self (rest ts) wdepth pdepth))
+      ((%sh-stage-ends-at? (first ts) wdepth pdepth) ts)
+      (#t (self (rest ts) (%sh-stage-wdepth wdepth (first ts))
+                (%sh-paren-depth pdepth (first ts)))))))
 ; Collect all pipeline stages
 
 (def %collect-stages ())
@@ -7504,11 +7520,13 @@
     ; nesting: `( echo p ) | tr p P` and `for i in 1 2; do echo $i; done | wc
     ; -l` cut at the `|`, not at the `;` or `done` inside them.  A single stage
     ; reaches %eval-command, whose compound branch applies the construct's
-    ; redirections.
+    ; redirections.  A simple command's stage is walked to its end first, and
+    ; the command runs where it stands when no `|` is there (%sh-pipeline-at).
     (def result (match
                   ((%is-fn-def? cur) (%eval-fn-def cur))
-                  (#t (%sh-run-pipeline-stages cur (%collect-stages cur ())
-                                               negate))))
+                  ((%is-compound-start? cur)
+                    (%sh-run-pipeline-stages cur (%collect-stages cur ()) negate))
+                  (#t (%sh-pipeline-at cur negate (%sh-stage-end (first cur) 0 0)))))
     (match
       (negate (%sh-negated result))
       ((%sh-and-or-next? cur) result)
@@ -7531,8 +7549,7 @@
 
 (def %sh-take-bang-at
   (fn (_ cur)
-    (%cursor-advance! cur)
-    (%skip-newlines cur)
+    (set-first! cur (%sh-past-newlines (rest (first cur))))
     #t))
 
 (def %sh-run-pipeline-stages
@@ -7541,6 +7558,30 @@
       (negate (%sh-in-condition (fn (_) (%sh-run-stages stages))))
       ((%sh-and-or-next? cur) (%sh-in-condition (fn (_) (%sh-run-stages stages))))
       (#t (%sh-run-stages stages)))))
+
+; A simple command whose stage, ending at END, is the whole pipeline: it runs
+; on the list's own cursor, which its words are collected from and step past
+; once, with no stage collected and no cursor of its own.  It has to end where
+; its stage does, and what is left before END is refused, as %eval-command
+; refuses what is left of a stage.  A `|` at END makes a pipeline, whose
+; stages are collected and run through pipes.
+(def %sh-pipeline-at
+  (fn (_ cur negate end)
+    (match
+      ((%sh-pipe-at? end)
+        (%sh-run-pipeline-stages cur (%collect-stages cur ()) negate))
+      (negate (%sh-in-condition (fn (_) (%sh-simple-to cur end))))
+      ((%sh-and-or-at? end) (%sh-in-condition (fn (_) (%sh-simple-to cur end))))
+      (#t (%sh-simple-to cur end)))))
+
+(def %sh-pipe-at?
+  (fn (_ ts) (match ((null? ts) ()) (#t (%tok-is-op? (first ts) "|")))))
+
+(def %sh-simple-to
+  (fn (_ cur end)
+    (def status (%eval-simple-cmd cur))
+    (match ((same? (first cur) end) ()) (#t (%sh-refuse-leftover cur)))
+    status))
 
 (def %sh-negated
   (fn (_ result)
@@ -7554,23 +7595,37 @@
       ((null? (rest stages)) (%eval-command (%mk-cursor (first stages))))
       (#t (%sh-run-pipeline stages)))))
 
-(def %sh-and-or-ops (list "&&" "||"))
-
 ; Is the token at the cursor the && or || that makes what came before it an
-; operand?
+; operand?  It is asked after every pipeline, so it is told by the operator's
+; two characters: no other operator is `&` or `|` twice.
 (def %sh-and-or-next?
-  (fn (_ cur)
+  (fn (_ cur) (%sh-and-or-at? (first cur))))
+
+(def %sh-and-or-at?
+  (fn (_ ts) (match ((null? ts) ()) (#t (%sh-and-or-tok? (first ts))))))
+
+(def %sh-and-or-tok?
+  (fn (_ tok)
     (match
-      ((null? (first cur)) ())
-      ((eq? (first (first (first cur))) (lit tok-op))
-        (%sh-word-in? (first (rest (first (first cur)))) %sh-and-or-ops))
+      ((eq? (first tok) (lit tok-op)) (%sh-and-or-op? (first (rest tok))))
+      (#t ()))))
+
+(def %sh-and-or-op?
+  (fn (_ op)
+    (match
+      ((= (string-length op) 2)
+        (match
+          ((= (string-ref op 0) #\&) (= (string-ref op 1) #\&))
+          ((= (string-ref op 0) #\|) (= (string-ref op 1) #\|))
+          (#t ())))
       (#t ()))))
 ; and_or: pipeline (('&&'|'||') pipeline)*
 
 ; Skip an operand without running it -- what a short-circuit does with the side
 ; it does not take. Recursive descent skips the evaluation, not the cursor, so
-; the cursor is advanced past the operand explicitly; leaving it on the operand
-; would make %eval-list find a command where it expects a separator.
+; the cursor is set past the operand explicitly, where a walk over the token
+; list finds its end; leaving it on the operand would make %eval-list find a
+; command where it expects a separator.
 ; An operand ends at a list separator or the next connective, and the skip
 ; crosses pipes, because the operand of `&&` is a pipeline: stopping at a `|`
 ; would leave `grep a` behind in `false && echo a | grep a`.
@@ -7578,8 +7633,10 @@
 
 (def %sh-operand-end?
   (fn (_ tok)
-    (and (eq? (first tok) (lit tok-op))
-         (%sh-word-in? (first (rest tok)) %sh-operand-end-ops))))
+    (match
+      ((eq? (first tok) (lit tok-op))
+        (%sh-word-in? (first (rest tok)) %sh-operand-end-ops))
+      (#t ()))))
 
 ; An operator is told by its first character, as %sh-async-end tells it: `(`
 ; and `)` are the only operators that start with either.  The marking walk
@@ -7596,24 +7653,30 @@
       (#t 0))))
 
 (def %sh-skip-operand
-  (fn (self cur depth)
-    (if (%cursor-empty? cur)
-      ()
-      (let ((tok (%cursor-peek cur)))
-        (if (and (= depth 0)
-                 (or (%tok-is-newline? tok)
-                     (%sh-operand-end? tok)
-                     (%at-stop-word? cur)))
-          ()
-          (do
-            (%cursor-advance! cur)
-            ; Parens count too, and only here: %sh-nest-delta is the keyword
-            ; nesting the skippers share, and a subshell's `(` is punctuation,
-            ; not a keyword. Without it the skip stopped on the `)` of
-            ; `false && (echo a)` and abandoned the list.
-            (let ((d (+ depth
-                        (+ (%sh-nest-delta tok) (%sh-paren-delta tok)))))
-              (self cur (if (< d 0) 0 d)))))))))
+  (fn (_ cur depth) (%sh-cursor-to! cur (%sh-operand-end (first cur) depth))))
+
+; Parens count too, and only here: %sh-nest-delta is the keyword nesting the
+; skippers share, and a subshell's `(` is punctuation, not a keyword. Without
+; it the skip stopped on the `)` of `false && (echo a)` and abandoned the list.
+(def %sh-operand-end
+  (fn (self ts depth)
+    (match
+      ((null? ts) ts)
+      ((%sh-operand-stops? (first ts) depth) ts)
+      (#t (self (rest ts)
+                (%sh-floored
+                  (fx+ depth (fx+ (%sh-nest-delta (first ts))
+                                  (%sh-paren-delta (first ts))))))))))
+
+(def %sh-operand-stops?
+  (fn (_ tok depth)
+    (match
+      ((= depth 0)
+        (match
+          ((%tok-is-newline? tok) #t)
+          ((%sh-operand-end? tok) #t)
+          (#t (%sh-stop-tok? tok))))
+      (#t ()))))
 
 ; A command in an AND-OR list is exempt from `set -e` unless it is the LAST
 ; COMMAND RUN -- `false || echo` must not exit, `false && cmd` must not (the
@@ -7629,21 +7692,32 @@
     (%eval-and-or-loop cur (%eval-pipeline cur))))
 
 (set! %eval-and-or-loop
-  (fn (self cur result)
+  (fn (_ cur result)
     (match
-      ((%match-op cur "&&")
-        (do
-          (%skip-newlines cur)
-          (if (= result 0)
-            (self cur (%eval-pipeline cur))
-            (do (%sh-skip-operand cur 0) (self cur result)))))
-      ((%match-op cur "||")
-        (do
-          (%skip-newlines cur)
-          (if (= result 0)
-            (do (%sh-skip-operand cur 0) (self cur result))
-            (self cur (%eval-pipeline cur)))))
+      ((%sh-and-or-next? cur)
+        (%sh-and-or-step cur result
+          (= (string-ref (first (rest (first (first cur)))) 0) #\&)))
       (#t result))))
+
+; Past the && or || at the cursor and the newlines after it, in one step.  The
+; operand runs after && when RESULT is 0, after || when it is not, and is
+; skipped otherwise.
+(def %sh-and-or-step
+  (fn (_ cur result and?)
+    (set-first! cur (%sh-past-newlines (rest (first cur))))
+    (match
+      ((%sh-operand-runs? and? result)
+        (%eval-and-or-loop cur (%eval-pipeline cur)))
+      (#t (%sh-and-or-skipped cur result)))))
+
+(def %sh-operand-runs?
+  (fn (_ and? result)
+    (match (and? (= result 0)) (#t (not (= result 0))))))
+
+(def %sh-and-or-skipped
+  (fn (_ cur result)
+    (%sh-skip-operand cur 0)
+    (%eval-and-or-loop cur result)))
 
 ; --- Asynchronous lists ------------------------------------------------------
 ;
@@ -7733,13 +7807,31 @@
           0)))))
 
 ; list: and_or ((';'|'&'|newline) and_or)*
-
+;
+; The list is read from the token list: past the separator and the newlines
+; before an and-or list, a stop word or the end of the input ends the list,
+; and the cursor is written once, where the next and-or list starts.  An empty
+; list's status is 0; one that ends after a separator keeps the status of
+; what ran before it, RESULT.
 (set! %eval-list
-  (fn (_ cur)
-    (%skip-newlines cur)
+  (fn (_ cur) (%sh-list-at cur (%sh-past-newlines (first cur)) ())))
+
+(def %sh-list-at
+  (fn (_ cur ts result)
     (match
-      ((%at-stop-word? cur) (%sh-set-status 0))
-      (#t (%sh-list-on cur (%sh-list-first cur (%sh-async-end (first cur) 0)))))))
+      ((null? ts) (%sh-list-ended cur ts result))
+      ((%sh-stop-tok? (first ts)) (%sh-list-ended cur ts result))
+      (#t (%sh-list-run cur ts)))))
+
+(def %sh-list-ended
+  (fn (_ cur ts result)
+    (%sh-cursor-to! cur ts)
+    (match ((null? result) (%sh-set-status 0)) (#t result))))
+
+(def %sh-list-run
+  (fn (_ cur ts)
+    (%sh-cursor-to! cur ts)
+    (%sh-list-on cur (%sh-list-first cur (%sh-async-end ts 0)))))
 
 ; The and-or list at the cursor, in a child when AMP, where %sh-async-end found
 ; it ends with `&`, is not nil.
@@ -7756,17 +7848,24 @@
   (fn (_ cur result)
     (match
       ((null? (first cur)) result)
-      ((%tok-is-newline? (first (first cur))) (%sh-list-rest cur result))
-      ((%match-op cur ";") (%sh-list-rest cur result))
-      ((%match-op cur "&") (%sh-list-rest cur result))
+      ((%sh-separator? (first (first cur)))
+        (%sh-list-at cur (%sh-past-newlines (rest (first cur))) result))
       (#t result))))
 
-(def %sh-list-rest
-  (fn (_ cur result)
-    (%skip-newlines cur)
+; A newline, or a `;` or `&` alone: `;;`, `&&` and `&>` are other operators.
+(def %sh-separator?
+  (fn (_ tok)
     (match
-      ((%at-stop-word? cur) result)
-      (#t (%eval-list cur)))))
+      ((eq? (first tok) (lit tok-newline)) #t)
+      ((eq? (first tok) (lit tok-op)) (%sh-separator-op? (first (rest tok))))
+      (#t ()))))
+
+(def %sh-separator-op?
+  (fn (_ op)
+    (match
+      ((= (string-length op) 1)
+        (match ((= (string-ref op 0) #\;) #t) (#t (= (string-ref op 0) #\&))))
+      (#t ()))))
 ; --- Here-documents ---------------------------------------------------------
 ;
 ;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
