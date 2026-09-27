@@ -531,29 +531,55 @@
 ; A name the table holds is not exported: every way into the environment or
 ; the export marks takes a name out of the table.  So a name found there is
 ; set in place, without asking the environment about it.
+; IFS, kept for %sh-ifs.  Every unquoted expansion asks for it, and a variable
+; is found by walking the shell's variables and then the environment, so the
+; answer is kept until IFS is set or unset: %sh-var-set! and %sh-var-unset!,
+; which every change of a variable goes through, empty it.  A prefix assignment
+; and its putting back unset the name first, so they empty it too.  Above the
+; setter, which the file calls as it loads.
+(def %sh-ifs-kept ())
+(set! %image-transients (pair (lit %sh-ifs-kept) %image-transients))
+
+(def %sh-ifs-forget
+  (fn (_ name) (match ((string=? name "IFS") (set! %sh-ifs-kept ())) (#t ()))))
+
 (def %sh-var-set!
   (fn (_ name value)
-    (when (%sh-readonly? name) (%sh-readonly-refuse name))
-    (unless (null? %sh-hashed) (%sh-hashed-forget name))
+    (match ((%sh-readonly? name) (%sh-readonly-refuse name)) (#t ()))
+    (match ((null? %sh-hashed) ()) (#t (%sh-hashed-forget name)))
+    (%sh-ifs-forget name)
     (match
-      ((if (null? %sh-opt-allexport) (not (null? (%sh-table-get name %sh-vars))) ())
+      ((%sh-var-in-table? name)
         (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))
-      ((%sh-var-exported? name)
-        (do
-          (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
-          (sh-setenv name value)))
+      ((%sh-var-exported? name) (%sh-var-set-env name value))
       ((null? %sh-opt-allexport)
         (set! %sh-vars (pair (pair name value) (%sh-table-without name %sh-vars))))
-      (#t
-        (do
-          (set! %sh-vars (%sh-table-without name %sh-vars))
-          (sh-setenv name value))))))
+      (#t (%sh-var-set-exported name value)))))
+
+; Whether NAME is one of the shell's own variables, with `set -a` off.
+(def %sh-var-in-table?
+  (fn (_ name)
+    (match
+      ((null? %sh-opt-allexport)
+        (match ((null? (%sh-table-get name %sh-vars)) ()) (#t #t)))
+      (#t ()))))
+
+(def %sh-var-set-env
+  (fn (_ name value)
+    (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
+    (sh-setenv name value)))
+
+(def %sh-var-set-exported
+  (fn (_ name value)
+    (set! %sh-vars (%sh-table-without name %sh-vars))
+    (sh-setenv name value)))
 
 ; Unset NAME everywhere, the export attribute included.
 (def %sh-var-unset!
   (fn (_ name)
-    (when (%sh-readonly? name) (%sh-readonly-refuse name))
-    (unless (null? %sh-hashed) (%sh-hashed-forget name))
+    (match ((%sh-readonly? name) (%sh-readonly-refuse name)) (#t ()))
+    (match ((null? %sh-hashed) ()) (#t (%sh-hashed-forget name)))
+    (%sh-ifs-forget name)
     (set! %sh-vars (%sh-table-without name %sh-vars))
     (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
     (sh-unsetenv name)))
@@ -911,20 +937,28 @@
 
 (def %sh-var-value
   (fn (_ name)
-    (do
+    (match
       ; A name that begins with a letter or underscore is a variable's: no
       ; special's name does, so the table is not asked.
-      (def special
+      ((= (string-length name) 0) (%sh-var-value-of-name name))
+      ((%sh-name-start? (string-ref name 0)) (%sh-var-value-of-name name))
+      (#t (%sh-var-value-special name (%sh-table-get name %sh-special-vars))))))
+
+(def %sh-var-value-special
+  (fn (_ name special)
+    (match
+      ((null? special)
         (match
-          ((not (fx<? 0 (string-length name))) ())
-          ((%sh-name-start? (string-ref name 0)) ())
-          (#t (%sh-table-get name %sh-special-vars))))
-      (match
-        ((not (null? special)) (special))
-        ((%all-digits? name) (%sh-arg-at (%sh-digits-int name)))
-        ; An unset variable expands to the empty string, which is POSIX
-        ; default -- there is no `set -u` here to make it an error.
-        (#t (do (def v (%sh-var-get name)) (if (null? v) "" v)))))))
+          ((%all-digits? name) (%sh-arg-at (%sh-digits-int name)))
+          (#t (%sh-var-value-of-name name))))
+      (#t (special)))))
+
+; An unset variable expands to the empty string, which is POSIX default --
+; there is no `set -u` here to make it an error.
+(def %sh-var-value-of-name
+  (fn (_ name)
+    (def v (%sh-var-get name))
+    (match ((null? v) "") (#t v))))
 
 ; The end of the name run starting at I.
 (def %sh-name-end
@@ -1205,10 +1239,18 @@
             (set! %sh-opt-xtrace trace)
             text))))))
 
+; IFS as the shell has it now, kept since it was last set or unset (see
+; %sh-ifs-kept).
 (def %sh-ifs
   (fn (_)
-    (let ((v (%sh-var-get "IFS")))
-      (if (null? v) %sh-ifs-default v))))
+    (match
+      ((null? %sh-ifs-kept) (%sh-ifs-keep (%sh-var-get "IFS")))
+      (#t %sh-ifs-kept))))
+
+(def %sh-ifs-keep
+  (fn (_ v)
+    (set! %sh-ifs-kept (match ((null? v) %sh-ifs-default) (#t v)))
+    %sh-ifs-kept))
 
 (def %sh-in-ifs? (fn (_ c ifs) (%sh-str-has-char? ifs c)))
 
@@ -1219,34 +1261,39 @@
 (def %sh-has-char-from?
   (fn (self text c i n)
     (match
-      ((not (fx<? i n)) ())
-      ((= (string-ref text i) c) #t)
-      (#t (self text c (fx+ i 1) n)))))
+      ((fx<? i n)
+        (match ((= (string-ref text i) c) #t) (#t (self text c (fx+ i 1) n))))
+      (#t ()))))
 
 ; Whether TEXT holds an IFS character at I or after, before N.
 (def %sh-has-ifs-from?
   (fn (self text ifs i n)
     (match
-      ((not (fx<? i n)) ())
-      ((%sh-in-ifs? (string-ref text i) ifs) #t)
-      (#t (self text ifs (fx+ i 1) n)))))
+      ((fx<? i n)
+        (match
+          ((%sh-in-ifs? (string-ref text i) ifs) #t)
+          (#t (self text ifs (fx+ i 1) n))))
+      (#t ()))))
 
 ; How far a run of IFS WHITESPACE reaches from I.
 (def %sh-ifs-ws-end
   (fn (self text i n ifs)
-    (if (and (< i n)
-             (and (%sh-ws-char? (string-ref text i))
-                  (%sh-in-ifs? (string-ref text i) ifs)))
-      (self text (+ i 1) n ifs)
-      i)))
+    (match
+      ((fx<? i n)
+        (match
+          ((%sh-ws-char? (string-ref text i))
+            (match
+              ((%sh-in-ifs? (string-ref text i) ifs) (self text (fx+ i 1) n ifs))
+              (#t i)))
+          (#t i)))
+      (#t i))))
 
 ; The fields of TEXT, N long, which holds a character of IFS.  A leading run
 ; of IFS whitespace is skipped rather than delimiting.
 (def %sh-ifs-split
   (fn (_ text n ifs)
-    (do
-      (def i (%sh-ifs-ws-end text 0 n ifs))
-      (%sh-ifs-fields text i n ifs i () ()))))
+    (def i (%sh-ifs-ws-end text 0 n ifs))
+    (%sh-ifs-fields text i n ifs i () ())))
 
 ; The fields of TEXT from I, walked by index: FROM is where the field in hand
 ; began, and a field is cut out once, when it ends.  STARTED? is whether one is
@@ -1254,31 +1301,38 @@
 (def %sh-ifs-fields
   (fn (self text i n ifs from started? acc)
     (match
-      ((not (fx<? i n))
-        (reverse (if started? (pair (substring text from n) acc) acc)))
-      ((not (%sh-in-ifs? (string-ref text i) ifs))
-        (self text (fx+ i 1) n ifs (if started? from i) #t acc))
-      ; A delimiter.  Take any IFS whitespace around it, and at most ONE
-      ; non-whitespace delimiter with it.
-      (#t
-        (let ((after-ws (%sh-ifs-ws-end text i n ifs)))
-          (let ((hard? (%sh-ifs-hard-at? text after-ws n ifs)))
-            (let ((j (%sh-ifs-ws-end text (if hard? (fx+ after-ws 1) after-ws)
-                                     n ifs)))
-              ; A whitespace-only delimiter never makes an empty field; a
-              ; non-whitespace one does.
-              (if (if hard? #t started?)
-                (self text j n ifs j (if hard? (fx<? j n) ())
-                      (pair (substring text from i) acc))
-                (self text j n ifs j () acc)))))))))
+      ((fx<? i n)
+        (match
+          ((%sh-in-ifs? (string-ref text i) ifs)
+            (%sh-ifs-delimiter self text i n ifs from started? acc
+              (%sh-ifs-ws-end text i n ifs)))
+          (#t (self text (fx+ i 1) n ifs (match (started? from) (#t i)) #t acc))))
+      (#t (reverse
+            (match (started? (pair (substring text from n) acc)) (#t acc)))))))
+
+; A delimiter at I, its IFS whitespace reaching AFTER-WS.  Any IFS whitespace
+; around it is taken with it, and at most ONE non-whitespace delimiter.
+(def %sh-ifs-delimiter
+  (fn (_ fields text i n ifs from started? acc after-ws)
+    (def hard? (%sh-ifs-hard-at? text after-ws n ifs))
+    (def j (%sh-ifs-ws-end text (match (hard? (fx+ after-ws 1)) (#t after-ws))
+                           n ifs))
+    (match
+      ; A whitespace-only delimiter never makes an empty field; a
+      ; non-whitespace one does.
+      (hard? (fields text j n ifs j (fx<? j n) (pair (substring text from i) acc)))
+      (started? (fields text j n ifs j () (pair (substring text from i) acc)))
+      (#t (fields text j n ifs j () acc)))))
 
 ; Whether an IFS character that is not whitespace stands at I.
 (def %sh-ifs-hard-at?
   (fn (_ text i n ifs)
     (match
-      ((not (fx<? i n)) ())
-      ((%sh-ws-char? (string-ref text i)) ())
-      (#t (%sh-in-ifs? (string-ref text i) ifs)))))
+      ((fx<? i n)
+        (match
+          ((%sh-ws-char? (string-ref text i)) ())
+          (#t (%sh-in-ifs? (string-ref text i) ifs))))
+      (#t ()))))
 
 ; --- The word being built ---------------------------------------------------
 ;
@@ -1310,9 +1364,9 @@
 ; showed: unescaping unconditionally ate it.
 (def %sh-field-plain
   (fn (_ f)
-    (if (%sh-field-esc? f)
-      (%sh-glob-unescape (%sh-field-text f))
-      (%sh-field-text f))))
+    (match
+      ((%sh-field-esc? f) (%sh-glob-unescape (%sh-field-text f)))
+      (#t (%sh-field-text f)))))
 
 (def %sh-acc (fn (_ fields pieces started glob? esc?)
                (list fields pieces started glob? esc?)))
@@ -1336,8 +1390,8 @@
     (%sh-acc (%sh-acc-fields a)
              (pair text (%sh-acc-pieces a))
              #t
-             (or (%sh-acc-glob? a) glob?)
-             (or (%sh-acc-esc? a) esc?))))
+             (match ((%sh-acc-glob? a) #t) (#t glob?))
+             (match ((%sh-acc-esc? a) #t) (#t esc?)))))
 
 ; Bare text: its metacharacters are live, so META? is what makes the field a
 ; pattern, and nothing here is escaped.
@@ -1349,7 +1403,7 @@
 (def %sh-acc-add-literal
   (fn (_ a text meta?)
     (%sh-acc-add-piece a
-      (if meta? (%sh-glob-escape-all text) text)
+      (match (meta? (%sh-glob-escape-all text)) (#t text))
       ()
       meta?)))
 
@@ -1359,12 +1413,13 @@
 ; doubled and %sh-field-plain takes it back off.
 (def %sh-acc-add-value
   (fn (_ a text)
-    (if (%sh-has-glob-inert? text)
-      (%sh-acc-add-piece a
-        (%sh-escape-chars text %sh-glob-inert)
-        (%sh-has-active-glob? text)
-        #t)
-      (%sh-acc-add a text (%sh-has-active-glob? text)))))
+    (match
+      ((%sh-has-glob-inert? text)
+        (%sh-acc-add-piece a
+          (%sh-escape-chars text %sh-glob-inert)
+          (%sh-has-active-glob? text)
+          #t))
+      (#t (%sh-acc-add a text (%sh-has-active-glob? text))))))
 
 ; Take the mark back off: the field in hand is not a field after all.  Only
 ; "$@" with no positional parameters needs this -- see %sh-add-args.
@@ -1391,9 +1446,9 @@
 (def %sh-acc-finish
   (fn (_ a)
     (reverse
-      (if (%sh-acc-started a)
-        (pair (%sh-acc-field a) (%sh-acc-fields a))
-        (%sh-acc-fields a)))))
+      (match
+        ((%sh-acc-started a) (pair (%sh-acc-field a) (%sh-acc-fields a)))
+        (#t (%sh-acc-fields a))))))
 
 ; --- Keeping quoted glob characters literal ---------------------------------
 ;
@@ -1433,9 +1488,11 @@
 (def %sh-has-char-in-from?
   (fn (self text chars i n)
     (match
-      ((not (fx<? i n)) ())
-      ((%sh-char-in? (string-ref text i) chars) #t)
-      (#t (self text chars (fx+ i 1) n)))))
+      ((fx<? i n)
+        (match
+          ((%sh-char-in? (string-ref text i) chars) #t)
+          (#t (self text chars (fx+ i 1) n))))
+      (#t ()))))
 
 (def %sh-has-glob-meta? (fn (_ text) (%sh-has-char-in? text %sh-glob-meta)))
 (def %sh-has-active-glob? (fn (_ text) (%sh-has-char-in? text %sh-glob-active)))
@@ -1445,19 +1502,20 @@
 ; every caller already knows there is one, either from the run scan that found
 ; the end of this text or from %sh-has-char-in? on an expansion's result.
 (def %sh-escape-chars
-  (fn (_ text chars)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i out)
-          (if (>= i n)
-            (%ash-join "" (reverse out))
-            (let ((here (substring text i (+ i 1))))
-              (self (+ i 1)
-                (pair (if (%sh-char-in? (string-ref text i) chars)
-                        (string-append "\\" here)
-                        here)
-                      out))))))
-      (go 0 ()))))
+  (fn (_ text chars) (%sh-escape-from text chars 0 0 (string-length text) ())))
+
+; TEXT from I with each of CHARS escaped: the text from START up to each one is
+; cut out once, and a backslash goes in before the character.
+(def %sh-escape-from
+  (fn (self text chars i start n pieces)
+    (match
+      ((fx<? i n)
+        (match
+          ((%sh-char-in? (string-ref text i) chars)
+            (self text chars (fx+ i 1) i n
+                  (pair "\\" (pair (substring text start i) pieces))))
+          (#t (self text chars (fx+ i 1) start n pieces))))
+      (#t (%ash-join "" (reverse (pair (substring text start n) pieces)))))))
 
 ; Quoted text: nothing in it may match, so every metacharacter goes in escaped.
 (def %sh-glob-escape-all (fn (_ text) (%sh-escape-chars text %sh-glob-meta)))
@@ -1468,10 +1526,10 @@
 ; ahead of it.
 (def %sh-add-pieces
   (fn (self a pieces)
-    (if (null? pieces)
-      a
-      (self (%sh-acc-add-value (%sh-acc-break a) (first pieces))
-            (rest pieces)))))
+    (match
+      ((null? pieces) a)
+      (#t (self (%sh-acc-add-value (%sh-acc-break a) (first pieces))
+                (rest pieces))))))
 
 ; Splice expanded TEXT into the accumulator, splitting it on IFS.
 ;
@@ -1480,15 +1538,14 @@
 ; empty.  Only a character of IFS counts: with IFS=: a space is text.
 (def %sh-add-split
   (fn (_ a text)
-    (do
-      (def ifs (%sh-ifs))
-      (def n (string-length text))
-      (match
-        ((%sh-has-ifs-from? text ifs 0 n)
-          (%sh-add-split-fields a text n ifs (%sh-ifs-split text n ifs)))
-        ; An empty value changes nothing.
-        ((fx<? 0 n) (%sh-acc-add-value a text))
-        (#t a)))))
+    (def ifs (%sh-ifs))
+    (def n (string-length text))
+    (match
+      ((%sh-has-ifs-from? text ifs 0 n)
+        (%sh-add-split-fields a text n ifs (%sh-ifs-split text n ifs)))
+      ; An empty value changes nothing.
+      ((fx<? 0 n) (%sh-acc-add-value a text))
+      (#t a))))
 
 ; Splice the FIELDS of TEXT, N long, which holds a character of IFS.  The
 ; first field joins the field in hand and each later one starts its own.  An
@@ -1500,23 +1557,25 @@
 ; has started.
 (def %sh-add-split-fields
   (fn (_ a text n ifs fields)
-    (do
-      (def opened
-        (match
-          ((null? (%sh-acc-started a)) a)
-          ((null? fields) (%sh-acc-break a))
-          ((= 0 (string-length (first fields))) a)
-          ((%sh-in-ifs? (string-ref text 0) ifs) (%sh-acc-break a))
-          (#t a)))
+    (def opened
       (match
-        ((null? fields) opened)
-        (#t
-          (do
-            (def filled (%sh-add-pieces (%sh-acc-add-value opened (first fields))
-                                        (rest fields)))
-            (if (%sh-in-ifs? (string-ref text (fx+ n -1)) ifs)
-              (%sh-acc-break filled)
-              filled)))))))
+        ((null? (%sh-acc-started a)) a)
+        ((null? fields) (%sh-acc-break a))
+        ((= 0 (string-length (first fields))) a)
+        ((%sh-in-ifs? (string-ref text 0) ifs) (%sh-acc-break a))
+        (#t a)))
+    (match
+      ((null? fields) opened)
+      (#t (%sh-add-split-closed text n ifs
+            (%sh-add-pieces (%sh-acc-add-value opened (first fields))
+                            (rest fields)))))))
+
+; FILLED, closed when TEXT ends in an IFS character.
+(def %sh-add-split-closed
+  (fn (_ text n ifs filled)
+    (match
+      ((%sh-in-ifs? (string-ref text (fx+ n -1)) ifs) (%sh-acc-break filled))
+      (#t filled))))
 
 ; "$@" -- one field per positional parameter.
 ;
@@ -1631,17 +1690,18 @@
 ; entire point of quoting it.
 (def %sh-add-expansion
   (fn (_ a mode text split?)
-    (if (= mode %sh-mode-bare)
+    (match
       ; An unquoted expansion's RESULT is subject to both splitting and
       ; globbing -- `X='*'; echo $X` globs, `echo "$X"` does not.  In a
       ; pattern a backslash it holds escapes the character after it, as one
       ; written in the pattern would, so it goes in as it is.
-      (match
-        ((eq? split? (lit pattern))
-          (%sh-acc-add a text (%sh-has-active-glob? text)))
-        ((%sh-splitting? split?) (%sh-add-split a text))
-        (#t (%sh-acc-add-value a text)))
-      (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
+      ((= mode %sh-mode-bare)
+        (match
+          ((eq? split? (lit pattern))
+            (%sh-acc-add a text (%sh-has-active-glob? text)))
+          ((%sh-splitting? split?) (%sh-add-split a text))
+          (#t (%sh-acc-add-value a text))))
+      (#t (%sh-acc-add-literal a text (%sh-has-glob-meta? text))))))
 
 ; Push a word's fields onto a REVERSED accumulator, in order.  Both callers
 ; build their word list backwards and reverse at the end.
@@ -2628,10 +2688,12 @@
 (def %sh-lead-run
   (fn (_ s n mode0 assign?)
     (match
-      ((not (= mode0 %sh-mode-bare)) (%sh-run 0 ()))
-      ((= n 0) (%sh-run 0 ()))
-      ((= (string-ref s 0) #\~) (%sh-run 0 ()))
-      (#t (%sh-plain-run s 0 n mode0 () assign?)))))
+      ((= mode0 %sh-mode-bare)
+        (match
+          ((= n 0) (%sh-run 0 ()))
+          ((= (string-ref s 0) #\~) (%sh-run 0 ()))
+          (#t (%sh-plain-run s 0 n mode0 () assign?))))
+      (#t (%sh-run 0 ())))))
 
 ; The walk over a word that is not one plain run, from START with the
 ; accumulator A0.  It is a function of its own so that a plain word, which
@@ -2639,106 +2701,123 @@
 ; word, made on each call.
 (def %sh-expand-walk
   (fn (_ s n mode0 split? assign? start a0)
-    (do
-      (def eq (if assign? (%sh-first-eq s 0 n) -1))
-      ; Every character of every word comes through here, so the walk steps on
-      ; the integer doors and asks with `match`.
-      (def go
-        (fn (self i mode a)
-          (if (not (fx<? i n))
-            (%sh-acc-finish a)
-            (do
-              (def c (string-ref s i))
-              (match
-                ; Inside single quotes: literal until the closing quote.
-                ((= mode %sh-mode-sq)
-                  (if (= c #\')
-                    (self (fx+ i 1) %sh-mode-bare a)
-                    (do
-                      (def r (%sh-plain-run s i n mode () ()))
-                      (def e (%sh-run-end r))
-                      (self e mode
-                        (%sh-acc-add-literal a (substring s i e)
-                          (%sh-run-meta? r))))))
-                ; A quote mark switches region and starts a field.
-                ((if (= c #\') (= mode %sh-mode-bare) ())
-                  (self (fx+ i 1) %sh-mode-sq (%sh-acc-open a)))
-                ((if (= c #\") (= mode %sh-mode-bare) ())
-                  (self (fx+ i 1) %sh-mode-dq (%sh-acc-open a)))
-                ((if (= c #\") (= mode %sh-mode-dq) ())
-                  (self (fx+ i 1) %sh-mode-bare (%sh-acc-open a)))
-                ; A backslash emits what it protects and resumes past it, so a
-                ; `$` it protected stays a `$`. A trailing backslash protects
-                ; nothing and stands for itself; it is claimed here, because the
-                ; plain-run scanner cannot consume a backslash and the arm below
-                ; needs a character to protect.
-                ((if (= c #\\) (not (fx<? (fx+ i 1) n)) ())
-                  (self (fx+ i 1) mode
-                    (%sh-acc-add-literal a (substring s i (fx+ i 1)) #t)))
-                ((= c #\\)
-                  (do
-                    (def d (string-ref s (fx+ i 1)))
-                    (def text
-                      (if (%sh-escapable-in? mode d)
-                        (substring s (fx+ i 1) (fx+ i 2))
-                        (substring s i (fx+ i 2))))
-                    (self (fx+ i 2) mode
-                      (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
-                ; The older backtick substitution.
-                ((= c #\`)
-                  (do
-                    (def e (%sh-bt-end s (fx+ i 1) n))
-                    (if (fx<? e 0)
-                      (self (fx+ i 1) mode
-                        (%sh-acc-add a (substring s i (fx+ i 1)) ()))
-                      (self (fx+ e 1) mode
-                        (%sh-add-expansion a mode
-                          (%sh-cmd-subst
-                            (%sh-bt-unescape (substring s (fx+ i 1) e)))
-                          split?)))))
-                ((= c #\$) (%sh-expand-dollar self s i n mode a split?))
-                ; A tilde where one may expand; an ordinary character where
-                ; not.  It is asked here rather than scanned for beforehand
-                ; because this is the only place that knows the `~` is bare.
-                ((if (= c #\~) (= mode %sh-mode-bare) ())
-                  (do
-                    (def home (%sh-tilde-home s i n assign? eq))
-                    (if (null? home)
-                      (self (fx+ i 1) mode (%sh-acc-add a "~" ()))
-                      ; The result is LITERAL: a home directory with a space
-                      ; in it is one field, and one with a `*` is not a
-                      ; pattern.
-                      (self (fx+ i 1) mode
-                        (%sh-acc-add-literal a home
-                          (%sh-has-glob-meta? home))))))
-                ; Ordinary text goes in a run at a time: a plain word is one
-                ; substring rather than one per character. A bare `*` is the
-                ; glob; the same character inside quotes is not, so the run is
-                ; escaped or not by the mode it was read in.
-                (#t
-                  (do
-                    (def r (%sh-plain-run s i n mode ()
-                             (if assign? (= mode %sh-mode-bare) ())))
-                    (def e (%sh-run-end r))
-                    (def meta? (%sh-run-meta? r))
-                    ; A run of nothing would not advance, which would hang
-                    ; rather than answer. Every non-plain character is
-                    ; claimed by an earlier arm, so this is unreachable and
-                    ; says so if it ever is.
-                    (when (= e i)
-                      (error "internal: expansion made no progress"))
-                    (def run (substring s i e))
-                    (self e mode
-                      (match
-                        ; The word of `${x:-word}` in place is split
-                        ; where it is not quoted, its literal text as
-                        ; well as its expansions (see %sh-add-word).
-                        ((= mode %sh-mode-bare)
-                          (if (eq? split? (lit fields))
-                            (%sh-add-split a run)
-                            (%sh-acc-add a run meta?)))
-                        (#t (%sh-acc-add-literal a run meta?)))))))))))
-      (go start mode0 a0))))
+    (def eq (match (assign? (%sh-first-eq s 0 n)) (#t -1)))
+    ; Every character of every word comes through here, so the walk steps on
+    ; the integer doors and asks with `match`, reading the character in each
+    ; clause rather than binding it.  A clause that needs a binding calls a
+    ; function that makes it, as a clause holds one form.
+    (def go
+      (fn (self i mode a)
+        (match
+          ((fx<? i n)
+            (match
+              ; Inside single quotes: literal until the closing quote.
+              ((= mode %sh-mode-sq)
+                (match
+                  ((= (string-ref s i) #\') (self (fx+ i 1) %sh-mode-bare a))
+                  (#t (%sh-walk-quoted self s i n mode a))))
+              ; A quote mark switches region and starts a field.
+              ((= (string-ref s i) #\')
+                (match
+                  ((= mode %sh-mode-bare)
+                    (self (fx+ i 1) %sh-mode-sq (%sh-acc-open a)))
+                  (#t (%sh-walk-run self s i n mode a split? assign?))))
+              ((= (string-ref s i) #\")
+                (match
+                  ((= mode %sh-mode-bare)
+                    (self (fx+ i 1) %sh-mode-dq (%sh-acc-open a)))
+                  ((= mode %sh-mode-dq)
+                    (self (fx+ i 1) %sh-mode-bare (%sh-acc-open a)))
+                  (#t (%sh-walk-run self s i n mode a split? assign?))))
+              ; A backslash emits what it protects and resumes past it, so a
+              ; `$` it protected stays a `$`.  A trailing backslash protects
+              ; nothing and stands for itself; it is claimed here, because the
+              ; plain-run scanner cannot consume a backslash and the escape
+              ; needs a character to protect.
+              ((= (string-ref s i) #\\)
+                (match
+                  ((fx<? (fx+ i 1) n) (%sh-walk-escape self s i mode a))
+                  (#t (self (fx+ i 1) mode
+                        (%sh-acc-add-literal a (substring s i (fx+ i 1)) #t)))))
+              ; The older backtick substitution.
+              ((= (string-ref s i) #\`)
+                (%sh-walk-backtick self s i n mode a split?
+                  (%sh-bt-end s (fx+ i 1) n)))
+              ((= (string-ref s i) #\$) (%sh-expand-dollar self s i n mode a split?))
+              ; A tilde where one may expand; an ordinary character where
+              ; not.  It is asked here rather than scanned for beforehand
+              ; because this is the only place that knows the `~` is bare.
+              ((= (string-ref s i) #\~)
+                (match
+                  ((= mode %sh-mode-bare)
+                    (%sh-walk-tilde self i mode a (%sh-tilde-home s i n assign? eq)))
+                  (#t (%sh-walk-run self s i n mode a split? assign?))))
+              (#t (%sh-walk-run self s i n mode a split? assign?))))
+          (#t (%sh-acc-finish a)))))
+    (go start mode0 a0)))
+
+; Single-quoted text from I, up to its closing quote.
+(def %sh-walk-quoted
+  (fn (_ go s i n mode a)
+    (def r (%sh-plain-run s i n mode () ()))
+    (def e (%sh-run-end r))
+    (go e mode (%sh-acc-add-literal a (substring s i e) (%sh-run-meta? r)))))
+
+; The backslash at I and the character it protects.
+(def %sh-walk-escape
+  (fn (_ go s i mode a)
+    (def text
+      (match
+        ((%sh-escapable-in? mode (string-ref s (fx+ i 1)))
+          (substring s (fx+ i 1) (fx+ i 2)))
+        (#t (substring s i (fx+ i 2)))))
+    (go (fx+ i 2) mode (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
+
+; The backtick at I, whose closing one is at E, or a literal one when E is -1.
+(def %sh-walk-backtick
+  (fn (_ go s i n mode a split? e)
+    (match
+      ((fx<? e 0) (go (fx+ i 1) mode (%sh-acc-add a (substring s i (fx+ i 1)) ())))
+      (#t (go (fx+ e 1) mode
+            (%sh-add-expansion a mode
+              (%sh-cmd-subst (%sh-bt-unescape (substring s (fx+ i 1) e)))
+              split?))))))
+
+; The bare `~` at I, which HOME, when there is one, stands for.  The result is
+; LITERAL: a home directory with a space in it is one field, and one with a `*`
+; is not a pattern.
+(def %sh-walk-tilde
+  (fn (_ go i mode a home)
+    (match
+      ((null? home) (go (fx+ i 1) mode (%sh-acc-add a "~" ())))
+      (#t (go (fx+ i 1) mode
+            (%sh-acc-add-literal a home (%sh-has-glob-meta? home)))))))
+
+; Ordinary text goes in a run at a time: a plain word is one substring rather
+; than one per character.  A bare `*` is the glob; the same character inside
+; quotes is not, so the run is escaped or not by the mode it was read in.
+(def %sh-walk-run
+  (fn (_ go s i n mode a split? assign?)
+    (def r (%sh-plain-run s i n mode ()
+             (match (assign? (= mode %sh-mode-bare)) (#t ()))))
+    (def e (%sh-run-end r))
+    ; A run of nothing would not advance, which would hang rather than answer.
+    ; Every non-plain character is claimed by an earlier clause, so this is
+    ; unreachable and says so if it ever is.
+    (match ((= e i) (error "internal: expansion made no progress")) (#t ()))
+    (go e mode
+      (%sh-walk-run-add a mode (substring s i e) (%sh-run-meta? r) split?))))
+
+; The word of `${x:-word}` in place is split where it is not quoted, its
+; literal text as well as its expansions (see %sh-add-word).
+(def %sh-walk-run-add
+  (fn (_ a mode run meta? split?)
+    (match
+      ((= mode %sh-mode-bare)
+        (match
+          ((eq? split? (lit fields)) (%sh-add-split a run))
+          (#t (%sh-acc-add a run meta?))))
+      (#t (%sh-acc-add-literal a run meta?)))))
 
 ; SPLIT? is off for the two places POSIX does not split: a `case` subject, and
 ; a redirection target (where more than one field is an ambiguous redirect).
@@ -2760,22 +2839,28 @@
 ; character after it (see %sh-add-expansion).
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
-    (do
-      (def n (string-length s))
-      (if (eq? split? (lit fields))
-        (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty)
-        (do
-          (def lead (%sh-lead-run s n mode0 assign?))
+    (def n (string-length s))
+    (match
+      ((eq? split? (lit fields))
+        (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty))
+      (#t (%sh-expand-led s n mode0 split? assign?
+            (%sh-lead-run s n mode0 assign?))))))
+
+; The word S past the run LEAD it opens with.
+(def %sh-expand-led
+  (fn (_ s n mode0 split? assign? lead)
+    (match
+      ((= (%sh-run-end lead) 0)
+        (%sh-expand-walk s n mode0 split? assign? 0
           (match
-            ((= (%sh-run-end lead) 0)
-              (%sh-expand-walk s n mode0 split? assign? 0
-                (if (= mode0 %sh-mode-bare) %sh-acc-empty (%sh-acc-open %sh-acc-empty))))
-            ((= (%sh-run-end lead) n)
-              (list (%sh-field s (%sh-run-meta? lead) ())))
-            (#t
-              (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
-                (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
-                             (%sh-run-meta? lead))))))))))
+            ((= mode0 %sh-mode-bare) %sh-acc-empty)
+            (#t (%sh-acc-open %sh-acc-empty)))))
+      ((= (%sh-run-end lead) n)
+        (list (%sh-field s (%sh-run-meta? lead) ())))
+      (#t
+        (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
+          (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
+                       (%sh-run-meta? lead)))))))
 
 ; Whether C names a one-character parameter: $? $$ $! $- $# $@ $* and $1..$9.
 ; A single digit only, per POSIX: `$10` is `$1` followed by a literal 0, and
@@ -2793,70 +2878,88 @@
       (#t (%sh-digit? c)))))
 
 ; The `$` arm, lifted out so the walk above stays readable.  CONT is the
-; walker's own continuation, resumed at an index with an accumulator.
+; walker's own continuation, resumed at an index with an accumulator.  A `$`
+; at the very end is a literal `$`.
 (def %sh-expand-dollar
   (fn (_ cont s i n mode a split?)
-    (do
-      ; Two local helpers, bound here so they stay local: this file already
-      ; has more module-level %-names than it needs, and neither is
-      ; meaningful outside this function.
-      (def literal-dollar
-        (fn (_) (cont (fx+ i 1) mode (%sh-acc-add a "$" ()))))
-      (def substitute
-        (fn (_ next text)
-          (cont next mode (%sh-add-expansion a mode text split?))))
-      ; J is the character after the `$`.
-      (def j (fx+ i 1))
-      ; A `$` at the very end is a literal `$`.
-      (if (not (fx<? j n))
-        (%sh-acc-finish (%sh-acc-add a "$" ()))
-        (do
-          (def d (string-ref s j))
-          (match
-            ; $NAME, the most common, so asked first.
-            ((%sh-name-start? d)
-              (do
-                (def e (%sh-name-end s (fx+ j 1) n))
-                (substitute e (%sh-var-value-checked (substring s j e)))))
-            ; $( ... ) -- a command substitution.
-            ((= d #\()
-              (do
-                (def e (%sh-cs-end s (fx+ j 1) n 0))
-                (if (fx<? e 0)
-                  (literal-dollar)
-                  (substitute (fx+ e 1)
-                    (if (%sh-arith-at? s (fx+ j 1) e)
-                      (%sh-arith-eval (%sh-arith-text s (fx+ j 2) (fx+ e -1)))
-                      (%sh-cmd-subst (substring s (fx+ j 1) e)))))))
-            ; ${NAME}
-            ((= d #\{)
-              (do
-                (def e (%sh-brace-end s (fx+ j 1) n 0))
-                (if (fx<? e 0)
-                  (literal-dollar)
-                  (do
-                    (def inner (substring s (fx+ j 1) e))
-                    ; `${@}` and `${*}` ask exactly what `$@` and `$*` ask, so
-                    ; they are answered in the same place.
-                    (if (if (string=? inner "@") #t (string=? inner "*"))
-                      (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?))
-                      ; A value operator that fired answers its word to stand
-                      ; here, rather than text (see %sh-param-default).
-                      (do
-                        (def r (%sh-brace-expand inner))
-                        (if (pair? r)
-                          (cont (fx+ e 1) mode (%sh-add-word a mode (rest r) split?))
-                          (substitute (fx+ e 1) r))))))))
-            ; `$@` and `$*` are the specials that are not one string -- see
-            ; %sh-add-all-params.
-            ((if (= d #\@) #t (= d #\*))
-              (cont (fx+ j 1) mode
-                (%sh-add-all-params a (if (= d #\@) "@" "*") mode split?)))
-            ((%sh-special-param? d)
-              (substitute (fx+ j 1)
-                (%sh-var-value-checked (substring s j (fx+ j 1)))))
-            ; $ followed by anything else is a literal $.
-            (#t (literal-dollar))))))))
+    (match
+      ((fx<? (fx+ i 1) n)
+        (%sh-dollar-at cont s i (fx+ i 1) n mode a split? (string-ref s (fx+ i 1))))
+      (#t (%sh-acc-finish (%sh-acc-add a "$" ()))))))
+
+; The `$` at I, J the index after it and D the character there.
+(def %sh-dollar-at
+  (fn (_ cont s i j n mode a split? d)
+    (match
+      ; $NAME, the most common, so asked first.
+      ((%sh-name-start? d)
+        (%sh-dollar-name cont s j mode a split? (%sh-name-end s (fx+ j 1) n)))
+      ; $( ... ) -- a command substitution.
+      ((= d #\()
+        (%sh-dollar-paren cont s i j mode a split? (%sh-cs-end s (fx+ j 1) n 0)))
+      ; ${NAME}
+      ((= d #\{)
+        (%sh-dollar-brace cont s i j mode a split? (%sh-brace-end s (fx+ j 1) n 0)))
+      ; `$@` and `$*` are the specials that are not one string -- see
+      ; %sh-add-all-params.
+      ((= d #\@) (cont (fx+ j 1) mode (%sh-add-all-params a "@" mode split?)))
+      ((= d #\*) (cont (fx+ j 1) mode (%sh-add-all-params a "*" mode split?)))
+      ((%sh-special-param? d)
+        (%sh-substituted cont (fx+ j 1) mode a split?
+          (%sh-var-value-checked (substring s j (fx+ j 1)))))
+      ; $ followed by anything else is a literal $.
+      (#t (%sh-dollar-literal cont i mode a)))))
+
+; The walk on at NEXT with TEXT, an expansion's value, added.
+(def %sh-substituted
+  (fn (_ cont next mode a split? text)
+    (cont next mode (%sh-add-expansion a mode text split?))))
+
+(def %sh-dollar-literal
+  (fn (_ cont i mode a) (cont (fx+ i 1) mode (%sh-acc-add a "$" ()))))
+
+; The name from J to E.
+(def %sh-dollar-name
+  (fn (_ cont s j mode a split? e)
+    (%sh-substituted cont e mode a split?
+      (%sh-var-value-checked (substring s j e)))))
+
+; The substitution whose `(` is at J and whose `)` is at E, or -1.
+(def %sh-dollar-paren
+  (fn (_ cont s i j mode a split? e)
+    (match
+      ((fx<? e 0) (%sh-dollar-literal cont i mode a))
+      (#t (%sh-substituted cont (fx+ e 1) mode a split?
+            (match
+              ((%sh-arith-at? s (fx+ j 1) e)
+                (%sh-arith-eval (%sh-arith-text s (fx+ j 2) (fx+ e -1))))
+              (#t (%sh-cmd-subst (substring s (fx+ j 1) e)))))))))
+
+; The `${` at J whose `}` is at E, or -1.
+(def %sh-dollar-brace
+  (fn (_ cont s i j mode a split? e)
+    (match
+      ((fx<? e 0) (%sh-dollar-literal cont i mode a))
+      (#t (%sh-dollar-braced cont e mode a split? (substring s (fx+ j 1) e))))))
+
+(def %sh-dollar-braced
+  (fn (_ cont e mode a split? inner)
+    (match
+      ; `${@}` and `${*}` ask exactly what `$@` and `$*` ask, so they are
+      ; answered in the same place.
+      ((string=? inner "@")
+        (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?)))
+      ((string=? inner "*")
+        (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?)))
+      (#t (%sh-dollar-operated cont e mode a split? (%sh-brace-expand inner))))))
+
+; A value operator that fired answers its word to stand here, rather than
+; text (see %sh-param-default).
+(def %sh-dollar-operated
+  (fn (_ cont e mode a split? r)
+    (match
+      ((pair? r) (cont (fx+ e 1) mode (%sh-add-word a mode (rest r) split?)))
+      (#t (%sh-substituted cont (fx+ e 1) mode a split? r)))))
 
 ; --- Pathname expansion -----------------------------------------------------
 ;
@@ -2870,28 +2973,31 @@
 
 ; Same short-circuit: a field with no backslash is already its own unescaping.
 (def %sh-has-backslash?
-  (fn (_ text)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i)
-          (if (>= i n)
-            ()
-            (if (= (string-ref text i) #\\) #t (self (+ i 1))))))
-      (go 0))))
+  (fn (_ text) (%sh-has-char-from? text #\\ 0 (string-length text))))
 
 (def %sh-glob-unescape
   (fn (_ text)
-    (if (not (%sh-has-backslash? text))
-      text
-      (let ((n (string-length text)))
-        (def go
-          (fn (self i out)
-            (if (>= i n)
-              (%ash-join "" (reverse out))
-              (if (and (= (string-ref text i) #\\) (< (+ i 1) n))
-                (self (+ i 2) (pair (substring text (+ i 1) (+ i 2)) out))
-                (self (+ i 1) (pair (substring text i (+ i 1)) out))))))
-        (go 0 ())))))
+    (match
+      ((%sh-has-backslash? text)
+        (%sh-unescape-from text 0 0 (string-length text) ()))
+      (#t text))))
+
+; TEXT from I with each backslash that has a character after it taken off: the
+; text from START up to each one is cut out once, and the character it
+; protected starts the next piece.
+(def %sh-unescape-from
+  (fn (self text i start n pieces)
+    (match
+      ((fx<? i n)
+        (match
+          ((= (string-ref text i) #\\)
+            (match
+              ((fx<? (fx+ i 1) n)
+                (self text (fx+ i 2) (fx+ i 1) n
+                      (pair (substring text start i) pieces)))
+              (#t (self text (fx+ i 1) start n pieces))))
+          (#t (self text (fx+ i 1) start n pieces))))
+      (#t (%ash-join "" (reverse (pair (substring text start n) pieces)))))))
 
 ; Does this text hold a glob character the user meant AS one?  Escaped ones do
 ; not count, which is the whole point of the escaping, and neither does a `[`
@@ -3097,7 +3203,7 @@
 ; included, and `''` is an empty argument rather than none.
 (def %sh-tok-mode
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-dq)) %sh-mode-dq %sh-mode-bare)))
+    (match ((eq? (first tok) (lit tok-dq)) %sh-mode-dq) (#t %sh-mode-bare))))
 
 ; ASSIGN? says this word is an assignment: a leading NAME=... of the command,
 ; or an argument to a utility whose arguments are assignments. Two POSIX rules
@@ -3111,17 +3217,16 @@
 ; %sh-tilde-pos?.
 (def %sh-expand-tok
   (fn (_ tok assign?)
-    (if (eq? (first tok) (lit tok-sq))
+    (match
       ; Single quotes suppress everything, globbing included.
-      (list (%tok-word-val tok))
-      (do
-        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
-                  (not assign?) assign?))
-        (if (not assign?)
-          (%sh-glob-fields fs)
-          ; Unsplit by construction above, so there is one field or none; the
-          ; escapes still come off, because nothing here is a pattern.
-          (list (if (null? fs) "" (%sh-field-plain (first fs)))))))))
+      ((eq? (first tok) (lit tok-sq)) (list (%tok-word-val tok)))
+      ; Unsplit, so there is one field or none; the escapes still come off,
+      ; because nothing here is a pattern.
+      (assign?
+        (list (%sh-first-plain
+                (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #f assign?))))
+      (#t (%sh-glob-fields
+            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t assign?))))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
