@@ -2899,20 +2899,25 @@
 ; matches it as one.  Both ask %sh-glob-class-end where a bracket expression
 ; ends, so they cannot disagree about it.
 (def %sh-glob-pattern?
-  (fn (_ text)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i)
-          (if (>= i n)
-            ()
-            (let ((c (string-ref text i)))
-              (match
-                ((= c #\\) (self (+ i 2)))
-                ((= c #\*) #t)
-                ((= c #\?) #t)
-                ((and (= c #\[) (>= (%sh-glob-class-end text (+ i 1) n) 0)) #t)
-                (#t (self (+ i 1))))))))
-      (go 0))))
+  (fn (_ text) (%sh-glob-pattern-from? text 0 (string-length text))))
+
+; Every word that holds a `[` -- the `[` of every test among them -- is asked
+; this, so the scan steps on the integer doors.
+(def %sh-glob-pattern-from?
+  (fn (self text i n)
+    (match
+      ((fx<? i n)
+        (match
+          ((= (string-ref text i) #\\) (self text (fx+ i 2) n))
+          ((= (string-ref text i) #\*) #t)
+          ((= (string-ref text i) #\?) #t)
+          ((= (string-ref text i) #\[)
+            (match
+              ((fx<? (%sh-glob-class-end text (fx+ i 1) n) 0)
+                (self text (fx+ i 1) n))
+              (#t #t)))
+          (#t (self text (fx+ i 1) n))))
+      (#t ()))))
 
 ; Split on UNESCAPED `/`.
 (def %sh-glob-split
@@ -3042,18 +3047,23 @@
   (fn (_ f)
     (match
       (%sh-opt-noglob (list (%sh-field-plain f)))
-      ((not (%sh-field-glob? f)) (list (%sh-field-plain f)))
-      ((not (%sh-glob-pattern? (%sh-field-text f))) (list (%sh-field-plain f)))
-      (#t
-        (do
-          (def absolute? (= (string-ref (%sh-field-text f) 0) #\/))
-          (def segments (%sh-glob-split (%sh-field-text f)))
-          (def hits (%sh-glob-walk (if absolute? (rest segments) segments)
-                                   (list (if absolute? "/" ""))))
-          (def final
-            (if (%sh-trailing-slash? segments) (%sh-dirs-only hits) hits))
-          ; No match: the pattern stands, with its escapes removed.
-          (if (null? final) (list (%sh-field-plain f)) final))))))
+      ((%sh-field-glob? f)
+        (match
+          ((%sh-glob-pattern? (%sh-field-text f)) (%sh-glob-matches f))
+          (#t (list (%sh-field-plain f)))))
+      (#t (list (%sh-field-plain f))))))
+
+; The names the pattern F matches, or F itself when it matches none.
+(def %sh-glob-matches
+  (fn (_ f)
+    (def absolute? (= (string-ref (%sh-field-text f) 0) #\/))
+    (def segments (%sh-glob-split (%sh-field-text f)))
+    (def hits (%sh-glob-walk (if absolute? (rest segments) segments)
+                             (list (if absolute? "/" ""))))
+    (def final
+      (if (%sh-trailing-slash? segments) (%sh-dirs-only hits) hits))
+    ; No match: the pattern stands, with its escapes removed.
+    (if (null? final) (list (%sh-field-plain f)) final)))
 
 ; GLOB TEXT THAT DID NOT COME THROUGH THE WALK -- a bare string, held by a
 ; caller with no field around it.  The two flags have to be derived by
@@ -3868,7 +3878,7 @@
 
 ; A shell's truth is INVERTED: 0 is true.  %sh-bool turns a predicate's answer
 ; into that, once, instead of every arm spelling `(if p 0 1)`.
-(def %sh-bool (fn (_ p) (if p 0 1)))
+(def %sh-bool (fn (_ p) (match (p 0) (#t 1))))
 
 ; --- test / [ -------------------------------------------------------------
 ;
@@ -3928,58 +3938,70 @@
 ; can tell "not a file operator" from "the test was false".
 (def %sh-test-file
   (fn (_ op path)
-    (let ((p (%sh-table-get op %sh-file-ops)))
-      (if (null? p) () (%sh-bool (p (sh-path-kind path) path))))))
+    (def p (%sh-table-get op %sh-file-ops))
+    (match
+      ((null? p) ())
+      (#t (%sh-bool (p (sh-path-kind path) path))))))
 
 ; The operands are what %sh-test-int read, integers and never nil, since
 ; %sh-test-num refuses a nil first -- a bignum among them, which the integer
 ; door hands to its own comparison -- so they compare on the door.
 (def %sh-num-ops
   (list (pair "-eq" (fn (_ a b) (= a b)))
-        (pair "-ne" (fn (_ a b) (not (= a b))))
+        (pair "-ne" (fn (_ a b) (match ((= a b) ()) (#t #t))))
         (pair "-lt" (fn (_ a b) (fx<? a b)))
-        (pair "-le" (fn (_ a b) (not (fx<? b a))))
+        (pair "-le" (fn (_ a b) (match ((fx<? b a) ()) (#t #t))))
         (pair "-gt" (fn (_ a b) (fx<? b a)))
-        (pair "-ge" (fn (_ a b) (not (fx<? a b))))))
+        (pair "-ge" (fn (_ a b) (match ((fx<? a b) ()) (#t #t))))))
 
 ; A numeric operator's answer, nil when OP is not one, or 2 when an operand
 ; is no integer.
 (def %sh-test-num
   (fn (_ l op r)
-    (do
-      (def p (%sh-table-get op %sh-num-ops))
-      (if (null? p)
-        ()
-        (do
-          (def a (%sh-test-int l))
-          (def b (%sh-test-int r))
-          (match
-            ((null? a) (%sh-test-usage l "integer expression expected"))
-            ((null? b) (%sh-test-usage r "integer expression expected"))
-            (#t (%sh-bool (p a b)))))))))
+    (def p (%sh-table-get op %sh-num-ops))
+    (match
+      ((null? p) ())
+      (#t (%sh-test-num-with p l r)))))
+
+(def %sh-test-num-with
+  (fn (_ p l r)
+    (def a (%sh-test-int l))
+    (def b (%sh-test-int r))
+    (match
+      ((null? a) (%sh-test-usage l "integer expression expected"))
+      ((null? b) (%sh-test-usage r "integer expression expected"))
+      (#t (%sh-bool (p a b))))))
 
 ; An integer operand: decimal digits with a sign in front and blanks around
 ; them allowed, so `010` is ten and `0x10` is no integer.  Answers the value,
 ; or nil for anything else.
 (def %sh-test-int
   (fn (_ word)
-    (do
-      (def n (%sh-ar-ws-before word (string-length word)))
-      (def i (%sh-ar-skip-ws word 0 n))
-      (match
-        ((not (fx<? i n)) ())
-        ((= (string-ref word i) #\-) (%sh-test-digits word (fx+ i 1) n #t))
-        ((= (string-ref word i) #\+) (%sh-test-digits word (fx+ i 1) n ()))
-        (#t (%sh-test-digits word i n ()))))))
+    (def n (%sh-ar-ws-before word (string-length word)))
+    (def i (%sh-ar-skip-ws word 0 n))
+    (match
+      ((fx<? i n) (%sh-test-signed word i n))
+      (#t ()))))
+
+(def %sh-test-signed
+  (fn (_ word i n)
+    (match
+      ((= (string-ref word i) #\-) (%sh-test-digits word (fx+ i 1) n #t))
+      ((= (string-ref word i) #\+) (%sh-test-digits word (fx+ i 1) n ()))
+      (#t (%sh-test-digits word i n ())))))
 
 (def %sh-test-digits
   (fn (_ word i n negative?)
     (match
-      ((not (fx<? i n)) ())
-      ((not (%all-digits-from? word i n)) ())
-      (#t (do
-            (def v (%sh-ar-digits-value word i n 10))
-            (if negative? (- 0 v) v))))))
+      ((fx<? i n)
+        (match
+          ((%all-digits-from? word i n)
+            (%sh-test-sign (%sh-ar-digits-value word i n 10) negative?))
+          (#t ())))
+      (#t ()))))
+
+(def %sh-test-sign
+  (fn (_ v negative?) (match (negative? (- 0 v)) (#t v))))
 
 (def %sh-test-1
   (fn (_ word) (%sh-bool (fx<? 0 (string-length word)))))
@@ -3991,24 +4013,40 @@
       ((string=? op "-z") (%sh-bool (= (string-length val) 0)))
       ((string=? op "-t") (%sh-bool (%sh-tty? val)))
       ((string=? op "!")  (%sh-test-not (%sh-test-1 val)))
-      (#t
-        (do
-          (def r (%sh-test-file op val))
-          ; An unknown unary operator is a usage error (2), not a false --
-          ; `test -q x` should complain, not quietly fail.
-          (if (null? r)
-            (do (%stderr "ash: test: " op ": unary operator expected\n") 2)
-            r))))))
+      (#t (%sh-test-unary-file op val)))))
 
-; A binary primary's answer, or nil when OP is not one.
+; An unknown unary operator is a usage error (2), not a false -- `test -q x`
+; should complain, not quietly fail.
+(def %sh-test-unary-file
+  (fn (_ op val)
+    (def r (%sh-test-file op val))
+    (match
+      ((null? r) (%sh-test-unary-expected op))
+      (#t r))))
+
+(def %sh-test-unary-expected
+  (fn (_ op)
+    (%stderr "ash: test: " op ": unary operator expected\n")
+    2))
+
+; A binary primary's answer, or nil when OP is not one.  The numeric
+; operators, the ones scripts write most, and the file dates all start with
+; `-`, so that character sends OP to them before any string is compared.
 (def %sh-test-binary
   (fn (_ left op right)
     (match
+      ((= (string-length op) 0) ())
+      ((= (string-ref op 0) #\-) (%sh-test-dash-binary left op right))
       ((string=? op "=")  (%sh-bool (string=? left right)))
-      ((string=? op "!=") (%sh-bool (not (string=? left right))))
+      ((string=? op "!=") (%sh-bool (match ((string=? left right) ()) (#t #t))))
       ; By byte, the C locale's collation.
       ((string=? op "<")  (%sh-bool (Str8 <? left right)))
       ((string=? op ">")  (%sh-bool (Str8 <? right left)))
+      (#t ()))))
+
+(def %sh-test-dash-binary
+  (fn (_ left op right)
+    (match
       ((string=? op "-nt") (%sh-bool (%sh-newer? left right)))
       ((string=? op "-ot") (%sh-bool (%sh-newer? right left)))
       (#t (%sh-test-num left op right)))))
@@ -4040,29 +4078,36 @@
 ; strings; then `!` before two words; then one word in parentheses.
 (def %sh-test-three
   (fn (_ a b c)
-    (do
-      (def r (%sh-test-binary a b c))
-      (match
-        ((not (null? r)) r)
-        ((string=? b "-a") (%sh-test-both (%sh-test-1 a) (%sh-test-1 c)))
-        ((string=? b "-o") (%sh-test-either (%sh-test-1 a) (%sh-test-1 c)))
-        ((string=? a "!") (%sh-test-not (%sh-test-2 b c)))
-        ((and (string=? a "(") (string=? c ")")) (%sh-test-1 b))
-        (#t (%sh-test-expr (list a b c)))))))
+    (def r (%sh-test-binary a b c))
+    (match
+      ((null? r) (%sh-test-three-else a b c))
+      (#t r))))
+
+(def %sh-test-three-else
+  (fn (_ a b c)
+    (match
+      ((string=? b "-a") (%sh-test-both (%sh-test-1 a) (%sh-test-1 c)))
+      ((string=? b "-o") (%sh-test-either (%sh-test-1 a) (%sh-test-1 c)))
+      ((string=? a "!") (%sh-test-not (%sh-test-2 b c)))
+      ((%sh-test-parens? a c) (%sh-test-1 b))
+      (#t (%sh-test-expr (list a b c))))))
+
+; Whether A and C are a group's `(` and `)`.
+(def %sh-test-parens?
+  (fn (_ a c) (match ((string=? a "(") (string=? c ")")) (#t ()))))
 
 ; Four: `!` before three words, then two words in parentheses.
 (def %sh-test-four
   (fn (_ wds)
-    (do
-      (def more (rest wds))
-      (match
-        ((string=? (first wds) "!")
-          (%sh-test-not
-            (%sh-test-three (first more) (first (rest more))
-                            (first (rest (rest more))))))
-        ((and (string=? (first wds) "(") (string=? (last wds) ")"))
-          (%sh-test-2 (first more) (first (rest more))))
-        (#t (%sh-test-expr wds))))))
+    (def more (rest wds))
+    (match
+      ((string=? (first wds) "!")
+        (%sh-test-not
+          (%sh-test-three (first more) (first (rest more))
+                          (first (rest (rest more))))))
+      ((%sh-test-parens? (first wds) (last wds))
+        (%sh-test-2 (first more) (first (rest more))))
+      (#t (%sh-test-expr wds)))))
 
 ; Past what the count settles, the words are an expression, read by recursive
 ; descent as dash and bash read it: `!` binds tighter than `-a`, and `-a` than
@@ -4147,18 +4192,18 @@
       (#t (%sh-test-binary (first wds) (first (rest wds))
                            (first (rest (rest wds))))))))
 
+; By how many words there are, told from the list's shape rather than counted.
 (def %sh-test
   (fn (_ wds)
-    (do
-      (def n (length wds))
-      (match
-        ((= n 0) 1)
-        ((= n 1) (%sh-test-1 (first wds)))
-        ((= n 2) (%sh-test-2 (first wds) (first (rest wds))))
-        ((= n 3) (%sh-test-three (first wds) (first (rest wds))
-                                 (first (rest (rest wds)))))
-        ((= n 4) (%sh-test-four wds))
-        (#t (%sh-test-expr wds))))))
+    (match
+      ((null? wds) 1)
+      ((null? (rest wds)) (%sh-test-1 (first wds)))
+      ((null? (rest (rest wds))) (%sh-test-2 (first wds) (first (rest wds))))
+      ((null? (rest (rest (rest wds))))
+        (%sh-test-three (first wds) (first (rest wds))
+                        (first (rest (rest wds)))))
+      ((null? (rest (rest (rest (rest wds))))) (%sh-test-four wds))
+      (#t (%sh-test-expr wds)))))
 
 ; --- pwd / unset / read / . -----------------------------------------------
 
@@ -4680,9 +4725,25 @@
 ; usage error, 2, as it is in dash and bash: `[ a = a` does not answer true.
 (def %sh-bracket
   (fn (_ wds)
-    (if (if (null? wds) () (string=? (last wds) "]"))
-      (%sh-test (take (fx+ (length wds) -1) wds))
-      (do (%stderr "ash: [: missing ]\n") 2))))
+    (def inner (%sh-bracket-words wds ()))
+    (match
+      ((eq? inner (lit open)) (%sh-bracket-open))
+      (#t (%sh-test inner)))))
+
+; The words WDS hold before their closing `]`, in order, taken in one walk, or
+; `open` when the last word is no `]`.
+(def %sh-bracket-words
+  (fn (self wds out)
+    (match
+      ((null? wds) (lit open))
+      ((null? (rest wds))
+        (match ((string=? (first wds) "]") (reverse out)) (#t (lit open))))
+      (#t (self (rest wds) (pair (first wds) out))))))
+
+(def %sh-bracket-open
+  (fn (_)
+    (%stderr "ash: [: missing ]\n")
+    2))
 
 ; `eval` -- the arguments, joined by a space, read back as shell input.
 ;
@@ -6467,27 +6528,52 @@
 ; class inside is stepped over whole, its own `]` being no end of this one.
 (def %sh-glob-class-end
   (fn (_ pat i pn)
-    (def scan
-      (fn (self j)
+    (def start (%sh-glob-class-start pat (%sh-glob-past-negation pat i pn) pn))
+    (%sh-glob-class-scan-end pat start pn)))
+
+(def %sh-glob-past-negation
+  (fn (_ pat i pn)
+    (match
+      ((fx<? i pn)
         (match
-          ((not (fx<? j pn)) (- 0 1))
+          ((= (string-ref pat i) #\!) (fx+ i 1))
+          ((= (string-ref pat i) #\^) (fx+ i 1))
+          (#t i)))
+      (#t i))))
+
+(def %sh-glob-class-start
+  (fn (_ pat a pn)
+    (match
+      ((fx<? a pn) (match ((= (string-ref pat a) #\]) (fx+ a 1)) (#t a)))
+      (#t a))))
+
+(def %sh-glob-class-scan-end
+  (fn (self pat j pn)
+    (match
+      ((fx<? j pn)
+        (match
           ; An escaped character is a member, a `]` included, so it closes
           ; nothing.
-          ((%sh-glob-escaped-at? pat j pn) (self (fx+ j 2)))
+          ((%sh-glob-escaped-at? pat j pn) (self pat (fx+ j 2) pn))
           ((= (string-ref pat j) #\]) j)
-          (#t
-            (let ((e (if (and (< (+ j 1) pn)
-                              (= (string-ref pat j) #\[)
-                              (= (string-ref pat (+ j 1)) #\:))
-                       (%sh-glob-named-end pat (+ j 2) pn)
-                       -1)))
-              (self (if (fx<? 0 e) e (+ j 1))))))))
-    (let ((a (if (and (< i pn)
-                      (let ((c (string-ref pat i)))
-                        (or (= c #\!) (= c #\^))))
-               (+ i 1) i)))
-      (scan (if (and (< a pn) (= (string-ref pat a) #\]))
-              (+ a 1) a)))))
+          ((= (string-ref pat j) #\[) (self pat (%sh-glob-past-named pat j pn) pn))
+          (#t (self pat (fx+ j 1) pn))))
+      (#t -1))))
+
+; Past the `[` at J: past the whole of a named class that opens there, whose
+; own `]` ends nothing, or else past the `[` alone.
+(def %sh-glob-past-named
+  (fn (_ pat j pn)
+    (match
+      ((fx<? (fx+ j 1) pn)
+        (match
+          ((= (string-ref pat (fx+ j 1)) #\:)
+            (%sh-glob-named-or-next (%sh-glob-named-end pat (fx+ j 2) pn) j))
+          (#t (fx+ j 1))))
+      (#t (fx+ j 1)))))
+
+(def %sh-glob-named-or-next
+  (fn (_ e j) (match ((fx<? 0 e) e) (#t (fx+ j 1)))))
 
 (def %sh-glob-at ())
 (def %sh-glob-star ())
