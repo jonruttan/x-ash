@@ -2,15 +2,16 @@
 
 A script is read into one token list, an expansion can give tens of thousands
 of fields, and a directory can hold tens of thousands of entries, so the walks
-over these lists are loops.  A call per element nested in the previous one's
-`pair`, `append` or `string-append` runs out of C stack at about 30,000
-elements, and after a list is built that way the next collect dies too, even
-once nothing holds the list, as the next prompt would after a long `.` file.
+over these lists are loops, the sort's splits and merges among them.  A call
+per element nested in the previous one's `pair`, `append` or `string-append`
+runs out of C stack at about 30,000 elements, and after a list is built that
+way the next collect dies too, even once nothing holds the list, as the next
+prompt would after a long `.` file.
 
 Each case but the last runs in a child, bounded at a budget of objects above
-what it inherited, which answers 7 when it has finished.  On main each of
-these children dies with SIGSEGV, 139.  The last pins what a pattern ending
-in `/` keeps, directories only and in order, and holds on main too;
+what it inherited, which answers 7 when it has finished; a child that runs
+out of C stack dies with SIGSEGV, 139, instead.  The last pins what a pattern
+ending in `/` keeps, directories only and in order, and holds on main too;
 expectation from `/bin/sh` and `dash`.
 
 ### a script of 32,000 lines runs to its end
@@ -89,7 +90,7 @@ expectation from `/bin/sh` and `dash`.
     (guard (e (sh-exit 5))
       (alloc-limit! (+ (Heap count) 30000000))
       (def build (fn (self n x acc) (if (= n 0) acc (self (- n 1) x (pair x acc)))))
-      (def n (length (%sh-keep (fn (_ x) #t) (build 30000 "a" ()))))
+      (def n (length (%sh-glob-keep "*" (build 30000 "a" ()) ())))
       (sh-exit (if (= n 30000) 7 3)))
     (write (sh-wait pid)))
   ())
@@ -106,8 +107,27 @@ expectation from `/bin/sh` and `dash`.
     (guard (e (sh-exit 5))
       (alloc-limit! (+ (Heap count) 60000000))
       (def build (fn (self n x acc) (if (= n 0) acc (self (- n 1) x (pair x acc)))))
-      (def n (length (%sh-map-join "d" (build 30000 "a" ()))))
+      (def n (length (%sh-map-join-onto "d" (build 30000 "a" ()) ())))
       (sh-exit (if (= n 30000) 7 3)))
+    (write (sh-wait pid)))
+  ())
+```
+---
+    7
+
+### 30,000 names split in half and merged
+
+```sh
+(do
+  (def pid (sh-fork))
+  (if (= pid 0)
+    (guard (e (sh-exit 5))
+      (alloc-limit! (+ (Heap count) 30000000))
+      (def build (fn (self n x acc) (if (= n 0) acc (self (- n 1) x (pair x acc)))))
+      (def names (build 30000 "a" ()))
+      (def half (length (first (%sh-sort-split names names ()))))
+      (def n (length (%sh-sort-merge (build 15000 "a" ()) (build 15000 "b" ()) ())))
+      (sh-exit (if (= half 15000) (if (= n 30000) 7 3) 3)))
     (write (sh-wait pid)))
   ())
 ```
