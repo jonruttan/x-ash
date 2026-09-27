@@ -442,16 +442,53 @@
           (if (null? b) chunks (self (pair b chunks))))))
     (bytes->str (%sh-join-chunks (go ()) ()))))
 
-; --- A directory's entry names, sorted -----------------------------------
-; What pathname expansion matches against.  `.` and `..` are already excluded
-; by File list-dir.  An unreadable or missing directory answers the empty list
-; rather than raising: a glob that matches nothing is not an error, it is a
-; glob that matches nothing.
-(def sh-sort-strings
-  (fn (_ xs) (List sort (fn (_ a b) (Str8 <? a b)) xs)))
+; --- Names, sorted ---------------------------------------------------------
+; A glob's matches and the names `export -p` and `alias` list, in the order
+; Str8 <? keeps, resolved once.  The merge sort walks pairs, as the list vocabulary
+; above does: List sort enters through from-seq on every half it sorts.  The
+; halves are split and merged in loops onto accumulators, so a directory of
+; tens of thousands of names nests no deeper than the halving.  A name from
+; the second half goes first only when it sorts strictly before, so equal
+; names keep their order.
+(def %str8-less (method-of Str8 (lit <?)))
 
+(def sh-sort-strings
+  (fn (_ xs)
+    (match
+      ((null? xs) xs)
+      ((null? (rest xs)) xs)
+      (#t (%sh-sort-halves (%sh-sort-split xs xs ()))))))
+
+; The first half of the list, in order, paired with the rest: FAST steps two
+; for each step of SLOW.
+(def %sh-sort-split
+  (fn (self slow fast acc)
+    (match
+      ((null? fast) (pair (reverse acc) slow))
+      ((null? (rest fast)) (pair (reverse acc) slow))
+      (#t (self (rest slow) (rest (rest fast)) (pair (first slow) acc))))))
+
+(def %sh-sort-halves
+  (fn (_ halves)
+    (%sh-sort-merge (sh-sort-strings (first halves)) (sh-sort-strings (rest halves))
+                    ())))
+
+(def %sh-sort-merge
+  (fn (self a b acc)
+    (match
+      ((null? a) (%ash-rev acc b))
+      ((null? b) (%ash-rev acc a))
+      ((%str8-less Str8 (first b) (first a)) (self a (rest b) (pair (first b) acc)))
+      (#t (self (rest a) b (pair (first a) acc))))))
+
+; --- A directory's entry names --------------------------------------------
+; What pathname expansion matches against, in the directory's own order: the
+; glob sorts what it keeps.  `.` and `..` are already excluded by File
+; list-dir.  An unreadable or missing directory answers the empty list rather
+; than raising: a glob that matches nothing is not an error, it is a glob that
+; matches nothing.
 (def sh-list-dir
-  (fn (_ path) (sh-sort-strings (guard (_ ()) (%file-list-dir File path)))))
+  (fn (_ path) (guard (_ ()) (%file-list-dir File path))))
 
 ; Raw write to a descriptor -- what a here-document's writer child pushes into
 ; the pipe.  (Sys fd-write) answers the byte count; the shell has no use for it.

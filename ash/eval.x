@@ -3025,102 +3025,132 @@
           (#t (self text (fx+ i 1) n))))
       (#t ()))))
 
-; Split on UNESCAPED `/`.
+; Split on UNESCAPED `/`, each segment cut out of TEXT once with its escapes
+; kept.
 (def %sh-glob-split
-  (fn (_ text)
-    (let ((n (string-length text)))
-      (def go
-        (fn (self i seg acc)
-          (if (>= i n)
-            (reverse (pair seg acc))
-            (let ((c (string-ref text i)))
-              (if (= c #\\)
-                (self (+ i 2) (string-append seg (substring text i (+ i 2))) acc)
-                (if (= c #\/)
-                  (self (+ i 1) "" (pair seg acc))
-                  (self (+ i 1)
-                    (string-append seg (substring text i (+ i 1))) acc)))))))
-      (go 0 "" ()))))
+  (fn (_ text) (%sh-glob-split-from text 0 0 (string-length text) ())))
+
+(def %sh-glob-split-from
+  (fn (self text i start n acc)
+    (match
+      ((fx<? i n)
+        (match
+          ((= (string-ref text i) #\\) (self text (fx+ i 2) start n acc))
+          ((= (string-ref text i) #\/)
+            (self text (fx+ i 1) (fx+ i 1) n (pair (substring text start i) acc)))
+          (#t (self text (fx+ i 1) start n acc))))
+      (#t (reverse (pair (substring text start n) acc))))))
 
 ; "" means the current directory, and stays invisible in what is built: a
 ; relative glob answers `bin/sh`, not `./bin/sh`.
 (def %sh-path-join
   (fn (_ base name)
-    (cond
+    (match
       ((= (string-length base) 0) name)
-      ((string=? base "/") (string-append "/" name))
-      (else (string-append base (string-append "/" name))))))
+      ((string=? base "/") (%str-append-2 "/" name))
+      (#t (%str-append-2 base (%str-append-2 "/" name))))))
 
-(def %sh-dir-of (fn (_ base) (if (= (string-length base) 0) "." base)))
+(def %sh-dir-of (fn (_ base) (match ((= (string-length base) 0) ".") (#t base))))
 
 ; A leading `.` is matched only by a pattern that starts with one -- the rule
 ; that keeps `*` from answering dotfiles.
 (def %sh-glob-visible?
   (fn (_ pattern name)
-    (if (= (string-ref name 0) #\.)
-      (if (= (string-length pattern) 0)
-        ()
-        (= (string-ref pattern 0) #\.))
-      #t)))
+    (match
+      ((= (string-ref name 0) #\.)
+        (match
+          ((= (string-length pattern) 0) ())
+          (#t (= (string-ref pattern 0) #\.))))
+      (#t #t))))
 
+; The names in BASE's directory that SEGMENT matches, sorted.  Only what
+; matches is sorted.
 (def %sh-glob-entries
   (fn (_ base segment)
-    (%sh-keep
-      (fn (_ name)
-        (and (%sh-glob-visible? segment name)
-             (%sh-pattern-match? segment name)))
-      (sh-list-dir (%sh-dir-of base)))))
+    (sh-sort-strings (%sh-glob-keep segment (sh-list-dir (%sh-dir-of base)) ()))))
 
 ; A directory can hold tens of thousands of entries, so the walks over them are
-; loops onto an accumulator reversed once at the end, not a call per entry
-; nested in the last one's `pair`, which runs out of C stack.
-(def %sh-keep
-  (fn (_ p xs) (reverse (%sh-keep-onto p xs ()))))
-
-(def %sh-keep-onto
-  (fn (self p xs acc)
+; loops onto an accumulator, not a call per entry nested in the last one's
+; `pair`, which runs out of C stack.  The names kept come out reversed, for
+; the sort to put in order.
+(def %sh-glob-keep
+  (fn (self segment names acc)
     (match
-      ((null? xs) acc)
-      ((p (first xs)) (self p (rest xs) (pair (first xs) acc)))
-      (#t (self p (rest xs) acc)))))
+      ((null? names) acc)
+      ((%sh-glob-hit? segment (first names))
+        (self segment (rest names) (pair (first names) acc)))
+      (#t (self segment (rest names) acc)))))
 
-; One segment against every base reached so far.
-(def %sh-glob-step
+(def %sh-glob-hit?
+  (fn (_ segment name)
+    (match
+      ((%sh-glob-visible? segment name) (%sh-pattern-match? segment name))
+      (#t ()))))
+
+(def %sh-glob-read-each
   (fn (self segment bases acc)
-    (if (null? bases)
-      (reverse acc)
-      (let ((base (first bases)))
-        (self segment (rest bases)
-          (%sh-prepend-rev
-            (if (%sh-glob-pattern? segment)
-              (%sh-map-join base (%sh-glob-entries base segment))
-              ; A literal segment contributes only if it is really there.
-              (let ((cand (%sh-path-join base (%sh-glob-unescape segment))))
-                (if (null? (sh-path-kind cand)) () (list cand))))
-            acc))))))
+    (match
+      ((null? bases) (reverse acc))
+      (#t (self segment (rest bases)
+                (%sh-map-join-onto (first bases)
+                                   (%sh-glob-entries (first bases) segment) acc))))))
 
-(def %sh-map-join
-  (fn (_ base names) (reverse (%sh-map-join-onto base names ()))))
+(def %sh-glob-join-each
+  (fn (self name bases acc)
+    (match
+      ((null? bases) (reverse acc))
+      (#t (self name (rest bases) (pair (%sh-path-join (first bases) name) acc))))))
+
+(def %sh-glob-there-each
+  (fn (self name bases acc)
+    (match
+      ((null? bases) (reverse acc))
+      (#t (self name (rest bases)
+                (%sh-glob-if-there (%sh-path-join (first bases) name) acc))))))
+
+(def %sh-glob-if-there
+  (fn (_ path acc) (match ((null? (sh-path-kind path)) acc) (#t (pair path acc)))))
 
 (def %sh-map-join-onto
   (fn (self base names acc)
-    (if (null? names)
-      acc
-      (self base (rest names) (pair (%sh-path-join base (first names)) acc)))))
+    (match
+      ((null? names) acc)
+      (#t (self base (rest names) (pair (%sh-path-join base (first names)) acc))))))
 
 (def %sh-prepend-rev
   (fn (self xs acc)
     (if (null? xs) acc (self (rest xs) (pair (first xs) acc)))))
 
+; Each segment against every base reached so far, AHEAD counting the patterns
+; among the segments left.  A pattern reads each base's directory.  A literal
+; segment with a pattern after it is joined on without being looked for:
+; reading the directory it leads to finds out whether it is there, as ash's
+; expmeta does.  A literal segment with none after it is kept only if it is
+; really there.
 (def %sh-glob-walk
-  (fn (self segments bases)
-    (if (or (null? segments) (null? bases))
-      bases
+  (fn (self segments bases ahead)
+    (match
+      ((null? segments) bases)
+      ((null? bases) bases)
       ; An empty segment is a `//` or a trailing `/`: it moves nothing on.
-      (self (rest segments)
-        (if (= (string-length (first segments)) 0)
-          bases
-          (%sh-glob-step (first segments) bases ()))))))
+      ((= (string-length (first segments)) 0) (self (rest segments) bases ahead))
+      ((%sh-glob-pattern? (first segments))
+        (self (rest segments) (%sh-glob-read-each (first segments) bases ())
+              (fx+ ahead -1)))
+      ((fx<? 0 ahead)
+        (self (rest segments)
+              (%sh-glob-join-each (%sh-glob-unescape (first segments)) bases ())
+              ahead))
+      (#t (self (rest segments)
+                (%sh-glob-there-each (%sh-glob-unescape (first segments)) bases ())
+                ahead)))))
+
+(def %sh-glob-patterns
+  (fn (self segments n)
+    (match
+      ((null? segments) n)
+      ((%sh-glob-pattern? (first segments)) (self (rest segments) (fx+ n 1)))
+      (#t (self (rest segments) n)))))
 
 ; A TRAILING `/` MEANS DIRECTORIES ONLY, and keeps the slash -- `echo */`
 ; answers `sub/`, not every entry.  The split leaves an empty last segment for
@@ -3139,8 +3169,9 @@
 
 (def %sh-trailing-slash?
   (fn (_ segments)
-    (and (not (null? segments))
-         (= (string-length (last segments)) 0))))
+    (match
+      ((null? segments) ())
+      (#t (= (string-length (last segments)) 0)))))
 
 ; The field knows whether it holds a live metacharacter and whether it carries
 ; escapes, which settles most words with no scan.  A word that does hold one
@@ -3162,14 +3193,17 @@
 ; The names the pattern F matches, or F itself when it matches none.
 (def %sh-glob-matches
   (fn (_ f)
-    (def absolute? (= (string-ref (%sh-field-text f) 0) #\/))
     (def segments (%sh-glob-split (%sh-field-text f)))
-    (def hits (%sh-glob-walk (if absolute? (rest segments) segments)
-                             (list (if absolute? "/" ""))))
+    (def hits
+      (match
+        ((= (string-ref (%sh-field-text f) 0) #\/)
+          (%sh-glob-walk (rest segments) (list "/")
+                         (%sh-glob-patterns (rest segments) 0)))
+        (#t (%sh-glob-walk segments (list "") (%sh-glob-patterns segments 0)))))
     (def final
-      (if (%sh-trailing-slash? segments) (%sh-dirs-only hits) hits))
+      (match ((%sh-trailing-slash? segments) (%sh-dirs-only hits)) (#t hits)))
     ; No match: the pattern stands, with its escapes removed.
-    (if (null? final) (list (%sh-field-plain f)) final)))
+    (match ((null? final) (list (%sh-field-plain f))) (#t final))))
 
 ; GLOB TEXT THAT DID NOT COME THROUGH THE WALK -- a bare string, held by a
 ; caller with no field around it.  The two flags have to be derived by
@@ -6578,55 +6612,95 @@
 ; and `[a\-z]` a literal `-` rather than the range `a` to `z`.
 (def %sh-glob-escaped-at?
   (fn (_ pat i hi)
-    (if (= (string-ref pat i) #\\) (fx<? (fx+ i 1) hi) ())))
+    (match ((= (string-ref pat i) #\\) (fx<? (fx+ i 1) hi)) (#t ()))))
 
 (def %sh-glob-member-at
   (fn (_ pat i hi)
-    (if (%sh-glob-escaped-at? pat i hi)
-      (string-ref pat (fx+ i 1))
-      (string-ref pat i))))
+    (match
+      ((%sh-glob-escaped-at? pat i hi) (string-ref pat (fx+ i 1)))
+      (#t (string-ref pat i)))))
 
 (def %sh-glob-member-end
   (fn (_ pat i hi)
-    (if (%sh-glob-escaped-at? pat i hi) (fx+ i 2) (fx+ i 1))))
+    (match ((%sh-glob-escaped-at? pat i hi) (fx+ i 2)) (#t (fx+ i 1)))))
 
 ; The character-class helpers, taking the class body as the half-open range
-; [lo, hi) -- lo just after the `[`, hi at the `]`.
+; [lo, hi) -- lo just after the `[`, hi at the `]`.  Each member is tested as
+; the scan reaches it, on the integer doors.
 (def %sh-glob-class-scan
   (fn (self pat i hi c)
-    (if (>= i hi)
-      ()
-      (let ((e (if (and (< (+ i 1) hi)
-                        (= (string-ref pat i) #\[)
-                        (= (string-ref pat (+ i 1)) #\:))
-                 (%sh-glob-named-end pat (+ i 2) hi)
-                 -1)))
-        (if (fx<? 0 e)
-          ; A named class, `[:alpha:]`: the name sits between the colons.
-          (if (%sh-char-class? (substring pat (+ i 2) (- e 2)) c)
-            #t
-            (self pat e hi c))
-          (do
-            (def lo (%sh-glob-member-at pat i hi))
-            (def after (%sh-glob-member-end pat i hi))
-            ; A range `a-b` needs its closing member inside the class.
-            (if (if (fx<? (fx+ after 1) hi) (= (string-ref pat after) #\-) ())
-              (do
-                (def top (%sh-glob-member-at pat (fx+ after 1) hi))
-                (if (if (fx<? c lo) () (not (fx<? top c)))
-                  #t
-                  (self pat (%sh-glob-member-end pat (fx+ after 1) hi) hi c)))
-              (if (= c lo) #t (self pat after hi c)))))))))
+    (match
+      ((fx<? i hi) (%sh-glob-class-at pat i hi c (%sh-glob-named-at pat i hi)))
+      (#t ()))))
+
+; Where a named class `[:name:]` opening at I ends, or -1 when none opens there.
+(def %sh-glob-named-at
+  (fn (_ pat i hi)
+    (match
+      ((fx<? (fx+ i 1) hi)
+        (match
+          ((= (string-ref pat i) #\[)
+            (match
+              ((= (string-ref pat (fx+ i 1)) #\:)
+                (%sh-glob-named-end pat (fx+ i 2) hi))
+              (#t -1)))
+          (#t -1)))
+      (#t -1))))
+
+; The member at I, or the named class there ending at E: the name sits
+; between the colons.
+(def %sh-glob-class-at
+  (fn (_ pat i hi c e)
+    (match
+      ((fx<? 0 e)
+        (match
+          ((%sh-char-class? (substring pat (fx+ i 2) (fx+ e -2)) c) #t)
+          (#t (%sh-glob-class-scan pat e hi c))))
+      (#t (%sh-glob-member-test pat hi c (%sh-glob-member-at pat i hi)
+                                (%sh-glob-member-end pat i hi))))))
+
+; The member LO, which ends at AFTER.  A range `a-b` needs its closing member
+; inside the class.
+(def %sh-glob-member-test
+  (fn (_ pat hi c lo after)
+    (match
+      ((%sh-glob-range-at? pat after hi)
+        (%sh-glob-range-test pat hi c lo (fx+ after 1)))
+      ((= c lo) #t)
+      (#t (%sh-glob-class-scan pat after hi c)))))
+
+(def %sh-glob-range-at?
+  (fn (_ pat after hi)
+    (match ((fx<? (fx+ after 1) hi) (= (string-ref pat after) #\-)) (#t ()))))
+
+; The range from LO to the member at J.
+(def %sh-glob-range-test
+  (fn (_ pat hi c lo j)
+    (match
+      ((fx<? c lo) (%sh-glob-class-scan pat (%sh-glob-member-end pat j hi) hi c))
+      ((fx<? (%sh-glob-member-at pat j hi) c)
+        (%sh-glob-class-scan pat (%sh-glob-member-end pat j hi) hi c))
+      (#t #t))))
 
 (def %sh-glob-class-match?
   (fn (_ pat lo hi s si)
-    (let ((c (string-ref s si)))
-      (let ((neg (if (< lo hi)
-                   (let ((f (string-ref pat lo)))
-                     (or (= f #\!) (= f #\^)))
-                   ())))
-        (let ((hit (%sh-glob-class-scan pat (if neg (+ lo 1) lo) hi c)))
-          (if neg (if hit () #t) (if hit #t ())))))))
+    (match
+      ((%sh-glob-negated? pat lo hi)
+        (match
+          ((%sh-glob-class-scan pat (fx+ lo 1) hi (string-ref s si)) ())
+          (#t #t)))
+      ((%sh-glob-class-scan pat lo hi (string-ref s si)) #t)
+      (#t ()))))
+
+(def %sh-glob-negated?
+  (fn (_ pat lo hi)
+    (match
+      ((fx<? lo hi)
+        (match
+          ((= (string-ref pat lo) #\!) #t)
+          ((= (string-ref pat lo) #\^) #t)
+          (#t ())))
+      (#t ()))))
 
 ; The index of the `]` closing a class opened at I, or -1.  A `!`/`^` and then
 ; a `]` immediately after the opening bracket are both literal, and a named
@@ -6707,15 +6781,8 @@
             (match ((fx<? si sn) (self pat (fx+ pi 1) pn s (fx+ si 1) sn))
                    (#t ())))
           ((= (string-ref pat pi) #\[)
-            (let ((e (%sh-glob-class-end pat (+ pi 1) pn)))
-              (if (< e 0)
-                ; Unterminated: a literal [
-                (if (and (< si sn) (= (string-ref s si) #\[))
-                  (self pat (+ pi 1) pn s (+ si 1) sn)
-                  ())
-                (if (and (< si sn) (%sh-glob-class-match? pat (+ pi 1) e s si))
-                  (self pat (+ e 1) pn s (+ si 1) sn)
-                  ()))))
+            (%sh-glob-bracket pat pi pn s si sn
+                              (%sh-glob-class-end pat (fx+ pi 1) pn)))
           ; A backslash makes the next character itself.  A trailing one --
           ; which only an expansion's value can leave in a pattern -- escapes
           ; nothing, and the pattern matches nothing, as in dash and bash.
@@ -6739,6 +6806,23 @@
       ; Pattern exhausted: a match only if the word is exhausted too.
       ((fx<? si sn) ())
       (#t #t))))
+
+; The `[` at PI, whose class closes at E -- or, when E is -1, a `[` nothing
+; closes, which is an ordinary character.
+(def %sh-glob-bracket
+  (fn (_ pat pi pn s si sn e)
+    (match
+      ((fx<? si sn)
+        (match
+          ((fx<? e 0)
+            (match
+              ((= (string-ref s si) #\[)
+                (%sh-glob-at pat (fx+ pi 1) pn s (fx+ si 1) sn))
+              (#t ())))
+          ((%sh-glob-class-match? pat (fx+ pi 1) e s si)
+            (%sh-glob-at pat (fx+ e 1) pn s (fx+ si 1) sn))
+          (#t ())))
+      (#t ()))))
 
 (def %sh-pattern-match?
   (fn (_ pat word)
