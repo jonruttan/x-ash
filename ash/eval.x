@@ -3116,13 +3116,16 @@
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
   (fn (_ tok)
-    (if (eq? (first tok) (lit tok-sq))
-      (%tok-word-val tok)
-      (do
-        (def fs (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ()))
-        ; Not globbed, but the escapes still come off -- a redirection target
-        ; and a case subject are literal strings.
-        (if (null? fs) "" (%sh-field-plain (first fs)))))))
+    (match
+      ((eq? (first tok) (lit tok-sq)) (%tok-word-val tok))
+      (#t (%sh-first-plain
+            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ()))))))
+
+; The first of the fields FS, or "" when there are none.  Not globbed, but the
+; escapes still come off -- a redirection target and a case subject are
+; literal strings.
+(def %sh-first-plain
+  (fn (_ fs) (match ((null? fs) "") (#t (%sh-field-plain (first fs))))))
 
 ; A case pattern is expanded like any word -- a parameter, a substitution,
 ; arithmetic -- but it is a PATTERN afterwards, so the escapes stay on: what
@@ -3152,12 +3155,25 @@
 
 ; --- Redirection ---
 
+; The redirection operator TOK is, or nil.  It is asked of the operator that
+; ends each simple command, which is seldom one: every redirection operator
+; starts with `<` or `>`, so any other is told by its first character before
+; the operators are looked through.
 (def %redir-op?
   (fn (_ tok)
-    (if (not (eq? (first tok) (lit tok-op)))
-      ()
-      (let ((op (first (rest tok))))
-        (if (%sh-word-in? op %sh-redirect-ops) op ())))))
+    (match
+      ((eq? (first tok) (lit tok-op)) (%sh-redirect-op (first (rest tok))))
+      (#t ()))))
+
+(def %sh-redirect-op
+  (fn (_ op)
+    (match
+      ((= (string-ref op 0) #\>) (%sh-redirect-listed op))
+      ((= (string-ref op 0) #\<) (%sh-redirect-listed op))
+      (#t ()))))
+
+(def %sh-redirect-listed
+  (fn (_ op) (match ((%sh-word-in? op %sh-redirect-ops) op) (#t ()))))
 
 (def %all-digits-from?
   (fn (self s i len)
@@ -3181,7 +3197,7 @@
 (def %sh-input-ops (list "<" "<>" "<&" "<<" "<<-"))
 
 (def %default-fd
-  (fn (_ op) (if (%sh-word-in? op %sh-input-ops) 0 1)))
+  (fn (_ op) (match ((%sh-word-in? op %sh-input-ops) 0) (#t 1))))
 
 ; --- The redirection record -------------------------------------------------
 ;
@@ -3203,11 +3219,17 @@
 ; the pathological one harmless.
 (def %sh-read-redir-target
   (fn (_ cur rop fd)
-    (if (%cursor-empty? cur)
-      (error "parse error: redirect without target")
-      (let ((target (%sh-expand-tok-1 (%cursor-peek cur))))
-        (%cursor-advance! cur)
-        (%sh-redir rop fd target)))))
+    (def redir (%sh-redir-at (first cur) rop fd))
+    (%cursor-advance! cur)
+    redir))
+
+; The same read from the tokens TS, the target first, for the walk over a
+; simple command's tokens, which moves no cursor.
+(def %sh-redir-at
+  (fn (_ ts rop fd)
+    (match
+      ((null? ts) (error "parse error: redirect without target"))
+      (#t (%sh-redir rop fd (%sh-expand-tok-1 (first ts)))))))
 
 ; The redirection whose descriptor number is the tok-io IO, the cursor past it.
 ; The operator is the next token: the tokenizer ends such a run of digits only
@@ -3283,15 +3305,26 @@
 ; with 3 free opens f as 3 -- and closing it then would close the file.
 (def %sh-move-fd
   (fn (_ from to)
-    (if (= from to) () (do (sh-dup2 from to) (sh-close from)))))
+    (match ((= from to) ()) (#t (%sh-fd-onto from to)))))
+
+; FROM duplicated onto TO, and closed.
+(def %sh-fd-onto
+  (fn (_ from to)
+    (sh-dup2 from to)
+    (sh-close from)))
 
 ; The opened descriptor onto FD, or nil when the file could not be opened: the
 ; open answers -1 rather than raising.
 (def %sh-redir-onto
   (fn (_ fh fd verb target)
-    (if (fx<? fh 0)
-      (%sh-redir-failed verb target)
-      (do (%sh-move-fd fh fd) #t))))
+    (match
+      ((fx<? fh 0) (%sh-redir-failed verb target))
+      (#t (%sh-moved-onto fh fd)))))
+
+(def %sh-moved-onto
+  (fn (_ fh fd)
+    (%sh-move-fd fh fd)
+    #t))
 
 ; `>&2` and `<&0` name a descriptor the shell already has; `>&-` and `<&-`
 ; close FD instead, and closing one that is not open is no failure, as in
@@ -3299,38 +3332,53 @@
 ; number nothing is open on, are both refusals.
 (def %sh-redir-dup
   (fn (_ target fd)
-    (if (string=? target "-")
-      (do (sh-close fd) #t)
-      (let ((from (%sh-digits-int target)))
-        (if (null? from)
-          (%sh-redir-failed "duplicate" target)
-          (if (fx<? (sh-dup2 from fd) 0)
-            (%sh-redir-failed "duplicate" target)
-            #t))))))
+    (match
+      ((string=? target "-") (%sh-closed fd))
+      (#t (%sh-dup-onto (%sh-digits-int target) fd target)))))
 
-; Answers whether the redirection was made.
+(def %sh-closed
+  (fn (_ fd)
+    (sh-close fd)
+    #t))
+
+(def %sh-dup-onto
+  (fn (_ from fd target)
+    (match
+      ((null? from) (%sh-redir-failed "duplicate" target))
+      ((fx<? (sh-dup2 from fd) 0) (%sh-redir-failed "duplicate" target))
+      (#t #t))))
+
+; Answers whether the redirection was made.  The target was expanded at
+; collection, with its quoting in hand.
 (def %sh-setup-redir
   (fn (_ redir)
-    (let ((op (%sh-redir-op redir))
-           ; Expanded at collection, with its quoting in hand.
-           (target (%sh-redir-target redir)))
-      (let ((fd (%sh-redir-fd redir)))
-        (match
-          ((or (string=? op "<<") (string=? op "<<-"))
-            (do (%sh-setup-heredoc target fd) #t))
-          ((string=? op "<")
-            (%sh-redir-onto (sh-open-read target) fd "open" target))
-          ((string=? op ">")
-            (%sh-redir-onto (%sh-open-output target) fd "create" target))
-          ((string=? op ">|")
-            (%sh-redir-onto (sh-open-write target) fd "create" target))
-          ((string=? op ">>")
-            (%sh-redir-onto (sh-open-append target) fd "create" target))
-          ((string=? op "<>")
-            (%sh-redir-onto (sh-open-rdwr target) fd "open" target))
-          ((string=? op ">&") (%sh-redir-dup target fd))
-          ((string=? op "<&") (%sh-redir-dup target fd))
-          (#t #t))))))
+    (%sh-setup-redir-op (%sh-redir-op redir) (%sh-redir-fd redir)
+                        (%sh-redir-target redir))))
+
+; The operators by how often a script writes them.
+(def %sh-setup-redir-op
+  (fn (_ op fd target)
+    (match
+      ((string=? op ">")
+        (%sh-redir-onto (%sh-open-output target) fd "create" target))
+      ((string=? op ">>")
+        (%sh-redir-onto (sh-open-append target) fd "create" target))
+      ((string=? op "<")
+        (%sh-redir-onto (sh-open-read target) fd "open" target))
+      ((string=? op ">&") (%sh-redir-dup target fd))
+      ((string=? op "<&") (%sh-redir-dup target fd))
+      ((string=? op "<<") (%sh-heredoc-made target fd))
+      ((string=? op "<<-") (%sh-heredoc-made target fd))
+      ((string=? op ">|")
+        (%sh-redir-onto (sh-open-write target) fd "create" target))
+      ((string=? op "<>")
+        (%sh-redir-onto (sh-open-rdwr target) fd "open" target))
+      (#t #t))))
+
+(def %sh-heredoc-made
+  (fn (_ target fd)
+    (%sh-setup-heredoc target fd)
+    #t))
 
 ; `>`'s file.  Under `set -C` a regular file already there is refused, as dash
 ; and bash refuse it, while a file that is not there is created only if it is
@@ -3347,9 +3395,10 @@
 ; All of them, in order, and nil as soon as one could not be made.
 (def %sh-setup-redirs
   (fn (self redirs)
-    (if (null? redirs)
-      #t
-      (if (%sh-setup-redir (first redirs)) (self (rest redirs)) ()))))
+    (match
+      ((null? redirs) #t)
+      ((%sh-setup-redir (first redirs)) (self (rest redirs)))
+      (#t ()))))
 
 ; The status a command answers when its redirection could not be made.  dash
 ; says 2 here and bash 1; POSIX leaves it to the shell.
@@ -3384,31 +3433,41 @@
 ; are put back in, so an fd named twice gets its first value back last.
 (def %sh-park-fds
   (fn (self fds parked)
-    (if (null? fds)
-      parked
-      (let ((slot %sh-fd-park-next))
-        (set! %sh-fd-park-next (fx+ slot 1))
-        (self (rest fds)
-              (pair (pair (first fds)
-                          (if (fx<? (sh-dup2 (first fds) slot) 0) () slot))
-                    parked))))))
+    (match
+      ((null? fds) parked)
+      (#t (self (rest fds) (pair (%sh-park-fd (first fds)) parked))))))
+
+; FD parked on the next slot, as (FD . SLOT), or (FD) when FD was not open.
+(def %sh-park-fd
+  (fn (_ fd)
+    (def slot %sh-fd-park-next)
+    (set! %sh-fd-park-next (fx+ slot 1))
+    (pair fd (match ((fx<? (sh-dup2 fd slot) 0) ()) (#t slot)))))
 
 ; Put back what %sh-park-fds or %sh-save-fds parked.
 (def %sh-restore-fds
   (fn (self parked)
-    (unless (null? parked)
-      (let ((fd (first (first parked))) (slot (rest (first parked))))
-        (if (null? slot)
-          (sh-close fd)
-          (do (sh-dup2 slot fd) (sh-close slot)))
-        (set! %sh-fd-park-next (- %sh-fd-park-next 1))
-        (self (rest parked))))))
+    (match
+      ((null? parked) ())
+      (#t (%sh-unpark-then self parked)))))
+
+(def %sh-unpark-then
+  (fn (_ restore parked)
+    (%sh-unpark (first (first parked)) (rest (first parked)))
+    (restore (rest parked))))
+
+(def %sh-unpark
+  (fn (_ fd slot)
+    (match
+      ((null? slot) (sh-close fd))
+      (#t (%sh-fd-onto slot fd)))
+    (set! %sh-fd-park-next (fx+ %sh-fd-park-next -1))))
 
 (def %sh-redir-fds
   (fn (self redirs)
-    (if (null? redirs)
-      ()
-      (pair (%sh-redir-fd (first redirs)) (self (rest redirs))))))
+    (match
+      ((null? redirs) ())
+      (#t (pair (%sh-redir-fd (first redirs)) (self (rest redirs)))))))
 
 ; What REDIRS change, parked.
 (def %sh-save-fds
@@ -5350,23 +5409,35 @@
 ; RUN is the builtin's handler, which the dispatch has already found.
 (def %sh-run-builtin-redir
   (fn (_ name run wds redirs)
-    (if (null? redirs)
-      (run wds)
-      (if (%sh-word-in? name %sh-keeps-redirs)
-        ; Set up and never put back: that is the whole of what `exec > log`
-        ; means.  See %sh-exec-builtin.
-        (if (%sh-setup-redirs redirs)
-          (run wds)
-          (%sh-redir-refused name))
-        (do
-          (def parked (%sh-save-fds redirs))
-          (guard (e (do (%sh-restore-fds parked) (error e)))
-            (do
-              (def status (if (%sh-setup-redirs redirs)
-                            (run wds)
-                            (%sh-redir-refused name)))
-              (%sh-restore-fds parked)
-              status)))))))
+    (match
+      ((null? redirs) (run wds))
+      ; Set up and never put back: that is the whole of what `exec > log`
+      ; means.  See %sh-exec-builtin.
+      ((%sh-word-in? name %sh-keeps-redirs) (%sh-run-redirected name run wds redirs))
+      (#t (%sh-run-parked name run wds redirs (%sh-save-fds redirs))))))
+
+(def %sh-run-redirected
+  (fn (_ name run wds redirs)
+    (match
+      ((%sh-setup-redirs redirs) (run wds))
+      (#t (%sh-redir-refused name)))))
+
+; The builtin run with REDIRS made, and what they changed, PARKED, put back
+; afterwards, on the way out of a raise too.
+(def %sh-run-parked
+  (fn (_ name run wds redirs parked)
+    (guard (e (%sh-restored-raise parked e))
+      (%sh-restored parked (%sh-run-redirected name run wds redirs)))))
+
+(def %sh-restored
+  (fn (_ parked status)
+    (%sh-restore-fds parked)
+    status))
+
+(def %sh-restored-raise
+  (fn (_ parked e)
+    (%sh-restore-fds parked)
+    (error e)))
 
 
 ; --- External command execution ---
@@ -5433,12 +5504,19 @@
 (def %sh-next-assign?
   (fn (_ assign? tok val)
     (match
+      (assign? (%sh-next-assign-from assign? tok val))
       ; A word past the leading run and no declaration's: the common case.
-      ((not assign?) ())
+      (#t ()))))
+
+(def %sh-next-assign-from
+  (fn (_ assign? tok val)
+    (match
       ((eq? assign? (lit decl)) (lit decl))
-      ((not (eq? (first tok) (lit tok-word))) ())
-      ((%is-assignment? val) #t)
-      ((%sh-declaration? val) (lit decl))
+      ((eq? (first tok) (lit tok-word))
+        (match
+          ((%is-assignment? val) #t)
+          ((%sh-declaration? val) (lit decl))
+          (#t ())))
       (#t ()))))
 
 ; A word that is a NAME and then `=`: a letter or underscore, then letters,
@@ -5590,13 +5668,15 @@
 ; empties f, and nothing it opens stays open.
 (def %sh-redirs-made?
   (fn (_ redirs)
-    (if (null? redirs)
-      #t
-      (do
-        (def parked (%sh-save-fds redirs))
-        (def made (%sh-setup-redirs redirs))
-        (%sh-restore-fds parked)
-        made))))
+    (match
+      ((null? redirs) #t)
+      (#t (%sh-redirs-tried redirs (%sh-save-fds redirs))))))
+
+(def %sh-redirs-tried
+  (fn (_ redirs parked)
+    (def made (%sh-setup-redirs redirs))
+    (%sh-restore-fds parked)
+    made))
 
 ; --- Sweeps ---
 ;
@@ -5816,8 +5896,8 @@
     (%sh-collect-words cur (first cur) wds redirs assign?)))
 
 ; The walk over the token list TS.  A word -- the common token -- is expanded
-; and taken without a step of the cursor, which is set where the walk hands
-; over (see %sh-collect-stop).
+; and taken without a step of the cursor, which is set once, where the command
+; ends (see %sh-collect-stop).
 (def %sh-collect-words
   (fn (self cur ts wds redirs assign?)
     (match
@@ -5826,55 +5906,91 @@
       ; already begun is not a place a reserved word is recognized (see
       ; %sh-mark-keywords).
       ((%tok-is-word? (first ts))
-        (do
-          (def tok (first ts))
-          (def val (%tok-word-val tok))
-          ; EXPANDED HERE, not in %sh-run-cmd, because this is the last place
-          ; the token's QUOTING is still known.  `val` stays raw: POSIX
-          ; recognises reserved words before expansion, so a variable holding
-          ; "then" must not become one.  The command's own leading
-          ; assignments are the exception: they go on as tokens, quoting and
-          ; all, and %sh-run-cmd expands each once the words after it are
-          ; expanded and the assignments before it made.  A declaration
-          ; utility's assignment is an argument, expanded here, unsplit.
-          (self cur (rest ts)
-            (match
-              ((not assign?) (%sh-push-fields (%sh-expand-tok tok ()) wds))
-              ((if (eq? (first tok) (lit tok-word)) (%is-assignment? val) ())
-                (if (eq? assign? #t)
-                  (pair tok wds)
-                  (%sh-push-fields (%sh-expand-tok tok #t) wds)))
-              (#t (%sh-push-fields (%sh-expand-tok tok ()) wds)))
-            redirs
-            (%sh-next-assign? assign? tok val))))
+        (self cur (rest ts) (%sh-collect-word (first ts) wds assign?) redirs
+          (%sh-next-assign? assign? (first ts) (%tok-word-val (first ts)))))
       (#t (%sh-collect-stop cur ts wds redirs assign?)))))
 
-; Where the words stop, with the cursor set on the token that stopped them: a
-; redirection is read through it, and the walk goes on after; anything else
-; ends the command, which runs with the cursor standing there.
+; WDS with the word TOK on it.  EXPANDED HERE, not in %sh-run-cmd, because this
+; is the last place the token's QUOTING is still known.  The raw text stays
+; raw: POSIX recognises reserved words before expansion, so a variable holding
+; "then" must not become one.  The command's own leading assignments are the
+; exception: they go on as tokens, quoting and all, and %sh-run-cmd expands
+; each once the words after it are expanded and the assignments before it
+; made.  A declaration utility's assignment is an argument, expanded here,
+; unsplit.
+(def %sh-collect-word
+  (fn (_ tok wds assign?)
+    (match
+      (assign? (%sh-collect-assign-place tok wds assign?))
+      (#t (%sh-push-fields (%sh-expand-tok tok ()) wds)))))
+
+(def %sh-collect-assign-place
+  (fn (_ tok wds assign?)
+    (match
+      ((%sh-assignment-tok? tok)
+        (match
+          ((eq? assign? #t) (pair tok wds))
+          (#t (%sh-push-fields (%sh-expand-tok tok #t) wds))))
+      (#t (%sh-push-fields (%sh-expand-tok tok ()) wds)))))
+
+(def %sh-assignment-tok?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word)) (%is-assignment? (first (rest tok))))
+      (#t ()))))
+
+; Where the words stop: a redirection is read from the token list, and the walk
+; goes on after it; anything else ends the command, which runs with the cursor
+; set on the token that ended it.  The cursor is written that once: a write
+; through the platform's pair setter costs more than reading a redirection.
 (def %sh-collect-stop
   (fn (_ cur ts wds redirs assign?)
-    (do
-      (set-first! cur ts)
-      (def rop (if (null? ts) () (%redir-op? (first ts))))
-      (match
-        ((not (null? rop))
-          (do
-            (%cursor-advance! cur)
-            ; NOT SPLIT.  `> $f` with two fields in $f is an ambiguous
-            ; redirect in POSIX, not two files; taking the unsplit reading
-            ; keeps the common case right and the pathological one harmless.
-            (%collect-cmd-tokens cur wds
-              (pair (%sh-read-redir-target cur rop (%default-fd rop)) redirs)
-              assign?)))
-        ; `2>err`: the descriptor number the tokenizer found against the
-        ; operator.
-        ((if (null? ts) () (%tok-is-io? (first ts)))
-          (do
-            (%cursor-advance! cur)
-            (%collect-cmd-tokens cur wds
-              (pair (%sh-io-redir cur (first ts)) redirs) assign?)))
-        (#t (%sh-run-cmd (reverse wds) (reverse redirs)))))))
+    (match
+      ((null? ts) (%sh-collect-end cur ts wds redirs))
+      ((%tok-is-io? (first ts)) (%sh-collect-io cur ts wds redirs assign?))
+      (#t (%sh-collect-op cur ts wds redirs assign? (%redir-op? (first ts)))))))
+
+; At an operator: a redirection's is read, target and all, and the walk goes
+; on after it; any other ends the command.
+(def %sh-collect-op
+  (fn (_ cur ts wds redirs assign? rop)
+    (match
+      ((null? rop) (%sh-collect-end cur ts wds redirs))
+      (#t (%sh-collect-redir cur (rest ts) wds redirs assign? rop
+            (%default-fd rop))))))
+
+; `2>err`: the descriptor number the tokenizer found against the operator,
+; which comes next.
+(def %sh-collect-io
+  (fn (_ cur ts wds redirs assign?)
+    (%sh-collect-io-op cur ts wds redirs assign?
+      (match ((null? (rest ts)) ()) (#t (%redir-op? (first (rest ts))))))))
+
+(def %sh-collect-io-op
+  (fn (_ cur ts wds redirs assign? rop)
+    (match
+      ((null? rop) (error "parse error: redirect without operator"))
+      (#t (%sh-collect-redir cur (rest (rest ts)) wds redirs assign? rop
+            (%sh-digits-int (%tok-word-val (first ts))))))))
+
+; The redirection ROP onto FD whose target starts TS, and the walk on after it.
+; NOT SPLIT.  `> $f` with two fields in $f is an ambiguous redirect in POSIX,
+; not two files; taking the unsplit reading keeps the common case right and
+; the pathological one harmless.
+(def %sh-collect-redir
+  (fn (_ cur ts wds redirs assign? rop fd)
+    (%sh-collect-past cur ts wds (pair (%sh-redir-at ts rop fd) redirs) assign?)))
+
+; The walk on past the target at the head of TS, which %sh-redir-at has read.
+(def %sh-collect-past
+  (fn (_ cur ts wds redirs assign?)
+    (%sh-collect-words cur (rest ts) wds redirs assign?)))
+
+; The command's end: the cursor set, once, on TS, the token that ended it.
+(def %sh-collect-end
+  (fn (_ cur ts wds redirs)
+    (set-first! cur ts)
+    (%sh-run-cmd (reverse wds) (reverse redirs))))
 
 ; A command's words are expanded as they are collected, so this is where the
 ; command's substitutions start to count.
