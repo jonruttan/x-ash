@@ -300,6 +300,17 @@ x -l ash                # interactive
 x -l ash -f script.sh   # batch
 ```
 
+The shell's own arguments follow `--`:
+
+```bash
+x -l ash -- -c 'echo $0 $1' name arg   # a command; $0 is name
+x -l ash -- script.sh arg              # a file; $0 is script.sh
+x -l ash -- -s arg < script.sh         # the script on stdin
+x -l ash -- -e script.sh               # with the options set takes
+```
+
+A file that cannot be opened, and `-c` with no command, answer 2.
+
 x-lang boots the dialect `lang.xon` declares, arms this bundle's module root,
 and loads `run.x` on top.
 

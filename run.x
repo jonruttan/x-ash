@@ -9,8 +9,11 @@
 ; @license MIT No Attribution (MIT-0)
 ;
 ; Usage:
-;   x -l ash              interactive
-;   x -l ash -f script.sh batch
+;   x -l ash                          interactive
+;   x -l ash -f script.sh             batch
+;   x -l ash -- -c COMMAND [NAME [ARG...]]
+;   x -l ash -- FILE [ARG...]
+;   x -l ash -- -s [ARG...]           the script on stdin
 ;
 ; This file contains no path literals and no boot code. x.sh boots the dialect
 ; lang.xon declares, arms this bundle's root with import-path!, cats this file,
@@ -40,10 +43,11 @@
 (set! %banner %ash-banner)
 (set! repl %ash-repl)
 
-; Batch (-f): stdin holds a shell script, not a session, and %ash-repl's fd-3
-; swap would discard it unread. %batch? comes from the seam and means "a file
-; was supplied". This line is last and nothing structural may follow it --
-; neither branch returns.
+; %ash-main reads the shell's arguments and starts what they ask for (see
+; ash/repl.x).  With none it is the session, or batch (-f): stdin holds a shell
+; script, not a session, and %ash-repl's fd-3 swap would discard it unread.
+; %batch? comes from the seam and means "a file was supplied". This line is
+; last and nothing structural may follow it -- %ash-main does not return.
 ;
 ; Not while this bundle is being imaged: the image writer loads this entry in a
 ; child to capture the booted lang, where %batch? is true and the child's stdin
@@ -58,6 +62,4 @@
   ()
   (do
     (set! %sh-sweeps? #t)
-    (if %batch?
-      (%ash-batch)
-      (do (%ash-banner) (%ash-repl)))))
+    (%ash-main (guard (_ ()) args))))
