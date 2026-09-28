@@ -46,8 +46,17 @@
   (fn (_ tok)
     (match
       ((eq? (first tok) (lit tok-word)) #t)
+      ((eq? (first tok) (lit tok-lit)) #t)
       ((eq? (first tok) (lit tok-sq)) #t)
       (#t (eq? (first tok) (lit tok-dq))))))
+
+; A bare word, marked or not, or a tok-lit: a bare word the marking walk found
+; to expand to itself (%sh-lit-word?).
+(def %tok-is-bare?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word)) #t)
+      (#t (eq? (first tok) (lit tok-lit))))))
 
 ; The digits of `2>err`, which the tokenizer reads apart from any other word
 ; because they run straight into a redirection operator.
@@ -250,7 +259,50 @@
       ((if (null? %sh-aliases) () (%sh-alias-here? (first toks) state toks ax))
         (%sh-alias-substitute self toks state depth acc ax))
       (#t (self (rest toks) (%sh-mark-after-word (first toks) state) depth
-                (pair (first toks) acc) ax)))))
+                (pair (%sh-lit-or-word (first toks)) acc) ax)))))
+
+; A bare word that expands to itself becomes a tok-lit here, once, and each run
+; takes its text as its one field with no expansion walk.  It has no quote, no
+; backslash, no `$` or backquote, no glob character, no tilde, and no `=`,
+; which could make it an assignment; and it is not empty, since an empty bare
+; word is no field at all.  A reserved word where one stands is marked before
+; this is asked, and keeps its mark.
+(def %sh-lit-or-word
+  (fn (_ tok)
+    (match
+      ((%sh-lit-word? tok) (list (lit tok-lit) (first (rest tok))))
+      (#t tok))))
+
+(def %sh-lit-word?
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word))
+        (%sh-lit-text? (first (rest tok)) 0 (string-length (first (rest tok)))))
+      (#t ()))))
+
+(def %sh-lit-text?
+  (fn (self s i n)
+    (match
+      ((fx<? i n)
+        (match
+          ((%sh-lit-char? (string-ref s i)) (self s (fx+ i 1) n))
+          (#t ())))
+      (#t (fx<? 0 n)))))
+
+(def %sh-lit-char?
+  (fn (_ c)
+    (match
+      ((= c #\') ())
+      ((= c #\") ())
+      ((= c #\\) ())
+      ((= c #\`) ())
+      ((= c #\$) ())
+      ((= c #\*) ())
+      ((= c #\?) ())
+      ((= c #\[) ())
+      ((= c #\~) ())
+      ((= c #\=) ())
+      (#t #t))))
 
 ; Whether a newline here ends the complete command in ACC, the tokens before
 ; it, latest first.
@@ -773,7 +825,7 @@
 (def %tok-spells?
   (fn (_ tok word)
     (match
-      ((eq? (first tok) (lit tok-word)) (string=? (first (rest tok)) word))
+      ((%tok-is-bare? tok) (string=? (first (rest tok)) word))
       (#t ()))))
 
 (def %sh-expected
@@ -3265,6 +3317,8 @@
 (def %sh-expand-tok
   (fn (_ tok assign?)
     (match
+      ; A word the marking walk found to expand to itself is its own field.
+      ((eq? (first tok) (lit tok-lit)) (list (%tok-word-val tok)))
       ; Single quotes suppress everything, globbing included.
       ((eq? (first tok) (lit tok-sq)) (list (%tok-word-val tok)))
       ; Unsplit, so there is one field or none; the escapes still come off,
@@ -3279,6 +3333,7 @@
 (def %sh-expand-tok-1
   (fn (_ tok)
     (match
+      ((eq? (first tok) (lit tok-lit)) (%tok-word-val tok))
       ((eq? (first tok) (lit tok-sq)) (%tok-word-val tok))
       (#t (%sh-first-plain
             (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ()))))))
@@ -3297,6 +3352,8 @@
 (def %sh-expand-pattern
   (fn (_ tok)
     (match
+      ; No glob character and no backslash: its text is the pattern as it is.
+      ((eq? (first tok) (lit tok-lit)) (%tok-word-val tok))
       ((eq? (first tok) (lit tok-sq)) (%sh-glob-escape-all (%tok-word-val tok)))
       (#t (%sh-first-text
             (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
@@ -5727,7 +5784,7 @@
   (fn (_ assign? tok val)
     (match
       ((eq? assign? (lit decl)) (lit decl))
-      ((eq? (first tok) (lit tok-word))
+      ((%tok-is-bare? tok)
         (match
           ((%is-assignment? val) #t)
           ((%sh-declaration? val) (lit decl))
@@ -7235,7 +7292,7 @@
     (match
       ((%tok-is-op? (first (rest (rest toks))) ")")
         (match
-          ((eq? (first (first toks)) (lit tok-word))
+          ((%tok-is-bare? (first toks))
             (match ((%reserved-word? (%tok-word-val (first toks))) ()) (#t #t)))
           (#t ())))
       (#t ()))))
@@ -7452,6 +7509,7 @@
 (def %sh-plain-tok?
   (fn (_ tok)
     (match
+      ((eq? (first tok) (lit tok-lit)) #t)
       ((eq? (first tok) (lit tok-word)) (null? (rest (rest tok))))
       ((eq? (first tok) (lit tok-sq)) #t)
       ((eq? (first tok) (lit tok-dq)) #t)
