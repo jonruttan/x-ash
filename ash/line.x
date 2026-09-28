@@ -221,16 +221,126 @@
       (if (> k (%ash-blen name)) #f
         (str=? word (%ash-bsub name 0 k))))))
 
+; --- where the word stands ----------------------------------------------------
+;
+; What the word being completed is, read from the shell's own tokens for the
+; text before it: 'command at the start of a command, 'redirect after `<`,
+; `>` and the other redirection operators, and otherwise 'argument, with the
+; command's name.  A command starts a line, and follows `|`, `||`, `&&`,
+; `;`, `&`, `(` and the reserved words that take one: `if`, `then`, `elif`,
+; `else`, `while`, `until`, `do`, `!` and `{`.  Text the tokenizer refuses,
+; such as an unclosed quote, makes the word an argument.
+(def %ash-command-heads (list "if" "then" "elif" "else" "while" "until" "do" "!" "{"))
+(def %ash-command-ops (list "|" "||" "&&" ";" ";;" "&" "("))
+(def %ash-redirect-ops (list "<" ">" ">>" "<<" "<<-" "<&" ">&" "<>" ">|"))
+
+(def %ash-tok-text
+  (fn (_ tok) (if (null? (rest tok)) "" (first (rest tok)))))
+
+; A reserved word that a command follows, standing where a command would.
+(def %ash-head?
+  (fn (_ kind text)
+    (if (eq? kind (lit tok-word)) (List includes? text %ash-command-heads) #f)))
+
+; Answers (kind . name): name is the command's, or nil at command position.
+(def %ash-word-place
+  (fn (_ before)
+    (let ((toks (guard (_ (lit refused)) (sh-tokenize before))))
+      (if (eq? toks (lit refused)) (pair (lit argument) ())
+        (let ((go (fn (self toks cmd? name redirect?)
+                    (if (null? toks)
+                      (match
+                        (redirect? (pair (lit redirect) name))
+                        (cmd? (pair (lit command) ()))
+                        (#t (pair (lit argument) name)))
+                      (let ((kind (first (first toks)))
+                            (text (%ash-tok-text (first toks)))
+                            (more (rest toks)))
+                        (match
+                          ((eq? kind (lit tok-newline)) (self more #t () #f))
+                          ((eq? kind (lit tok-io)) (self more cmd? name redirect?))
+                          ((eq? kind (lit tok-op))
+                            (match
+                              ((List includes? text %ash-command-ops) (self more #t () #f))
+                              ((List includes? text %ash-redirect-ops) (self more cmd? name #t))
+                              (#t (self more cmd? name redirect?))))
+                          ; A word after a redirection operator is its target,
+                          ; and leaves the command where it was.
+                          (redirect? (self more cmd? name #f))
+                          ((if cmd? (%ash-head? kind text) #f) (self more #t () #f))
+                          (cmd? (self more #f text #f))
+                          (#t (self more #f name #f))))))))
+          (go toks #t () #f))))))
+
+; --- paths ---------------------------------------------------------------------
+;
+; The names a word could become as a path, found by the shell's own globbing:
+; the word, its metacharacters escaped, with `*` after it.  So what Tab offers
+; is what the shell would expand -- relative to the directory `cd` last moved
+; to, with a dotfile only when the word starts with a dot -- and a directory
+; comes with a `/` after it, so the next Tab goes on inside it.  With
+; dirs-only, as for cd, the pattern ends in `*/`, which the globber answers
+; with directories alone.  A word starting `~/` is looked up under HOME and
+; offered in the form it was typed.
+
+; A match as it is offered: a directory with its `/`.
+(def %ash-slashed
+  (fn (_ hit)
+    (if (Str8 ends? "/" hit) hit
+      (if (eq? (sh-path-kind hit) (lit dir)) (Str8 append hit "/") hit))))
+
+; A path under home written back as `~` and the rest.
+(def %ash-untilde
+  (fn (_ home path)
+    (if (Str8 starts? home path)
+      (let ((k (Str8 length home)))
+        (Str8 append "~" (Str8 sub k (- (Str8 length path) k) path)))
+      path)))
+
+(def %ash-paths
+  (fn (_ word dirs-only?)
+    (let ((home (if (Str8 starts? "~/" word) (%sh-var-get "HOME") ())))
+      (let ((text (if (null? home) word
+                    (Str8 append home (Str8 sub 1 (- (Str8 length word) 1) word))))
+            (tail (if dirs-only? "*/" "*")))
+        (let ((hits (%sh-glob-matches
+                      (%sh-field (Str8 append (%sh-glob-escape-all text) tail) #t #t))))
+          (List filter (fn (_ name) (Str8 starts? word name))
+            (List map
+              (fn (_ hit)
+                (if (null? home) (%ash-slashed hit) (%ash-untilde home (%ash-slashed hit))))
+              ; When nothing matches the globber hands the pattern back; a
+              ; name that is not there is not a candidate.
+              (List filter (fn (_ hit) (not (null? (sh-path-kind hit)))) hits))))))))
+
+; The commands a word could be: the reserved words, the builtins and the
+; executables on PATH.  An empty word offers nothing rather than all of them.
+(def %ash-commands
+  (fn (_ word)
+    (if (= 0 (Str8 length word)) ()
+      (List filter (fn (_ name) (%ash-prefix? word name))
+        (List append %sh-reserved-words
+          (List append (%ash-builtin-names) (%ash-path-names!)))))))
+
+; What a word could become where it stands.  At command position it is a
+; command, or a path once it holds a `/`; after a redirection operator it is
+; a path; as an argument it is a path, and a directory when it is cd's.
+(def %ash-candidates
+  (fn (_ word place)
+    (match
+      ((eq? (first place) (lit command))
+        (if (null? (Str8 index-of "/" word)) (%ash-commands word) (%ash-paths word #f)))
+      ((eq? (first place) (lit redirect)) (%ash-paths word #f))
+      (#t (%ash-paths word (if (null? (rest place)) #f (str=? (rest place) "cd")))))))
+
 (def %ash-complete
   (fn (_ ed)
     (let ((word (%ash-word-at ed)))
-      (pair word
-        (if (= 0 (Str8 length word)) ()
+      (let ((before (let ((b (ed before)))
+                      (Str8 sub 0 (- (Str8 length b) (Str8 length word)) b))))
+        (pair word
           (List sort (fn (_ a b) (Str8 <? a b))
-            (List distinct
-              (List filter (fn (_ name) (%ash-prefix? word name))
-                (List append %sh-reserved-words
-                  (List append (%ash-builtin-names) (%ash-path-names!)))))))))))
+            (List distinct (%ash-candidates word (%ash-word-place before)))))))))
 
 ; --- installation -------------------------------------------------------------
 
