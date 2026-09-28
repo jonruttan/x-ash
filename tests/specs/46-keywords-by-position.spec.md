@@ -10,6 +10,7 @@ Before each complete command runs, one walk over its tokens marks each word
 that stands in such a place with what it does there -- `done` closes a
 construct -- and every later scan reads the mark: the stop words that end a
 command list, the nesting a skipped body counts, the `esac` a case looks for.
+Any other bare word that expands to itself comes out of the walk a tok-lit.
 
 Expectations match `/bin/sh` and `dash`.
 
@@ -19,7 +20,7 @@ Expectations match `/bin/sh` and `dash`.
 (write (%sh-mark-keywords (sh-tokenize "echo done; done")))
 ```
 ---
-    ((tok-word "echo") (tok-word "done") (tok-op ";") (tok-word "done" closes))
+    ((tok-lit "echo") (tok-lit "done") (tok-op ";") (tok-word "done" closes))
 
 ### done is an argument in a loop body
 
