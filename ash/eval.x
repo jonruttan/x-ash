@@ -268,7 +268,8 @@
 
 ; A bare word that expands to itself becomes a tok-lit here, once, and each run
 ; takes its text as its one field with no expansion walk.  It has no quote, no
-; backslash, no `$` or backquote, no glob character, no tilde, and no `=`,
+; backslash, no `$` or backquote, no glob character but a `[` that no class
+; closes, which is no pattern (the `[` of every test), no tilde, and no `=`,
 ; which could make it an assignment; and it is not empty, since an empty bare
 ; word is no field at all.  A reserved word where one stands is marked before
 ; this is asked, and keeps its mark.
@@ -291,6 +292,11 @@
       ((fx<? i n)
         (match
           ((%sh-lit-char? (string-ref s i)) (self s (fx+ i 1) n))
+          ((= (string-ref s i) #\[)
+            (match
+              ((fx<? (%sh-glob-class-end s (fx+ i 1) n) 0)
+                (self s (fx+ i 1) n))
+              (#t ())))
           (#t ())))
       (#t (fx<? 0 n)))))
 
@@ -6050,6 +6056,34 @@
 (def %sh-declaration?
   (fn (_ word) (%sh-word-in? word %sh-declaration-utilities)))
 
+; --- A command name's facts --------------------------------------------------
+;
+; What a literal command name is -- the builtin it runs, and whether it is a
+; declaration utility -- depends on its text alone, and the text of a tok-lit
+; is the one string it expands to every time its command runs.  So its facts
+; are asked the first time the token names a command, and kept after its text:
+; (tok-lit TEXT (RUN . DECLARATION?)).
+;
+; The collect notes the token that names the command it is collecting
+; (%sh-name-tok), and dispatch takes the builtin from its facts when the name
+; it is handed is that token's own text, the same string.  Any
+; other name is looked up: one an expansion made, or one whose note a command
+; run while the words were expanded wrote over.
+(def %sh-name-tok ())
+
+(def %sh-lit-facts
+  (fn (_ tok)
+    (match
+      ((null? (rest (rest tok))) (%sh-lit-keep-facts tok (first (rest tok))))
+      (#t (first (rest (rest tok)))))))
+
+(def %sh-lit-keep-facts
+  (fn (_ tok text)
+    (def facts (pair (%sh-table-get text %sh-builtin-table) (%sh-declaration? text)))
+    (set-rest! (rest tok) (list facts))
+    facts))
+
+
 ; Where the word after this one stands.  `#t` is the leading run, where a word
 ; is an assignment while every word before it was one: `a=1 b=2 cmd x=3`
 ; assigns the first two and passes the third.  A declaration utility's name
@@ -6067,6 +6101,9 @@
   (fn (_ assign? tok val)
     (match
       ((eq? assign? (lit decl)) (lit decl))
+      ; A tok-lit holds no `=`, so it is no assignment.
+      ((eq? (first tok) (lit tok-lit))
+        (match ((rest (%sh-lit-facts tok)) (lit decl)) (#t ())))
       ((%tok-is-bare? tok)
         (match
           ((%is-assignment? val) #t)
@@ -6358,7 +6395,12 @@
 
 (def %sh-dispatch-builtin
   (fn (_ name args redirs)
-    (def run (%sh-table-get name %sh-builtin-table))
+    (def run
+      (match
+        ((null? %sh-name-tok) (%sh-table-get name %sh-builtin-table))
+        ((same? name (first (rest %sh-name-tok)))
+          (first (%sh-lit-facts %sh-name-tok)))
+        (#t (%sh-table-get name %sh-builtin-table))))
     (match
       ((null? run) (%sh-run-external name args redirs))
       (#t (%sh-run-builtin-redir name run args redirs)))))
@@ -6480,7 +6522,18 @@
         (match
           ((eq? assign? #t) (pair tok wds))
           (#t (%sh-push-fields (%sh-expand-tok tok #t) wds))))
+      ; The word that names the command: a literal one is noted for dispatch
+      ; (see %sh-name-tok).
+      ((eq? assign? #t)
+        (match
+          ((eq? (first tok) (lit tok-lit)) (%sh-collect-name tok wds))
+          (#t (%sh-push-fields (%sh-expand-tok tok ()) wds))))
       (#t (%sh-push-fields (%sh-expand-tok tok ()) wds)))))
+
+(def %sh-collect-name
+  (fn (_ tok wds)
+    (set! %sh-name-tok tok)
+    (%sh-push-fields (list (first (rest tok))) wds)))
 
 (def %sh-assignment-tok?
   (fn (_ tok)
