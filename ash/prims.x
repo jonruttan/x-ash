@@ -327,13 +327,21 @@
 (def sh-getcwd (fn (_) (%sys-getcwd Sys)))
 
 ; --- What `test` needs to know about a path ------------------------------
+; The key the platform's stat record holds a file's type under: kind up to
+; x-lang v0.16.0, file-type after it.  Asked once, of the root directory.
+(def %sh-file-type-key
+  (if (null? (%assoc-entry Assoc (lit file-type) (%file-stat File "/")))
+    (lit kind)
+    (lit file-type)))
+
 ; The kind symbol ('file, 'dir, 'link, ...) or nil when the path is not there
 ; at all -- so one call answers -e, -f and -d, and a missing path is a nil
 ; rather than a raise.  File stat raises a tag 'io Err on failure, which for
 ; a shell test is an ANSWER, not an error.
 (def sh-path-kind
   (fn (_ path)
-    (guard (_ ()) (rest (%assoc-entry Assoc (lit kind) (%file-stat File path))))))
+    (guard (_ ())
+      (rest (%assoc-entry Assoc %sh-file-type-key (%file-stat File path))))))
 
 (def sh-path-size
   (fn (_ path)
@@ -350,7 +358,7 @@
 (def sh-path-lkind
   (fn (_ path)
     (guard (_ ())
-      (rest (%assoc-entry Assoc (lit kind) (%file-lstat File path))))))
+      (rest (%assoc-entry Assoc %sh-file-type-key (%file-lstat File path))))))
 
 ; The last modification, in whole seconds, or nil when nothing is there --
 ; what `test -nt` and `-ot` compare.
