@@ -978,12 +978,15 @@
 
 (def %sh-join-params (fn (_ args) (%ash-join (%sh-ifs-join-char) args)))
 
-; $0 is the shell itself; $1 upward index into %sh-args.  Out of range is the
-; empty string, which is POSIX and is what `test -z "$1"` relies on.
+; $0 is the shell itself, or what it was started to run: the script's path, or
+; the name given after a `-c` command.  $1 upward index into %sh-args.  Out of
+; range is the empty string, which is POSIX and is what `test -z "$1"` relies
+; on.
+(def %sh-arg0 "ash")
 (def %sh-arg-at
   (fn (_ n)
     (if (= n 0)
-      "ash"
+      %sh-arg0
       (if (> n (length %sh-args))
         ""
         (nth (- n 1) %sh-args)))))

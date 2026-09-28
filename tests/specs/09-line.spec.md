@@ -18,11 +18,15 @@ The completer reads the buffer through one method, `before`, the text to the
 left of the cursor; a stand-in with that method is enough to test it, and
 lets these cases run on a platform that has no editor to build a buffer with.
 
+The stand-in reads its text with `field` where the platform names a method's
+reader that, and with `member` where it names it that, as v0.15.0 does.
+
 ### the word being completed ends at the cursor and starts after a separator
 
 ```sh
 (do (import ash/line)
-    (def-class %spec-buf () text (method before (self) (member (lit text))))
+    (def-class %spec-buf () text
+      (method before (self) (guard (_ (member (lit text))) (field (lit text)))))
     (%ash-word-at (new %spec-buf text "echo one | gre")))
 ```
 ---
