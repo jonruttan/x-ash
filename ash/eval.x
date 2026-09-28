@@ -68,12 +68,17 @@
 ; before the command runs, and marks each bare word that stands where a
 ; reserved word is recognized with its role (%sh-keyword-role); these read the
 ; mark, so every later scan -- stop words, nesting, skipped branches -- agrees
-; on which words are syntax.
+; on which words are syntax.  The mark is a word's third element; a fourth is
+; the plan its expansion keeps (%sh-tok-plan), and an unmarked word that keeps
+; one has nil for its mark.
 (def %tok-is-keyword?
   (fn (_ tok)
     (match
       ((eq? (first tok) (lit tok-word))
-        (match ((null? (rest (rest tok))) ()) (#t #t)))
+        (match
+          ((null? (rest (rest tok))) ())
+          ((null? (first (rest (rest tok)))) ())
+          (#t #t)))
       (#t ()))))
 
 ; The role TOK was marked with, or nil when it is no marked word.
@@ -993,7 +998,7 @@
         (pair "#" (fn (_) (%ash-number->str (length %sh-args))))
         ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
         ; same thing at all: `"$@"` is one field per parameter and never
-        ; reaches this table -- %sh-expand-dollar answers it directly, because
+        ; reaches this table -- %sh-add-all-params answers it directly, because
         ; a table of strings cannot say "several fields".  What is left for
         ; both to share is the unquoted reading, where the string is built
         ; and then split again, and the JOIN is on IFS either way.
@@ -2726,12 +2731,23 @@
 ; `$(( $(wc -l <f) + 1 ))`.  Most expressions are names, numbers and operators,
 ; and a plain run that reaches E says there is nothing to expand without
 ; building anything.
+;
+; A word's plan reads the expression once (%sh-arith-read): its text, and
+; whether a plain run reaches its end.  Each run of the plan expands it when
+; it is not plain (%sh-arith-read-text).
 (def %sh-arith-text
+  (fn (_ s i e) (%sh-arith-read-text (%sh-arith-read s i e))))
+
+(def %sh-arith-read
   (fn (_ s i e)
+    (list (substring s i e)
+          (= (%sh-run-end (%sh-plain-run s i e %sh-mode-heredoc #t ())) e))))
+
+(def %sh-arith-read-text
+  (fn (_ read)
     (match
-      ((= (%sh-run-end (%sh-plain-run s i e %sh-mode-heredoc #t ())) e)
-        (substring s i e))
-      (#t (%sh-expand-str-dq (substring s i e))))))
+      ((first (rest read)) (first read))
+      (#t (%sh-expand-str-dq (first read))))))
 
 ; --- The walk ---------------------------------------------------------------
 ;
@@ -2747,131 +2763,128 @@
 ; them, as dash writes them there.
 (def %sh-mode-heredoc 4)
 
-; The run of plain text a word opens with, read as the walk below would read
-; it first: none unless the word is bare, and none when it opens with a `~`,
-; which the walk decides for itself.
-(def %sh-lead-run
+; A word is read once into a PLAN: the steps its expansion takes, each with the
+; mode it was read in -- a run of plain text, a quote that opens a field, an
+; escape, a parameter, a substitution, an arithmetic expression, a `${...}`, a
+; tilde.  The plan is run each time the word is expanded (%sh-plan-run), and
+; asks then for everything that can change between runs: a value, a
+; substitution's output, HOME.  A word's token keeps its plan (%sh-tok-plan),
+; so the body of a loop or a function is read once however often it runs.
+;
+; ASSIGN? is read into the plan: in an assignment a `~` may follow an `=` or a
+; `:`, so a plain run stops at each `~` there.
+(def %sh-word-plan
   (fn (_ s n mode0 assign?)
+    (%sh-plan-from s n assign? 0 mode0
+      (match ((= mode0 %sh-mode-bare) ()) (#t (list %sh-step-open))))))
+
+; The steps a plan is made of.  A step is a list headed by what it does.
+(def %sh-step-open (list (lit open)))
+(def %sh-step-lit (fn (_ text meta?) (list (lit lit) text meta?)))
+(def %sh-step-add (fn (_ text meta?) (list (lit add) text meta?)))
+
+; The read from I in MODE, STEPS the plan so far, latest first.  Every character
+; of every word is read here once, so the read steps on the integer doors and
+; asks with `match`, reading the character in each clause rather than binding
+; it; a clause that needs a binding calls a function that makes it.
+(def %sh-plan-from
+  (fn (self s n assign? i mode steps)
     (match
-      ((= mode0 %sh-mode-bare)
+      ((fx<? i n)
         (match
-          ((= n 0) (%sh-run 0 ()))
-          ((= (string-ref s 0) #\~) (%sh-run 0 ()))
-          (#t (%sh-plain-run s 0 n mode0 () assign?))))
-      (#t (%sh-run 0 ())))))
-
-; The walk over a word that is not one plain run, from START with the
-; accumulator A0.  It is a function of its own so that a plain word, which
-; never walks, never builds the walker either: `go` is a closure over this
-; word, made on each call.
-(def %sh-expand-walk
-  (fn (_ s n mode0 split? assign? start a0)
-    (def eq (match (assign? (%sh-first-eq s 0 n)) (#t -1)))
-    ; Every character of every word comes through here, so the walk steps on
-    ; the integer doors and asks with `match`, reading the character in each
-    ; clause rather than binding it.  A clause that needs a binding calls a
-    ; function that makes it, as a clause holds one form.
-    (def go
-      (fn (self i mode a)
-        (match
-          ((fx<? i n)
+          ; Inside single quotes: literal until the closing quote.
+          ((= mode %sh-mode-sq)
             (match
-              ; Inside single quotes: literal until the closing quote.
-              ((= mode %sh-mode-sq)
-                (match
-                  ((= (string-ref s i) #\') (self (fx+ i 1) %sh-mode-bare a))
-                  (#t (%sh-walk-quoted self s i n mode a))))
-              ; A quote mark switches region and starts a field.
-              ((= (string-ref s i) #\')
-                (match
-                  ((= mode %sh-mode-bare)
-                    (self (fx+ i 1) %sh-mode-sq (%sh-acc-open a)))
-                  (#t (%sh-walk-run self s i n mode a split? assign?))))
-              ((= (string-ref s i) #\")
-                (match
-                  ((= mode %sh-mode-bare)
-                    (self (fx+ i 1) %sh-mode-dq (%sh-acc-open a)))
-                  ((= mode %sh-mode-dq)
-                    (self (fx+ i 1) %sh-mode-bare (%sh-acc-open a)))
-                  (#t (%sh-walk-run self s i n mode a split? assign?))))
-              ; A backslash emits what it protects and resumes past it, so a
-              ; `$` it protected stays a `$`.  A trailing backslash protects
-              ; nothing and stands for itself; it is claimed here, because the
-              ; plain-run scanner cannot consume a backslash and the escape
-              ; needs a character to protect.
-              ((= (string-ref s i) #\\)
-                (match
-                  ((fx<? (fx+ i 1) n) (%sh-walk-escape self s i mode a))
-                  (#t (self (fx+ i 1) mode
-                        (%sh-acc-add-literal a (substring s i (fx+ i 1)) #t)))))
-              ; The older backtick substitution.
-              ((= (string-ref s i) #\`)
-                (%sh-walk-backtick self s i n mode a split?
-                  (%sh-bt-end s (fx+ i 1) n)))
-              ((= (string-ref s i) #\$) (%sh-expand-dollar self s i n mode a split?))
-              ; A tilde where one may expand; an ordinary character where
-              ; not.  It is asked here rather than scanned for beforehand
-              ; because this is the only place that knows the `~` is bare.
-              ((= (string-ref s i) #\~)
-                (match
-                  ((= mode %sh-mode-bare)
-                    (%sh-walk-tilde self i mode a (%sh-tilde-home s i n assign? eq)))
-                  (#t (%sh-walk-run self s i n mode a split? assign?))))
-              (#t (%sh-walk-run self s i n mode a split? assign?))))
-          (#t (%sh-acc-finish a)))))
-    (go start mode0 a0)))
+              ((= (string-ref s i) #\') (self s n assign? (fx+ i 1) %sh-mode-bare steps))
+              (#t (%sh-plan-quoted s n assign? i mode steps
+                    (%sh-plain-run s i n mode () ())))))
+          ; A quote mark switches region and starts a field.
+          ((= (string-ref s i) #\')
+            (match
+              ((= mode %sh-mode-bare)
+                (self s n assign? (fx+ i 1) %sh-mode-sq (pair %sh-step-open steps)))
+              (#t (%sh-plan-text s n assign? i mode steps))))
+          ((= (string-ref s i) #\")
+            (match
+              ((= mode %sh-mode-bare)
+                (self s n assign? (fx+ i 1) %sh-mode-dq (pair %sh-step-open steps)))
+              ((= mode %sh-mode-dq)
+                (self s n assign? (fx+ i 1) %sh-mode-bare (pair %sh-step-open steps)))
+              (#t (%sh-plan-text s n assign? i mode steps))))
+          ; A backslash takes what it protects and the read resumes past it, so
+          ; a `$` it protected stays a `$`.  A trailing backslash protects
+          ; nothing and stands for itself; it is claimed here, because the
+          ; plain-run scanner cannot consume a backslash and the escape needs a
+          ; character to protect.
+          ((= (string-ref s i) #\\)
+            (match
+              ((fx<? (fx+ i 1) n) (%sh-plan-escape s n assign? i mode steps))
+              (#t (self s n assign? (fx+ i 1) mode
+                    (pair (%sh-step-lit (substring s i (fx+ i 1)) #t) steps)))))
+          ; The older backtick substitution.
+          ((= (string-ref s i) #\`)
+            (%sh-plan-backtick s n assign? i mode steps (%sh-bt-end s (fx+ i 1) n)))
+          ((= (string-ref s i) #\$) (%sh-plan-dollar s n assign? i mode steps))
+          ; A tilde where one may expand; an ordinary character where not.  It
+          ; is asked here rather than scanned for beforehand because this is
+          ; the only place that knows the `~` is bare.
+          ((= (string-ref s i) #\~)
+            (match
+              ((= mode %sh-mode-bare)
+                (self s n assign? (fx+ i 1) mode (pair (list (lit tilde) i) steps)))
+              (#t (%sh-plan-text s n assign? i mode steps))))
+          (#t (%sh-plan-text s n assign? i mode steps))))
+      (#t (reverse steps)))))
 
-; Single-quoted text from I, up to its closing quote.
-(def %sh-walk-quoted
-  (fn (_ go s i n mode a)
-    (def r (%sh-plain-run s i n mode () ()))
-    (def e (%sh-run-end r))
-    (go e mode (%sh-acc-add-literal a (substring s i e) (%sh-run-meta? r)))))
+; Single-quoted text from I to where the run R ends, at its closing quote.
+(def %sh-plan-quoted
+  (fn (_ s n assign? i mode steps r)
+    (%sh-plan-from s n assign? (%sh-run-end r) mode
+      (pair (%sh-step-lit (substring s i (%sh-run-end r)) (%sh-run-meta? r)) steps))))
 
 ; The backslash at I and the character it protects.
-(def %sh-walk-escape
-  (fn (_ go s i mode a)
-    (def text
+(def %sh-plan-escape
+  (fn (_ s n assign? i mode steps)
+    (%sh-plan-escaped s n assign? i mode steps
       (match
         ((%sh-escapable-in? mode (string-ref s (fx+ i 1)))
           (substring s (fx+ i 1) (fx+ i 2)))
-        (#t (substring s i (fx+ i 2)))))
-    (go (fx+ i 2) mode (%sh-acc-add-literal a text (%sh-has-glob-meta? text)))))
+        (#t (substring s i (fx+ i 2)))))))
+
+(def %sh-plan-escaped
+  (fn (_ s n assign? i mode steps text)
+    (%sh-plan-from s n assign? (fx+ i 2) mode
+      (pair (%sh-step-lit text (%sh-has-glob-meta? text)) steps))))
 
 ; The backtick at I, whose closing one is at E, or a literal one when E is -1.
-(def %sh-walk-backtick
-  (fn (_ go s i n mode a split? e)
+(def %sh-plan-backtick
+  (fn (_ s n assign? i mode steps e)
     (match
-      ((fx<? e 0) (go (fx+ i 1) mode (%sh-acc-add a (substring s i (fx+ i 1)) ())))
-      (#t (go (fx+ e 1) mode
-            (%sh-add-expansion a mode
-              (%sh-cmd-subst (%sh-bt-unescape (substring s (fx+ i 1) e)))
-              split?))))))
-
-; The bare `~` at I, which HOME, when there is one, stands for.  The result is
-; LITERAL: a home directory with a space in it is one field, and one with a `*`
-; is not a pattern.
-(def %sh-walk-tilde
-  (fn (_ go i mode a home)
-    (match
-      ((null? home) (go (fx+ i 1) mode (%sh-acc-add a "~" ())))
-      (#t (go (fx+ i 1) mode
-            (%sh-acc-add-literal a home (%sh-has-glob-meta? home)))))))
+      ((fx<? e 0)
+        (%sh-plan-from s n assign? (fx+ i 1) mode
+          (pair (%sh-step-add (substring s i (fx+ i 1)) ()) steps)))
+      (#t (%sh-plan-from s n assign? (fx+ e 1) mode
+            (pair (list (lit subst) mode (%sh-bt-unescape (substring s (fx+ i 1) e)))
+                  steps))))))
 
 ; Ordinary text goes in a run at a time: a plain word is one substring rather
 ; than one per character.  A bare `*` is the glob; the same character inside
 ; quotes is not, so the run is escaped or not by the mode it was read in.
-(def %sh-walk-run
-  (fn (_ go s i n mode a split? assign?)
-    (def r (%sh-plain-run s i n mode ()
-             (match (assign? (= mode %sh-mode-bare)) (#t ()))))
-    (def e (%sh-run-end r))
-    ; A run of nothing would not advance, which would hang rather than answer.
-    ; Every non-plain character is claimed by an earlier clause, so this is
-    ; unreachable and says so if it ever is.
-    (match ((= e i) (error "internal: expansion made no progress")) (#t ()))
-    (go e mode
-      (%sh-walk-run-add a mode (substring s i e) (%sh-run-meta? r) split?))))
+(def %sh-plan-text
+  (fn (_ s n assign? i mode steps)
+    (%sh-plan-text-to s n assign? i mode steps
+      (%sh-plain-run s i n mode () (match (assign? (= mode %sh-mode-bare)) (#t ()))))))
+
+; A run of nothing would not advance, which would hang rather than answer.
+; Every non-plain character is claimed by an earlier clause, so this is
+; unreachable and says so if it ever is.
+(def %sh-plan-text-to
+  (fn (_ s n assign? i mode steps r)
+    (match
+      ((= (%sh-run-end r) i) (error "internal: expansion made no progress"))
+      (#t (%sh-plan-from s n assign? (%sh-run-end r) mode
+            (pair (list (lit run) mode (substring s i (%sh-run-end r)) (%sh-run-meta? r))
+                  steps))))))
 
 ; The word of `${x:-word}` in place is split where it is not quoted, its
 ; literal text as well as its expansions (see %sh-add-word).
@@ -2892,40 +2905,128 @@
 ; on, and the field must start open or `cmd ""` passes no argument at all.
 ;
 ; A bare word that is one plain run -- `true`, `-lt`, `*.c` -- is its own
-; single field, with no accumulator to build and join and no walk to make.
-; Any other word starts the walk past its leading run, so no character is read
-; twice.  An empty word walks too, because an empty bare word is no field at
-; all and an empty quoted one is one empty field, which the walk tells apart.
-; SPLIT? may also be `fields`, for the word of `${x:-word}` standing in place:
-; then its unquoted literal text is split as an expansion's would be, so that
-; word is always walked, its leading run included.  And it may be `pattern`,
-; for a word that is a pattern -- a `case` pattern, the operand of `${x#pat}`:
-; nothing is split, and a backslash an expansion's value holds escapes the
-; character after it (see %sh-add-expansion).
+; single field, with no accumulator to build and join.  An empty word runs its
+; plan too, because an empty bare word is no field at all and an empty quoted
+; one is one empty field, which the plan tells apart.  SPLIT? may also be
+; `fields`, for the word of `${x:-word}` standing in place: then its unquoted
+; literal text is split as an expansion's would be, so even a word that is one
+; run runs its plan.  And it may be `pattern`, for a word that is a pattern --
+; a `case` pattern, the operand of `${x#pat}`: nothing is split, and a
+; backslash an expansion's value holds escapes the character after it (see
+; %sh-add-expansion).
 (def %sh-expand-str
   (fn (_ s mode0 split? assign?)
-    (def n (string-length s))
-    (match
-      ((eq? split? (lit fields))
-        (%sh-expand-walk s n mode0 split? assign? 0 %sh-acc-empty))
-      (#t (%sh-expand-led s n mode0 split? assign?
-            (%sh-lead-run s n mode0 assign?))))))
+    (%sh-expand-plan (%sh-word-plan s (string-length s) mode0 assign?) s split?
+                     assign?)))
 
-; The word S past the run LEAD it opens with.
-(def %sh-expand-led
-  (fn (_ s n mode0 split? assign? lead)
+; The fields S expands to, by the plan PLAN its text reads to.
+(def %sh-expand-plan
+  (fn (_ plan s split? assign?)
     (match
-      ((= (%sh-run-end lead) 0)
-        (%sh-expand-walk s n mode0 split? assign? 0
-          (match
-            ((= mode0 %sh-mode-bare) %sh-acc-empty)
-            (#t (%sh-acc-open %sh-acc-empty)))))
-      ((= (%sh-run-end lead) n)
-        (list (%sh-field s (%sh-run-meta? lead) ())))
-      (#t
-        (%sh-expand-walk s n mode0 split? assign? (%sh-run-end lead)
-          (%sh-acc-add %sh-acc-empty (substring s 0 (%sh-run-end lead))
-                       (%sh-run-meta? lead)))))))
+      ((%sh-plan-one-run? plan split?)
+        (list (%sh-field s (first (rest (rest (rest (first plan))))) ())))
+      (#t (%sh-plan-run plan s (string-length s) split? assign? %sh-acc-empty)))))
+
+(def %sh-plan-one-run?
+  (fn (_ plan split?)
+    (match
+      ((null? plan) ())
+      ((not (null? (rest plan))) ())
+      ((eq? split? (lit fields)) ())
+      ((eq? (first (first plan)) (lit run)) (= (first (rest (first plan))) %sh-mode-bare))
+      (#t ()))))
+
+; A plan run against the variables of the moment: each step adds to the word
+; being built A, in order, as the read that made it would have.
+(def %sh-plan-run
+  (fn (self steps s n split? assign? a)
+    (match
+      ((null? steps) (%sh-acc-finish a))
+      (#t (self (rest steps) s n split? assign?
+                (%sh-plan-step (first steps) s n split? assign? a))))))
+
+; What the steps a word is most often made of -- a run, a parameter -- come
+; first.  A step in a mode is (WHAT MODE ...); the others are (WHAT ...).
+(def %sh-plan-step
+  (fn (_ step s n split? assign? a)
+    (match
+      ((eq? (first step) (lit run))
+        (%sh-walk-run-add a (first (rest step)) (first (rest (rest step)))
+                          (first (rest (rest (rest step)))) split?))
+      ((eq? (first step) (lit param))
+        (%sh-add-expansion a (first (rest step))
+          (%sh-var-value-checked (first (rest (rest step)))) split?))
+      ((eq? (first step) (lit lit))
+        (%sh-acc-add-literal a (first (rest step)) (first (rest (rest step)))))
+      ((eq? (first step) (lit open)) (%sh-acc-open a))
+      ((eq? (first step) (lit add))
+        (%sh-acc-add a (first (rest step)) (first (rest (rest step)))))
+      ((eq? (first step) (lit arith))
+        (%sh-add-expansion a (first (rest step))
+          (%sh-arith-eval (%sh-arith-read-text (rest (rest step)))) split?))
+      ((eq? (first step) (lit subst))
+        (%sh-add-expansion a (first (rest step))
+          (%sh-cmd-subst (first (rest (rest step)))) split?))
+      ((eq? (first step) (lit braced))
+        (%sh-plan-operated a (first (rest step)) split?
+          (%sh-brace-expand (first (rest (rest step))))))
+      ((eq? (first step) (lit params))
+        (%sh-add-all-params a (first (rest (rest step))) (first (rest step)) split?))
+      (#t (%sh-plan-tilde a (%sh-tilde-home s (first (rest step)) n assign?
+                              (match (assign? (%sh-first-eq s 0 n)) (#t -1))))))))
+
+; A value operator that fired answers its word to stand here, rather than
+; text (see %sh-param-default).
+(def %sh-plan-operated
+  (fn (_ a mode split? r)
+    (match
+      ((pair? r) (%sh-add-word a mode (rest r) split?))
+      (#t (%sh-add-expansion a mode r split?)))))
+
+; The bare `~`, which HOME, when there is one, stands for.  The result is
+; LITERAL: a home directory with a space in it is one field, and one with a `*`
+; is not a pattern.
+(def %sh-plan-tilde
+  (fn (_ a home)
+    (match
+      ((null? home) (%sh-acc-add a "~" ()))
+      (#t (%sh-acc-add-literal a home (%sh-has-glob-meta? home))))))
+
+; A word's token keeps the plan its text reads to, made the first time the
+; word is expanded, in a fourth element after its mark -- nil when it has
+; none.  ASSIGN? reads into a plan, so it is kept with it, and a token
+; expanded the other way is read again for that.
+(def %sh-tok-plan
+  (fn (_ tok assign?)
+    (%sh-tok-kept-plan tok (match (assign? #t) (#t ())) (%sh-tok-kept tok))))
+
+(def %sh-tok-kept
+  (fn (_ tok)
+    (match
+      ((null? (rest (rest tok))) ())
+      ((null? (rest (rest (rest tok)))) ())
+      (#t (first (rest (rest (rest tok))))))))
+
+(def %sh-tok-kept-plan
+  (fn (_ tok flag kept)
+    (match
+      ((null? kept) (%sh-tok-keep tok flag))
+      ((eq? (first kept) flag) (rest kept))
+      (#t (%sh-tok-keep tok flag)))))
+
+(def %sh-tok-keep
+  (fn (_ tok flag)
+    (def plan (%sh-word-plan (%tok-word-val tok) (string-length (%tok-word-val tok))
+                             (%sh-tok-mode tok) flag))
+    (%sh-tok-put tok (pair flag plan))
+    plan))
+
+(def %sh-tok-put
+  (fn (_ tok kept)
+    (match
+      ((null? (rest (rest tok))) (set-rest! (rest tok) (list () kept)))
+      ((null? (rest (rest (rest tok)))) (set-rest! (rest (rest tok)) (list kept)))
+      (#t (set-first! (rest (rest (rest tok))) kept)))))
 
 ; Whether C names a one-character parameter: $? $$ $! $- $# $@ $* and $1..$9.
 ; A single digit only, per POSIX: `$10` is `$1` followed by a literal 0, and
@@ -2942,89 +3043,76 @@
       ((= c #\*) #t)
       (#t (%sh-digit? c)))))
 
-; The `$` arm, lifted out so the walk above stays readable.  CONT is the
-; walker's own continuation, resumed at an index with an accumulator.  A `$`
-; at the very end is a literal `$`.
-(def %sh-expand-dollar
-  (fn (_ cont s i n mode a split?)
+; The `$` at I.  A `$` at the very end is a literal `$`.
+(def %sh-plan-dollar
+  (fn (_ s n assign? i mode steps)
     (match
       ((fx<? (fx+ i 1) n)
-        (%sh-dollar-at cont s i (fx+ i 1) n mode a split? (string-ref s (fx+ i 1))))
-      (#t (%sh-acc-finish (%sh-acc-add a "$" ()))))))
+        (%sh-plan-dollar-at s n assign? i (fx+ i 1) mode steps (string-ref s (fx+ i 1))))
+      (#t (%sh-plan-dollar-literal s n assign? i mode steps)))))
 
 ; The `$` at I, J the index after it and D the character there.
-(def %sh-dollar-at
-  (fn (_ cont s i j n mode a split? d)
+(def %sh-plan-dollar-at
+  (fn (_ s n assign? i j mode steps d)
     (match
       ; $NAME, the most common, so asked first.
       ((%sh-name-start? d)
-        (%sh-dollar-name cont s j mode a split? (%sh-name-end s (fx+ j 1) n)))
-      ; $( ... ) -- a command substitution.
+        (%sh-plan-param s n assign? j (%sh-name-end s (fx+ j 1) n) mode steps))
+      ; $( ... ) -- a command substitution, or an arithmetic expansion.
       ((= d #\()
-        (%sh-dollar-paren cont s i j mode a split? (%sh-cs-end s (fx+ j 1) n 0)))
+        (%sh-plan-paren s n assign? i j mode steps (%sh-cs-end s (fx+ j 1) n 0)))
       ; ${NAME}
       ((= d #\{)
-        (%sh-dollar-brace cont s i j mode a split? (%sh-brace-end s (fx+ j 1) n 0)))
+        (%sh-plan-brace s n assign? i j mode steps (%sh-brace-end s (fx+ j 1) n 0)))
       ; `$@` and `$*` are the specials that are not one string -- see
       ; %sh-add-all-params.
-      ((= d #\@) (cont (fx+ j 1) mode (%sh-add-all-params a "@" mode split?)))
-      ((= d #\*) (cont (fx+ j 1) mode (%sh-add-all-params a "*" mode split?)))
-      ((%sh-special-param? d)
-        (%sh-substituted cont (fx+ j 1) mode a split?
-          (%sh-var-value-checked (substring s j (fx+ j 1)))))
+      ((= d #\@) (%sh-plan-params s n assign? (fx+ j 1) mode steps "@"))
+      ((= d #\*) (%sh-plan-params s n assign? (fx+ j 1) mode steps "*"))
+      ((%sh-special-param? d) (%sh-plan-param s n assign? j (fx+ j 1) mode steps))
       ; $ followed by anything else is a literal $.
-      (#t (%sh-dollar-literal cont i mode a)))))
+      (#t (%sh-plan-dollar-literal s n assign? i mode steps)))))
 
-; The walk on at NEXT with TEXT, an expansion's value, added.
-(def %sh-substituted
-  (fn (_ cont next mode a split? text)
-    (cont next mode (%sh-add-expansion a mode text split?))))
+(def %sh-plan-dollar-literal
+  (fn (_ s n assign? i mode steps)
+    (%sh-plan-from s n assign? (fx+ i 1) mode (pair (%sh-step-add "$" ()) steps))))
 
-(def %sh-dollar-literal
-  (fn (_ cont i mode a) (cont (fx+ i 1) mode (%sh-acc-add a "$" ()))))
+; The parameter named from J to E.
+(def %sh-plan-param
+  (fn (_ s n assign? j e mode steps)
+    (%sh-plan-from s n assign? e mode
+      (pair (list (lit param) mode (substring s j e)) steps))))
 
-; The name from J to E.
-(def %sh-dollar-name
-  (fn (_ cont s j mode a split? e)
-    (%sh-substituted cont e mode a split?
-      (%sh-var-value-checked (substring s j e)))))
+(def %sh-plan-params
+  (fn (_ s n assign? next mode steps which)
+    (%sh-plan-from s n assign? next mode (pair (list (lit params) mode which) steps))))
 
 ; The substitution whose `(` is at J and whose `)` is at E, or -1.
-(def %sh-dollar-paren
-  (fn (_ cont s i j mode a split? e)
+(def %sh-plan-paren
+  (fn (_ s n assign? i j mode steps e)
     (match
-      ((fx<? e 0) (%sh-dollar-literal cont i mode a))
-      (#t (%sh-substituted cont (fx+ e 1) mode a split?
-            (match
-              ((%sh-arith-at? s (fx+ j 1) e)
-                (%sh-arith-eval (%sh-arith-text s (fx+ j 2) (fx+ e -1))))
-              (#t (%sh-cmd-subst (substring s (fx+ j 1) e)))))))))
+      ((fx<? e 0) (%sh-plan-dollar-literal s n assign? i mode steps))
+      ((%sh-arith-at? s (fx+ j 1) e)
+        (%sh-plan-from s n assign? (fx+ e 1) mode
+          (pair (pair (lit arith) (pair mode (%sh-arith-read s (fx+ j 2) (fx+ e -1))))
+                steps)))
+      (#t (%sh-plan-from s n assign? (fx+ e 1) mode
+            (pair (list (lit subst) mode (substring s (fx+ j 1) e)) steps))))))
 
-; The `${` at J whose `}` is at E, or -1.
-(def %sh-dollar-brace
-  (fn (_ cont s i j mode a split? e)
+; The `${` at J whose `}` is at E, or -1.  `${@}` and `${*}` ask exactly what
+; `$@` and `$*` ask, so they are answered in the same place.
+(def %sh-plan-brace
+  (fn (_ s n assign? i j mode steps e)
     (match
-      ((fx<? e 0) (%sh-dollar-literal cont i mode a))
-      (#t (%sh-dollar-braced cont e mode a split? (substring s (fx+ j 1) e))))))
+      ((fx<? e 0) (%sh-plan-dollar-literal s n assign? i mode steps))
+      (#t (%sh-plan-braced s n assign? (fx+ e 1) mode steps (substring s (fx+ j 1) e))))))
 
-(def %sh-dollar-braced
-  (fn (_ cont e mode a split? inner)
+(def %sh-plan-braced
+  (fn (_ s n assign? next mode steps inner)
     (match
-      ; `${@}` and `${*}` ask exactly what `$@` and `$*` ask, so they are
-      ; answered in the same place.
-      ((string=? inner "@")
-        (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?)))
-      ((string=? inner "*")
-        (cont (fx+ e 1) mode (%sh-add-all-params a inner mode split?)))
-      (#t (%sh-dollar-operated cont e mode a split? (%sh-brace-expand inner))))))
-
-; A value operator that fired answers its word to stand here, rather than
-; text (see %sh-param-default).
-(def %sh-dollar-operated
-  (fn (_ cont e mode a split? r)
-    (match
-      ((pair? r) (cont (fx+ e 1) mode (%sh-add-word a mode (rest r) split?)))
-      (#t (%sh-substituted cont (fx+ e 1) mode a split? r)))))
+      ((string=? inner "@") (%sh-plan-params s n assign? next mode steps inner))
+      ((string=? inner "*") (%sh-plan-params s n assign? next mode steps inner))
+      (#t (%sh-plan-from s n assign? next mode
+            (pair (list (lit braced) mode inner) steps))))))
 
 ; --- Pathname expansion -----------------------------------------------------
 ;
@@ -3325,9 +3413,10 @@
       ; because nothing here is a pattern.
       (assign?
         (list (%sh-first-plain
-                (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #f assign?))))
+                (%sh-expand-plan (%sh-tok-plan tok assign?) (%tok-word-val tok) #f
+                                 assign?))))
       (#t (%sh-glob-fields
-            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) #t assign?))))))
+            (%sh-expand-plan (%sh-tok-plan tok ()) (%tok-word-val tok) #t ()))))))
 
 ; The unsplit reading, for a `case` subject and a redirection target.
 (def %sh-expand-tok-1
@@ -3336,7 +3425,7 @@
       ((eq? (first tok) (lit tok-lit)) (%tok-word-val tok))
       ((eq? (first tok) (lit tok-sq)) (%tok-word-val tok))
       (#t (%sh-first-plain
-            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok) () ()))))))
+            (%sh-expand-plan (%sh-tok-plan tok ()) (%tok-word-val tok) () ()))))))
 
 ; The first of the fields FS, or "" when there are none.  Not globbed, but the
 ; escapes still come off -- a redirection target and a case subject are
@@ -3356,8 +3445,8 @@
       ((eq? (first tok) (lit tok-lit)) (%tok-word-val tok))
       ((eq? (first tok) (lit tok-sq)) (%sh-glob-escape-all (%tok-word-val tok)))
       (#t (%sh-first-text
-            (%sh-expand-str (%tok-word-val tok) (%sh-tok-mode tok)
-                            (lit pattern) ()))))))
+            (%sh-expand-plan (%sh-tok-plan tok ()) (%tok-word-val tok) (lit pattern)
+                             ()))))))
 
 (def %sh-first-text
   (fn (_ fs) (match ((null? fs) "") (#t (%sh-field-text (first fs))))))
@@ -7510,7 +7599,8 @@
   (fn (_ tok)
     (match
       ((eq? (first tok) (lit tok-lit)) #t)
-      ((eq? (first tok) (lit tok-word)) (null? (rest (rest tok))))
+      ((eq? (first tok) (lit tok-word))
+        (match ((null? (rest (rest tok))) #t) (#t (null? (first (rest (rest tok)))))))
       ((eq? (first tok) (lit tok-sq)) #t)
       ((eq? (first tok) (lit tok-dq)) #t)
       ((eq? (first tok) (lit tok-io)) #t)
@@ -7870,6 +7960,7 @@
           ((string=? (first (rest (first toks))) "&") toks)
           (#t (self (rest toks) depth))))
       ((null? (rest (rest (first toks)))) (self (rest toks) depth))
+      ((null? (first (rest (rest (first toks))))) (self (rest toks) depth))
       (#t (%sh-async-past-word self toks depth (%tok-role (first toks)))))))
 
 ; The scan past the marked word at the head of TOKS, whose role is ROLE.

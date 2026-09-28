@@ -216,6 +216,7 @@
       ((null? (rest l)) (first l))
       (#t (self (rest l))))))
 (def set-first! %set-first!)
+(def set-rest! %set-rest!)
 
 ; --- The shell's syscalls ----------------------------------------------------
 ; Forwards to the Sys and File classes, which carry every process and file

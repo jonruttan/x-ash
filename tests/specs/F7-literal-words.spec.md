@@ -3,11 +3,11 @@
 The walk that marks a complete command before it runs turns each bare word
 that expands to itself into a tok-lit: no quote, no backslash, no `$` or
 backquote, no glob character, no tilde and no `=`.  Its text is its one field,
-taken with no expansion walk each time the command runs -- every time round a
-loop, every call of a function.
+taken as it is each time the command runs -- every time round a loop, every
+call of a function -- with no plan read for it or run.
 
 The first case is a pin that holds on main too; its expectation matches
-`dash` and `/bin/sh`.  The last counts the expansion walks a command makes.
+`dash` and `/bin/sh`.  The last counts the words a command reads into plans.
 
 ### constant words among the others, in each place a word stands
 
@@ -25,25 +25,25 @@ The first case is a pin that holds on main too; its expectation matches
 ---
     ((tok-lit "echo") (tok-word "a$x") (tok-sq "b") (tok-word "c=1") (tok-word "~") (tok-word "*.c") (tok-lit "d"))
 
-### a constant word is not walked when its command runs
+### a constant word is never read into a plan
 
 ```sh
-(let ((saved %sh-expand-str)
-      (walks 0)
+(let ((saved %sh-word-plan)
+      (reads 0)
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
                (fn (_) (%eval-list (%mk-cursor ts)))))))
   (def count
     (fn (_ text)
       (def thunk (run text))
-      (set! walks 0)
-      (set! %sh-expand-str
-        (fn (_ s mode split? assign?)
-          (set! walks (+ walks 1))
-          (saved s mode split? assign?)))
-      (guard (e (do (set! %sh-expand-str saved) (error e))) (thunk))
-      (set! %sh-expand-str saved)
-      walks))
+      (set! reads 0)
+      (set! %sh-word-plan
+        (fn (_ s n mode assign?)
+          (set! reads (+ reads 1))
+          (saved s n mode assign?)))
+      (guard (e (do (set! %sh-word-plan saved) (error e))) (thunk))
+      (set! %sh-word-plan saved)
+      reads))
   (list (count ": a b c") (count ": a $PWD c")))
 ```
 ---

@@ -778,7 +778,8 @@
 ; The INTEGER fallback above produces one such case; rather than trust it is
 ; the only one, anything that comes back not-a-pair is rendered as the word it
 ; stands for. One walk of the token list buys the guarantee that the parser
-; only ever sees tokens.
+; only ever sees tokens, and that each word's token is made on this heap
+; (%sh-tok-own).
 ;
 ; The walk is a loop, onto an accumulator reversed at the end: a script is a
 ; token list as long as the script, and a call per token nested in the last
@@ -793,9 +794,20 @@
       (self (rest toks)
             (pair (let ((tok (first toks)))
                     (if (pair? tok)
-                      tok
+                      (%sh-tok-own tok)
                       (mk-tok-word (convert tok %ash-string-type))))
                   acc)))))
+
+; TOK, made again on this heap when it is a word the evaluator keeps a plan in
+; (%sh-tok-put in eval.x).  The reader makes its tokens on the tokenizer
+; base's chain, and a collect leaves its mark on a cell there, so the next
+; collect stops at the cell and frees what hangs from it alone.
+(def %sh-tok-own
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-word)) (mk-tok-word (first (rest tok))))
+      ((eq? (first tok) (lit tok-dq)) (mk-tok-dq (first (rest tok))))
+      (#t tok))))
 
 (def sh-tokenize
   (fn (_ input) (%sh-normalize-tokens (token-read-string %sh-base input))))
