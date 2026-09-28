@@ -426,6 +426,19 @@
 ; NO fd-3 SWAP HERE, and that is the whole difference between the two entry
 ; points: the swap is what discards the program.  x-logo's entry records the
 ; same trap.
+; Run a script's text and leave with the status it ended on.  It does not
+; return.
+(def %ash-run-script
+  (fn (_ src)
+    ; THE END OF THE SCRIPT IS AN EXIT, and it is the one an EXIT trap is
+    ; almost always set for: `trap "rm -f $tmp" EXIT` has to fire when the
+    ; script simply runs out, not only when it calls `exit`.
+    (guard (err
+        (%ash-report err)
+        (%sh-exit-shell %sh-error-status))
+      (unless (= (Str8 length src) 0) (sh-eval src))
+      (%sh-exit-shell %sh-status))))
+
 (def %ash-batch ())
 (set! %ash-batch
   (fn (_)
@@ -433,14 +446,160 @@
       (fn (self acc)
         (let ((line (sh-read-line)))
           (if (null? line) (List reverse acc) (self (pair line acc))))))
-    (let ((src (Str8 join "\n" (slurp ()))))
-      ; THE END OF THE SCRIPT IS AN EXIT, and it is the one an EXIT trap is
-      ; almost always set for: `trap "rm -f $tmp" EXIT` has to fire when the
-      ; script simply runs out, not only when it calls `exit`.
-      (guard (err
-          (%ash-report err)
-          (%sh-exit-shell %sh-error-status))
-        (unless (= (Str8 length src) 0) (sh-eval src))
-        (%sh-exit-shell %sh-status)))))
+    (%ash-run-script (Str8 join "\n" (slurp ())))))
 
-(provide ash/repl %ash-repl %ash-batch %ash-banner %ash-complete?)
+; --- arguments ---------------------------------------------------------------
+;
+;   ash                          a session, or the script on stdin
+;   ash -c COMMAND [NAME [ARG...]]   run COMMAND; NAME is $0, the ARGs $1 upward
+;   ash FILE [ARG...]            run FILE; FILE is $0
+;   ash -s [ARG...]              the script on stdin, with the ARGs as $1 upward
+;
+; Ahead of any of them, the options `set` takes: `ash -e FILE`, `ash -ec CMD`.
+; `--` or `-` ends the options.
+
+; What the platform's wrapper hands the engine, which are not the shell's.
+(def %ash-engine-flag?
+  (fn (_ s)
+    (match
+      ((string=? s "--quiet") #t)
+      ((string=? s "--batch") #t)
+      ((string=? s "--no-color") #t)
+      (#t (string=? s "--verbose")))))
+
+(def %ash-without-engine-flags
+  (fn (self ws)
+    (match
+      ((null? ws) ())
+      ((%ash-engine-flag? (first ws)) (self (rest ws)))
+      (#t (pair (first ws) (self (rest ws)))))))
+
+; The shell's own arguments out of the engine's: past the engine's name and
+; its flags, and past the `--` the wrapper takes to end its own.
+(def ash-operands
+  (fn (_ raw)
+    (def ws (%ash-without-engine-flags (if (null? raw) () (rest raw))))
+    (match
+      ((null? ws) ws)
+      ((string=? (first ws) "--") (rest ws))
+      (#t ws))))
+
+; An option word's letters with c and s taken out, as (LETTERS C? S?).
+(def %ash-option-letters
+  (fn (self w i kept c? s?)
+    (match
+      ((>= i (string-length w)) (list kept c? s?))
+      ((= (string-ref w i) #\c) (self w (+ i 1) kept #t s?))
+      ((= (string-ref w i) #\s) (self w (+ i 1) kept c? #t))
+      (#t (self w (+ i 1)
+                (string-append kept (substring w i (+ i 1))) c? s?)))))
+
+(def %ash-option-word?
+  (fn (_ w)
+    (match
+      ((< (string-length w) 2) #f)
+      ((= (string-ref w 0) #\-) #t)
+      (#t (= (string-ref w 0) #\+)))))
+
+; The words `set` is to be handed, what is to be run, and what follows it, as
+; (OPTS MODE REST).  MODE is command, stdin or nil.  `-o` takes the word after
+; it, which goes to `set` with it.
+(def %ash-plan-options
+  (fn (self ws opts mode)
+    (match
+      ((null? ws) (list (List reverse opts) mode ws))
+      ((string=? (first ws) "--") (list (List reverse opts) mode (rest ws)))
+      ((string=? (first ws) "-") (list (List reverse opts) mode (rest ws)))
+      ((not (%ash-option-word? (first ws))) (list (List reverse opts) mode ws))
+      (#t (%ash-plan-option self ws opts mode)))))
+
+(def %ash-plan-option
+  (fn (_ go ws opts mode)
+    (def w (first ws))
+    (def got (%ash-option-letters w 1 "" #f #f))
+    (def kept (first got))
+    (def mode1
+      (match
+        ((first (rest got)) (lit command))
+        ((first (rest (rest got))) (if (null? mode) (lit stdin) mode))
+        (#t mode)))
+    (def opts1
+      (if (= (string-length kept) 0)
+        opts
+        (pair (string-append (substring w 0 1) kept) opts)))
+    (def takes-name?
+      (if (%sh-str-has-char? kept #\o) (not (null? (rest ws))) #f))
+    (if takes-name?
+      (go (rest (rest ws)) (pair (first (rest ws)) opts1) mode1)
+      (go (rest ws) opts1 mode1))))
+
+; What the arguments ask for, as an alist: kind, opts, text, arg0, params.
+; kind is session, stdin, command, file, or usage when -c has no command.
+(def ash-plan
+  (fn (_ ops)
+    (def got (%ash-plan-options ops () ()))
+    (def opts (first got))
+    (def mode (first (rest got)))
+    (def ws (first (rest (rest got))))
+    (def plan
+      (fn (_ kind text arg0 params)
+        (list (pair (lit kind) kind) (pair (lit opts) opts)
+              (pair (lit text) text) (pair (lit arg0) arg0)
+              (pair (lit params) params))))
+    (match
+      ((eq? mode (lit command))
+        (match
+          ((null? ws) (plan (lit usage) () () ()))
+          ((null? (rest ws)) (plan (lit command) (first ws) () ()))
+          (#t (plan (lit command) (first ws)
+                    (first (rest ws)) (rest (rest ws))))))
+      ((eq? mode (lit stdin)) (plan (lit stdin) () () ws))
+      ((null? ws) (plan (lit session) () () ()))
+      (#t (plan (lit file) (first ws) (first ws) (rest ws))))))
+
+(def %ash-plan-get
+  (fn (self key plan)
+    (match
+      ((null? plan) ())
+      ((eq? (first (first plan)) key) (rest (first plan)))
+      (#t (self key (rest plan))))))
+
+; The caller's stdin is on descriptor 3 while the boot stream holds 0 (see
+; %ash-repl).  What a command or a script file runs reads the caller's.
+(def %ash-take-stdin
+  (fn (_) (guard (%ash-e ()) (do (Sys dup2 3 0) (Sys close 3)))))
+
+(def %ash-run-file
+  (fn (_ path)
+    (def text (guard (e ()) (sh-read-file path)))
+    (match
+      ((null? text)
+        (do (%stderr "ash: can't open '" path "'\n")
+            (%sh-exit-shell %sh-error-status)))
+      (#t (do (%ash-take-stdin) (%ash-run-script text))))))
+
+; The shell, started: it does not return.  With nothing asked for it is a
+; session, or the script on stdin when the platform says a file was supplied.
+(def %ash-main
+  (fn (_ raw)
+    (def plan (ash-plan (ash-operands raw)))
+    (def kind (%ash-plan-get (lit kind) plan))
+    (def arg0 (%ash-plan-get (lit arg0) plan))
+    (def set-status (%sh-set (%ash-plan-get (lit opts) plan)))
+    (unless (null? arg0) (set! %sh-arg0 arg0))
+    (unless (null? (%ash-plan-get (lit params) plan))
+      (set! %sh-args (%ash-plan-get (lit params) plan)))
+    (match
+      ((not (= set-status 0)) (%sh-exit-shell %sh-error-status))
+      ((eq? kind (lit usage))
+        (do (%stderr "ash: -c requires an argument\n")
+            (%sh-exit-shell %sh-error-status)))
+      ((eq? kind (lit command))
+        (do (%ash-take-stdin)
+            (%ash-run-script (%ash-plan-get (lit text) plan))))
+      ((eq? kind (lit file)) (%ash-run-file (%ash-plan-get (lit text) plan)))
+      (%batch? (%ash-batch))
+      (#t (do (%ash-banner) (%ash-repl))))))
+
+(provide ash/repl %ash-repl %ash-batch %ash-banner %ash-complete? %ash-main
+  ash-operands ash-plan)
