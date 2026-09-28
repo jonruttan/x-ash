@@ -6981,14 +6981,23 @@
       (#t (self cur word (rest ts) (pair (first ts) pats))))))
 
 ; A clause whose patterns are PATS and whose body starts at TS: run when one of
-; them matches WORD; else skipped to its `;;`, or to the `esac` that ends the
-; case when the last clause omits it, and the next clause tried.
+; them matches WORD, else skipped (%sh-case-skipped).
 (def %sh-case-clause
   (fn (_ cur word pats ts)
     (match
       ((%case-match? pats word) (%sh-case-run cur (%sh-past-newlines ts)))
-      (#t (%sh-case-clauses cur word
-            (%sh-past-or-end (%sh-skip-block-walk ts 0 %sh-case-body-end?)))))))
+      (#t (%sh-case-skipped cur word (%sh-skip-block-walk ts 0 %sh-case-body-end?))))))
+
+; A body skipped to TS: to its `;;`, with the next clause after it, or to the
+; `esac` that ends the case when the last clause omits its `;;` -- past which
+; the case is over, whatever follows: `case x in a) :; esac >f` has a
+; redirection there, not a clause.
+(def %sh-case-skipped
+  (fn (_ cur word ts)
+    (match
+      ((null? ts) (%sh-case-over cur ts))
+      ((%tok-is-op? (first ts) ";;") (%sh-case-clauses cur word (rest ts)))
+      (#t (%sh-case-over cur (rest ts))))))
 
 (def %sh-case-body-end?
   (fn (_ tok) (match ((%sh-word-is? tok "esac") #t) (#t (%tok-is-op? tok ";;")))))
