@@ -89,12 +89,15 @@ Expectations match `/bin/sh` and `dash`.
 ---
     [6]
 
-### an expression with nothing to expand is not walked
+### an expression with nothing to expand is read into its word's plan
+
+The plan keeps the expression's tree, which each run of the plan runs; an
+expression with a parameter in it keeps none, and is expanded and read each
+time.
 
 ```sh
-(let ((cost (fn (_ thunk) (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-arith-text "(count + 1)" 1 10)))
-     (cost (fn (_) (%sh-expand-str-dq "count + 1")))))
+(list (null? (first (rest (rest (rest (first (%sh-word-plan "$((count + 1))" 14 %sh-mode-bare ())))))))
+      (null? (first (rest (rest (rest (first (%sh-word-plan "$(($count + 1))" 15 %sh-mode-bare ()))))))))
 ```
 ---
-    #t
+    (#f #t)
