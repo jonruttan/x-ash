@@ -22,7 +22,7 @@ lets these cases run on a platform that has no editor to build a buffer with.
 
 ```sh
 (do (import ash/line)
-    (def-class %spec-buf () text (method before (self) (member (lit text))))
+    (def-class %spec-buf () text (method before (self) (self text)))
     (%ash-word-at (new %spec-buf text "echo one | gre")))
 ```
 ---
