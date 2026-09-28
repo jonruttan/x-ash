@@ -3050,9 +3050,76 @@
 (def %sh-expand-plan
   (fn (_ plan s split? assign?)
     (match
+      ; An empty bare word is no field at all.
+      ((null? plan) ())
+      ((eq? (first (first plan)) (lit param))
+        (%sh-expand-lone plan s split? assign? plan (null? (rest plan))))
+      ((same? (first plan) %sh-step-open)
+        (%sh-expand-lone plan s split? assign? (rest plan)
+          (%sh-plan-quoted-param? (rest plan))))
       ((%sh-plan-one-run? plan split?)
         (list (%sh-field s (first (rest (rest (rest (first plan))))) ())))
       (#t (%sh-plan-run plan s (string-length s) split? assign? %sh-acc-empty)))))
+
+; A word that is one parameter, bare or in double quotes -- `$x` or `"$x"`, the
+; commonest words after plain ones -- has its fields made from the value alone
+; (%sh-param-fields).  PLAN opens with a parameter or a quote; LONE? says it is
+; one parameter, the first of STEPS.  A pattern goes the long way.  The two
+; openings are asked first in %sh-expand-plan, with no call, so a word that
+; opens with plain text pays two tests for them.
+(def %sh-expand-lone
+  (fn (_ plan s split? assign? steps lone?)
+    (match
+      ((eq? split? (lit pattern))
+        (%sh-plan-run plan s (string-length s) split? assign? %sh-acc-empty))
+      (lone? (%sh-param-fields (first steps) split?))
+      (#t (%sh-plan-run plan s (string-length s) split? assign? %sh-acc-empty)))))
+
+; Is STEPS, what follows a word's opening quote, one parameter in double quotes?
+(def %sh-plan-quoted-param?
+  (fn (_ steps)
+    (match
+      ((null? steps) ())
+      ((not (null? (rest steps))) ())
+      ((eq? (first (first steps)) (lit param))
+        (= (first (rest (first steps))) %sh-mode-dq))
+      (#t ()))))
+
+; The fields of the parameter step STEP, its value asked once.  A value holding
+; nothing that splitting or pathname expansion acts on is its field as it
+; stands; any other goes in as every expansion does (%sh-add-expansion), onto
+; the word its step would have found: empty, or opened by the quote.
+(def %sh-param-fields
+  (fn (_ step split?)
+    (%sh-param-value-fields (first (rest step))
+      (%sh-var-value-checked (first (rest (rest step)))) split?)))
+
+(def %sh-param-value-fields
+  (fn (_ mode v split?)
+    (match
+      ((%sh-has-glob-meta? v) (%sh-param-built mode v split?))
+      ((= mode %sh-mode-dq) (list (%sh-field v () ())))
+      ((%sh-splitting? split?) (%sh-param-split mode v split?))
+      (#t (list (%sh-field v () ()))))))
+
+; An unquoted value to split: none when empty, and the long way when it holds a
+; character of IFS.
+(def %sh-param-split
+  (fn (_ mode v split?)
+    (match
+      ((= (string-length v) 0) ())
+      ((%sh-has-ifs-from? v (%sh-ifs) 0 (string-length v))
+        (%sh-param-built mode v split?))
+      (#t (list (%sh-field v () ()))))))
+
+(def %sh-param-built
+  (fn (_ mode v split?)
+    (%sh-acc-finish
+      (%sh-add-expansion
+        (match
+          ((= mode %sh-mode-bare) %sh-acc-empty)
+          (#t (%sh-acc-open %sh-acc-empty)))
+        mode v split?))))
 
 (def %sh-plan-one-run?
   (fn (_ plan split?)
