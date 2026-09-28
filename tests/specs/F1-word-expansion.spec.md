@@ -3,9 +3,9 @@
 IFS is kept once found, since every unquoted expansion asks for it and a
 variable is found by walking the shell's variables and then the environment.
 Setting or unsetting a variable, which every change of IFS goes through,
-empties what was kept.  The walk over a word, the `$` arm, field splitting and
-the accumulator a word is built in are written in the forms that allocate
-least, the `$` arm with no closure made for each `$`.
+empties what was kept.  The run of a word's plan, field splitting and the
+accumulator a word is built in are written in the forms that allocate least,
+with no closure made for a step of the plan.
 
 The first four cases are pins that hold on main too; their expectations match
 `/bin/sh` and `dash`.  The costs are compared rather than counted.
@@ -69,7 +69,9 @@ The first four cases are pins that hold on main too; their expectations match
 
 ### expanding `$i` costs less than five comparisons
 
-The variables are restored afterwards, so `i` is set for this case alone.
+The variables are restored afterwards, so `i` is set for this case alone.  The
+token is expanded once before it is measured, so it holds its plan, as a word
+in a loop's body does after the first time round.
 
 ```sh
 (let ((saved %sh-vars)
@@ -78,6 +80,7 @@ The variables are restored afterwards, so `i` is set for this case alone.
       (tok (first (sh-tokenize "$i"))))
   (%sh-var-set! "i" "5")
   (%sh-ifs)
+  (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
                 (cost (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1)))))))
     (set! %sh-vars saved)
