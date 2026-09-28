@@ -124,8 +124,8 @@
     (if (null? ss)
       ""
       (if (null? (rest ss)) (first ss) (%str-append-2 (first ss) (self (rest ss)))))))
-(def string=? (fn (_ a b) (str=? a b)))
-(def string? (fn (_ s) (str? s)))
+(def string=? str=?)
+(def string? str?)
 (def make-string (fn (_ n c) (Str8 make n c)))
 (def list->string (fn (_ l) (if (null? l) "" (%cvt l %ash-string-type))))
 
