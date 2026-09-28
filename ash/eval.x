@@ -2096,12 +2096,13 @@
 (def %sh-ar-val first)
 (def %sh-ar-pos rest)
 
-; The reader runs each time the expansion does, so it is written in the forms
-; that cost least: `match`, which allocates nothing, rather than `if`, `not`,
-; `and` or `or`, which allocate each time they run; and a function's `def`s in
-; its own body rather than inside a `do`, which rebuilds its body every time it
-; runs.  A `match` clause holds one form, so a clause that needs a binding
-; calls a function that makes it.
+; An expression's tree runs each time the expansion does, and one with
+; something to expand is read each time as well, so both are written in the
+; forms that cost least: `match`, which allocates nothing, rather than `if`,
+; `not`, `and` or `or`, which allocate each time they run; and a function's
+; `def`s in its own body rather than inside a `do`, which rebuilds its body
+; every time it runs.  A `match` clause holds one form, so a clause that needs
+; a binding calls a function that makes it.
 (def %sh-bool-int (fn (_ p) (match (p 1) (#t 0))))
 (def %sh-truthy? (fn (_ n) (match ((= n 0) ()) (#t #t))))
 
@@ -2318,9 +2319,9 @@
       ((%sh-ar-hex-prefix? s i n) (%sh-ar-hex-end s (fx+ i 2) n))
       (#t (%sh-ar-digits-end s i n)))))
 
-; The digits from I to N, read in BASE.  A digit the base does not have is an
-; error rather than a silent misreading: `08` is a typo for either 8 or 010,
-; and answering one of them would be a guess.
+; The digits from I to N, read in BASE, or nil for a digit the base does not
+; have.  That is an error rather than a silent misreading: `08` is a typo for
+; either 8 or 010, and answering one of them would be a guess.
 ;
 ; Fifteen digits or fewer stay inside a machine word in any base up to 16 --
 ; 16^15 is 2^60 -- so they are read on the integer doors, whose sums wrap past
@@ -2342,7 +2343,7 @@
           ((fx<? (%sh-digit-value (string-ref text i)) base)
             (self text (fx+ i 1) n base
                   (fx+ (fx* acc base) (%sh-digit-value (string-ref text i)))))
-          (#t (%sh-ar-invalid-number text))))
+          (#t ())))
       (#t acc))))
 
 (def %sh-ar-digits-long
@@ -2353,12 +2354,14 @@
           ((fx<? (%sh-digit-value (string-ref text i)) base)
             (self text (fx+ i 1) n base
                   (+ (* acc base) (%sh-digit-value (string-ref text i)))))
-          (#t (%sh-ar-invalid-number text))))
+          (#t ())))
       (#t acc))))
 
+(def %sh-ar-invalid-message
+  (fn (_ text) (string-append "arithmetic: invalid number " text)))
+
 (def %sh-ar-invalid-number
-  (fn (_ text)
-    (%sh-expansion-error (string-append "arithmetic: invalid number " text))))
+  (fn (_ text) (%sh-expansion-error (%sh-ar-invalid-message text))))
 
 (def %sh-ar-hex?
   (fn (_ text n) (match ((fx<? 2 n) (%sh-ar-hex-prefix? text 0 n)) (#t ()))))
@@ -2372,10 +2375,18 @@
           (#t ())))
       (#t ()))))
 
+; TEXT's value as a number; an invalid number raises.
+(def %sh-ar-num
+  (fn (_ text) (%sh-ar-num-valid text (%sh-ar-num-read text))))
+
+(def %sh-ar-num-valid
+  (fn (_ text v) (match ((null? v) (%sh-ar-invalid-number text)) (#t v))))
+
+; TEXT's value as a number, or nil when a digit is one its base does not have.
 ; An unset or non-numeric name is 0, which is POSIX.  `convert` answers nil
 ; for both rather than raising, so a guard alone does not catch it -- that nil
 ; reached `+` as an operand and the whole expansion died.
-(def %sh-ar-num
+(def %sh-ar-num-read
   (fn (_ text)
     (def n (string-length text))
     (match
@@ -2446,76 +2457,110 @@
           (#t (%sh-ar-num (substring text i n)))))
       (#t 0))))
 
-(def %sh-ar-binary ())
-(def %sh-ar-climb ())
-(def %sh-ar-primary ())
+; An expression is read once into a tree (%sh-ar-read), and the tree is run
+; each time the expansion is (%sh-ar-run).  A read of an operand or an
+; expression is (NODE . INDEX), INDEX the index past its text.  A node is a
+; list headed by what it is:
+;
+;   (num VALUE)                  a literal
+;   (name NAME)                  a variable, whose value is asked when it runs
+;   (neg X) (not X) (compl X)
+;   (bin OP LEFT RIGHT)          OP a binary operator's function
+;   (short SHORT OP LEFT RIGHT)  `&&` or `||`: SHORT answers from LEFT alone
+;   (cond TEST YES NO)
+;   (assign NAME OP RIGHT)       OP applied to NAME's value first, or ()
+;   (then X Y)                   X, and then Y
+;   (fail MESSAGE)               text that is no arithmetic
+;   (stop MESSAGE X)             X, which the read stopped inside
+;
+; The read goes no further than text that is no arithmetic -- an operand
+; missing, a `(` with no `)`, a digit its base does not have, text after the
+; expression -- and the error is a node where the read found it.  A read that
+; stops answers -1 for its INDEX, and each node it was inside is a stop, which
+; carries the error's MESSAGE: a part that is not run can tell whether it holds
+; the error without being walked.
+(def %sh-ar-read-binary ())
+(def %sh-ar-read-climb ())
+(def %sh-ar-read-primary ())
 
-; The expression S is no arithmetic: an operand is missing -- the text ends, or
-; the character there starts none -- or a `(` has no `)`.  dash and bash both
-; refuse such an expression, the empty one included in dash.
+(def %sh-ar-fail (fn (_ message) (%sh-ar (list (lit fail) message) -1)))
+
+; The fail of the expression S, which is no arithmetic: an operand is missing --
+; the text ends, or the character there starts none -- or a `(` has no `)`.
+; dash and bash both refuse such an expression, the empty one included in dash.
 (def %sh-ar-syntax-error
-  (fn (_ s) (%sh-expansion-error (string-append "arithmetic: syntax error in " s))))
+  (fn (_ s) (%sh-ar-fail (string-append "arithmetic: syntax error in " s))))
 
-(set! %sh-ar-primary
-  (fn (_ s i0 n live?)
+; NODE, read to where LAST, the read of its last part, ends: a stop when LAST
+; stopped.  A fail and a stop both carry their MESSAGE second.
+(def %sh-ar-read-node
+  (fn (_ node last)
+    (match
+      ((fx<? (%sh-ar-pos last) 0)
+        (%sh-ar (list (lit stop) (first (rest (%sh-ar-val last))) node) -1))
+      (#t (%sh-ar node (%sh-ar-pos last))))))
+
+(set! %sh-ar-read-primary
+  (fn (_ s i0 n)
     (def i (%sh-ar-skip-ws s i0 n))
     (match
-      ((fx<? i n) (%sh-ar-operand s i n live? (string-ref s i)))
+      ((fx<? i n) (%sh-ar-operand s i n (string-ref s i)))
       (#t (%sh-ar-syntax-error s)))))
 
 ; The operand starting at I, whose first character is C.  A name, the usual
 ; operand, is asked first; no character starts two kinds.
 (def %sh-ar-operand
-  (fn (_ s i n live? c)
+  (fn (_ s i n c)
     (match
-      ((%sh-name-start? c) (%sh-ar-name s i (%sh-name-end s (fx+ i 1) n) live?))
-      ((%sh-digit? c) (%sh-ar-literal s i (%sh-ar-number-end s i n) live?))
-      ((= c #\() (%sh-ar-closed s (%sh-ar-assignment s (fx+ i 1) n live?) n))
-      ((= c #\-) (%sh-ar-negated (%sh-ar-primary s (fx+ i 1) n live?)))
-      ((= c #\+) (%sh-ar-primary s (fx+ i 1) n live?))
-      ((= c #\!) (%sh-ar-inverted (%sh-ar-primary s (fx+ i 1) n live?)))
-      ((= c #\~) (%sh-ar-complemented (%sh-ar-primary s (fx+ i 1) n live?)))
+      ((%sh-name-start? c) (%sh-ar-name s i (%sh-name-end s (fx+ i 1) n)))
+      ((%sh-digit? c) (%sh-ar-literal s i (%sh-ar-number-end s i n)))
+      ((= c #\() (%sh-ar-closed s (%sh-ar-read-assignment s (fx+ i 1) n) n))
+      ((= c #\-) (%sh-ar-unary (lit neg) (%sh-ar-read-primary s (fx+ i 1) n)))
+      ((= c #\+) (%sh-ar-read-primary s (fx+ i 1) n))
+      ((= c #\!) (%sh-ar-unary (lit not) (%sh-ar-read-primary s (fx+ i 1) n)))
+      ((= c #\~) (%sh-ar-unary (lit compl) (%sh-ar-read-primary s (fx+ i 1) n)))
       (#t (%sh-ar-syntax-error s)))))
 
-; The name from I to E: its value, read only where the answer depends on it.
+; The name from I to E, whose value the tree asks for each time it runs.
 (def %sh-ar-name
-  (fn (_ s i e live?)
-    (match
-      (live? (%sh-ar (%sh-ar-var-num (substring s i e)) e))
-      (#t (%sh-ar 0 e)))))
+  (fn (_ s i e) (%sh-ar (list (lit name) (substring s i e)) e)))
 
-; The literal from I to E.  A literal is read whether or not its branch is
-; taken, so a digit its base does not have is still refused: what a dead
-; branch skips is arithmetic, not spelling.  One that does not open with 0 is
-; decimal digits, read where it stands.
+; The literal from I to E, read to its value.  One that does not open with 0 is
+; decimal digits, read where it stands.  A digit its base does not have is an
+; error wherever the literal is, a branch that is not taken included: what such
+; a branch skips is arithmetic, not spelling.
 (def %sh-ar-literal
-  (fn (_ s i e live?)
+  (fn (_ s i e)
     (def v (match
-             ((= (string-ref s i) #\0) (%sh-ar-num (substring s i e)))
+             ((= (string-ref s i) #\0) (%sh-ar-num-read (substring s i e)))
              (#t (%sh-ar-digits-value s i e 10))))
-    (match (live? (%sh-ar v e)) (#t (%sh-ar 0 e)))))
+    (match
+      ((null? v) (%sh-ar-fail (%sh-ar-invalid-message (substring s i e))))
+      (#t (%sh-ar (list (lit num) v) e)))))
 
 ; A parenthesised expression, INNER, and the `)` that must follow it.
 (def %sh-ar-closed
   (fn (_ s inner n)
-    (def e (%sh-ar-skip-ws s (%sh-ar-pos inner) n))
+    (match
+      ((fx<? (%sh-ar-pos inner) 0) inner)
+      (#t (%sh-ar-close s inner n (%sh-ar-skip-ws s (%sh-ar-pos inner) n))))))
+
+(def %sh-ar-close
+  (fn (_ s inner n e)
     (match
       ((fx<? e n)
         (match
           ((= (string-ref s e) #\)) (%sh-ar (%sh-ar-val inner) (fx+ e 1)))
-          (#t (%sh-ar-syntax-error s))))
-      (#t (%sh-ar-syntax-error s)))))
+          (#t (%sh-ar-then (%sh-ar-val inner) (%sh-ar-syntax-error s)))))
+      (#t (%sh-ar-then (%sh-ar-val inner) (%sh-ar-syntax-error s))))))
 
-(def %sh-ar-negated
-  (fn (_ r) (%sh-ar (- 0 (%sh-ar-val r)) (%sh-ar-pos r))))
+; NODE, read whole, and then the error FAILED.
+(def %sh-ar-then
+  (fn (_ node failed)
+    (%sh-ar-read-node (list (lit then) node (%sh-ar-val failed)) failed)))
 
-(def %sh-ar-inverted
-  (fn (_ r) (%sh-ar (match ((%sh-truthy? (%sh-ar-val r)) 0) (#t 1)) (%sh-ar-pos r))))
-
-; Two's complement, written as arithmetic so it needs no word width: ~x is
-; -(x + 1) for every integer.
-(def %sh-ar-complemented
-  (fn (_ r) (%sh-ar (- 0 (+ (%sh-ar-val r) 1)) (%sh-ar-pos r))))
+(def %sh-ar-unary
+  (fn (_ what r) (%sh-ar-read-node (list what (%sh-ar-val r)) r)))
 
 ; Operands joined by binary operators, read by rank.  An operator ranked below
 ; LOWEST belongs to an enclosing call and ends this one.  The right operand of
@@ -2523,9 +2568,9 @@
 ; into it and leaves equal ones to this loop, so every level is
 ; left-associative.  The operator after an operand is read once for each call
 ; still open there, not once for every level.
-(set! %sh-ar-binary
-  (fn (_ s i n lowest live?)
-    (%sh-ar-climb s (%sh-ar-primary s i n live?) n lowest live?)))
+(set! %sh-ar-read-binary
+  (fn (_ s i n lowest)
+    (%sh-ar-read-climb s (%sh-ar-read-primary s i n) n lowest)))
 
 ; Does this operator entry carry on an expression whose operators rank LOWEST
 ; or above?
@@ -2536,78 +2581,74 @@
       ((fx<? (first (rest entry)) lowest) ())
       (#t #t))))
 
-; Fold each further operator onto what is already built.  LIVE? says whether
-; this side of the expression is one the answer depends on; when it is not, the
-; text is still walked so the position comes out right, and nothing is
-; computed.
-(set! %sh-ar-climb
-  (fn (self s left n lowest live?)
-    (def i (%sh-ar-skip-ws s (%sh-ar-pos left) n))
+; Fold each further operator onto what is already read.  A LEFT the read
+; stopped in is where the read ends, so it is looked past as though at the end.
+(set! %sh-ar-read-climb
+  (fn (self s left n lowest)
+    (def i (match
+             ((fx<? (%sh-ar-pos left) 0) n)
+             (#t (%sh-ar-skip-ws s (%sh-ar-pos left) n))))
     (def entry (match ((fx<? i n) (%sh-ar-op-at s i n %sh-ar-rank-groups)) (#t ())))
     (match
-      ((%sh-ar-binds? entry lowest) (%sh-ar-fold self s left n lowest live? i entry))
+      ((fx<? (%sh-ar-pos left) 0) left)
+      ((%sh-ar-binds? entry lowest) (%sh-ar-fold self s left n lowest i entry))
       (#t (%sh-ar (%sh-ar-val left) i)))))
 
-; LEFT and the right operand of ENTRY's operator at I, folded into one operand
-; that CLIMB carries on from.
+; LEFT and the right operand of ENTRY's operator at I, one node that CLIMB
+; carries on from.
 (def %sh-ar-fold
-  (fn (_ climb s left n lowest live? i entry)
-    (def known (%sh-ar-known entry (%sh-ar-val left) live?))
-    (def right (%sh-ar-binary s (fx+ i (string-length (first entry))) n
-                 (fx+ (first (rest entry)) 1)
-                 (match ((null? known) live?) (#t ()))))
-    (climb s
-      (%sh-ar (%sh-ar-combine entry known (%sh-ar-val left) (%sh-ar-val right) live?)
-              (%sh-ar-pos right))
-      n lowest live?)))
+  (fn (_ climb s left n lowest i entry)
+    (def right (%sh-ar-read-binary s (fx+ i (string-length (first entry))) n
+                 (fx+ (first (rest entry)) 1)))
+    (climb s (%sh-ar-read-node (%sh-ar-op-node entry left right) right) n lowest)))
 
-; What ENTRY's operator answers from LEFT alone, or () when the right side is
-; still needed: only `&&` and `||` carry a SHORT.
-(def %sh-ar-known
-  (fn (_ entry left live?)
+; The node of ENTRY's operator on the reads LEFT and RIGHT.  Its SHORT, the
+; answer from the left side alone, is only `&&`'s and `||`'s.
+(def %sh-ar-op-node
+  (fn (_ entry left right)
     (match
-      (live?
-        (match
-          ((null? (rest (rest (rest entry)))) ())
-          (#t ((rest (rest (rest entry))) left))))
-      (#t ()))))
-
-(def %sh-ar-combine
-  (fn (_ entry known left right live?)
-    (match
-      (live?
-        (match
-          ((null? known) ((first (rest (rest entry))) left right))
-          (#t known)))
-      (#t 0))))
+      ((null? (rest (rest (rest entry))))
+        (list (lit bin) (first (rest (rest entry)))
+              (%sh-ar-val left) (%sh-ar-val right)))
+      (#t (list (lit short) (rest (rest (rest entry))) (first (rest (rest entry)))
+                (%sh-ar-val left) (%sh-ar-val right))))))
 
 ; `c ? a : b`, looser than every binary operator and grouping to the right.
-; Both branches are walked so the expression ends where it should; only the
-; one taken is evaluated.
-(def %sh-ar-conditional ())
+(def %sh-ar-read-conditional ())
 
-(set! %sh-ar-conditional
-  (fn (_ s i n live?)
-    (def test (%sh-ar-binary s i n 1 live?))
-    (def q (%sh-ar-skip-ws s (%sh-ar-pos test) n))
+(set! %sh-ar-read-conditional
+  (fn (_ s i n)
+    (def test (%sh-ar-read-binary s i n 1))
+    (match
+      ((fx<? (%sh-ar-pos test) 0) test)
+      (#t (%sh-ar-query s n test (%sh-ar-skip-ws s (%sh-ar-pos test) n))))))
+
+(def %sh-ar-query
+  (fn (_ s n test q)
     (match
       ((fx<? q n)
         (match
-          ((= (string-ref s q) #\?) (%sh-ar-branches s q n live? test))
+          ((= (string-ref s q) #\?) (%sh-ar-branches s q n test))
           (#t test)))
       (#t test))))
 
-; The two branches after TEST and the `?` at Q.
+; The two branches after TEST and the `?` at Q.  The first branch is a whole
+; expression, assignment included, as in C; the second is only a conditional.
 (def %sh-ar-branches
-  (fn (_ s q n live? test)
-    (def taken (match (live? (%sh-truthy? (%sh-ar-val test))) (#t ())))
-    ; The first branch is a whole expression, assignment included, as in C;
-    ; the second is only a conditional.
-    (def yes (%sh-ar-assignment s (fx+ q 1) n taken))
-    (def c (%sh-ar-skip-ws s (%sh-ar-pos yes) n))
-    (def no (%sh-ar-conditional s (%sh-ar-past-colon s c n) n
-              (match (taken ()) (#t live?))))
-    (%sh-ar (match (taken (%sh-ar-val yes)) (#t (%sh-ar-val no))) (%sh-ar-pos no))))
+  (fn (_ s q n test)
+    (def yes (%sh-ar-read-assignment s (fx+ q 1) n))
+    (match
+      ((fx<? (%sh-ar-pos yes) 0)
+        (%sh-ar-read-node (list (lit cond) (%sh-ar-val test) (%sh-ar-val yes) ())
+                          yes))
+      (#t (%sh-ar-branch-no test yes
+            (%sh-ar-read-conditional s
+              (%sh-ar-past-colon s (%sh-ar-skip-ws s (%sh-ar-pos yes) n) n) n))))))
+
+(def %sh-ar-branch-no
+  (fn (_ test yes no)
+    (%sh-ar-read-node
+      (list (lit cond) (%sh-ar-val test) (%sh-ar-val yes) (%sh-ar-val no)) no)))
 
 (def %sh-ar-past-colon
   (fn (_ s c n)
@@ -2672,47 +2713,129 @@
       (#t (list (substring s i e) op (fx+ k (string-length (first op))))))))
 
 ; An assignment: the loosest expression, grouping to the right, so `x = y = 3`
-; sets both.  Its value is the value assigned, and in a branch that is not
-; taken it assigns nothing.
-(def %sh-ar-assignment ())
+; sets both.
+(def %sh-ar-read-assignment ())
 
-(set! %sh-ar-assignment
-  (fn (_ s i0 n live?)
+(set! %sh-ar-read-assignment
+  (fn (_ s i0 n)
     (def i (%sh-ar-skip-ws s i0 n))
     (def target (%sh-ar-assign-target s i n))
     (match
-      ((null? target) (%sh-ar-conditional s i n live?))
-      (#t (%sh-ar-assign s n target live?)))))
+      ((null? target) (%sh-ar-read-conditional s i n))
+      (#t (%sh-ar-assign s n target)))))
 
 (def %sh-ar-assign
-  (fn (_ s n target live?)
-    (def right (%sh-ar-assignment s (first (rest (rest target))) n live?))
-    (match
-      (live?
-        (%sh-ar (%sh-ar-store (first target) (first (rest target))
-                              (%sh-ar-val right))
-                (%sh-ar-pos right)))
-      (#t (%sh-ar 0 (%sh-ar-pos right))))))
+  (fn (_ s n target)
+    (def right (%sh-ar-read-assignment s (first (rest (rest target))) n))
+    (%sh-ar-read-node
+      (list (lit assign) (first target) (%sh-ar-assign-op (first (rest target)))
+            (%sh-ar-val right))
+      right)))
 
-; Give NAME what the assignment operator entry OP makes of RIGHT, and answer it.
+; The function the assignment operator entry OP applies to the variable's value
+; and the right side, or () for plain `=`.
+(def %sh-ar-assign-op
+  (fn (_ op)
+    (match ((null? (rest op)) ()) (#t (%sh-table-get (rest op) %sh-ar-ops)))))
+
+; The tree of the expression TEXT.  The whole text is one expression: anything
+; left after it is an error rather than text to skip, so `$((1 2))` and
+; `$((1=2))` are refused.
+(def %sh-ar-read
+  (fn (_ text)
+    (def n (string-length text))
+    (def r (%sh-ar-read-assignment text 0 n))
+    (match
+      ((fx<? (%sh-ar-pos r) 0) (%sh-ar-val r))
+      ((fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n)
+        (%sh-ar-val (%sh-ar-then (%sh-ar-val r) (%sh-ar-syntax-error text))))
+      (#t (%sh-ar-val r)))))
+
+; A tree runs its parts in the order its text has them, so a variable is set,
+; and an error raised, where a walk of the text would set or raise it.  A part
+; whose value is not wanted -- the right side of an `&&` or `||` its left side
+; settles, the branch of a `?:` not taken -- is not run; one the read stopped
+; in raises its error instead, where the walk would have found it.  The nodes
+; a loop runs most -- a name, a literal, an operator -- are asked first.
+(def %sh-ar-run
+  (fn (self node)
+    (match
+      ((eq? (first node) (lit name)) (%sh-ar-var-num (first (rest node))))
+      ((eq? (first node) (lit num)) (first (rest node)))
+      ((eq? (first node) (lit bin))
+        (%sh-ar-run-bin (first (rest node)) (first (rest (rest (rest node))))
+                        (self (first (rest (rest node))))))
+      ((eq? (first node) (lit short))
+        (%sh-ar-run-short (rest node) (self (first (rest (rest (rest node)))))))
+      ((eq? (first node) (lit assign))
+        (%sh-ar-store (first (rest node)) (first (rest (rest node)))
+                      (self (first (rest (rest (rest node)))))))
+      ((eq? (first node) (lit neg)) (- 0 (self (first (rest node)))))
+      ((eq? (first node) (lit not)) (%sh-ar-not (self (first (rest node)))))
+      ; Two's complement, written as arithmetic so it needs no word width: ~x
+      ; is -(x + 1) for every integer.
+      ((eq? (first node) (lit compl)) (- 0 (+ (self (first (rest node))) 1)))
+      ((eq? (first node) (lit cond))
+        (%sh-ar-run-cond (rest (rest node)) (self (first (rest node)))))
+      ((eq? (first node) (lit then))
+        (%sh-ar-run-after (first (rest (rest node))) (self (first (rest node)))))
+      ((eq? (first node) (lit stop)) (self (first (rest (rest node)))))
+      (#t (%sh-expansion-error (first (rest node)))))))
+
+(def %sh-ar-not (fn (_ v) (match ((%sh-truthy? v) 0) (#t 1))))
+
+; NODE's value.  BEFORE, what runs ahead of it, is an argument, so it is asked
+; first.
+(def %sh-ar-run-after (fn (_ node before) (%sh-ar-run node)))
+
+; The operator OP on LEFT, run already, and the part RIGHT.
+(def %sh-ar-run-bin (fn (_ op right left) (op left (%sh-ar-run right))))
+
+; The parts PARTS, (SHORT OP LEFT RIGHT), of an `&&` or `||` whose left side
+; answered LEFT.  RIGHT runs only when SHORT answers nothing from LEFT alone.
+(def %sh-ar-run-short
+  (fn (_ parts left) (%sh-ar-run-known parts left ((first parts) left))))
+
+(def %sh-ar-run-known
+  (fn (_ parts left known)
+    (match
+      ((null? known)
+        ((first (rest parts)) left (%sh-ar-run (first (rest (rest (rest parts)))))))
+      (#t (%sh-ar-passed (first (rest (rest (rest parts)))) known)))))
+
+; VALUE, the answer where NODE is not run; a NODE the read stopped in raises its
+; error instead.
+(def %sh-ar-passed
+  (fn (_ node value)
+    (match
+      ((null? node) value)
+      ((eq? (first node) (lit stop)) (%sh-expansion-error (first (rest node))))
+      ((eq? (first node) (lit fail)) (%sh-expansion-error (first (rest node))))
+      (#t value))))
+
+; The branches BRANCHES, (YES NO), of a `?:` whose test answered TEST.
+(def %sh-ar-run-cond
+  (fn (_ branches test)
+    (match
+      ((%sh-truthy? test)
+        (%sh-ar-passed (first (rest branches)) (%sh-ar-run (first branches))))
+      (#t (%sh-ar-run-after (first (rest branches))
+            (%sh-ar-passed (first branches) ()))))))
+
+; Give NAME what OP makes of its value and RIGHT -- RIGHT itself when OP is nil,
+; for plain `=` -- and answer it.
 (def %sh-ar-store
   (fn (_ name op right)
-    (def value (match
-                 ((null? (rest op)) right)
-                 (#t ((%sh-table-get (rest op) %sh-ar-ops)
-                      (%sh-ar-var-num name) right))))
+    (def value (match ((null? op) right) (#t (op (%sh-ar-var-num name) right))))
     (%sh-var-set! name (%ash-number->str value))
     value))
 
-; The whole text is one expression.  Anything left after it is an error rather
-; than text to skip, so `$((1 2))` and `$((1=2))` are refused.
+; The value of the expression TEXT, as the text of a number.
 (def %sh-arith-eval
-  (fn (_ text)
-    (def n (string-length text))
-    (def r (%sh-ar-assignment text 0 n #t))
-    (match
-      ((fx<? (%sh-ar-skip-ws text (%sh-ar-pos r) n) n) (%sh-ar-syntax-error text))
-      (#t (%ash-number->str (%sh-ar-val r))))))
+  (fn (_ text) (%ash-number->str (%sh-ar-run (%sh-ar-read text)))))
+
+(def %sh-arith-run
+  (fn (_ tree) (%ash-number->str (%sh-ar-run tree))))
 
 ; Is the `$(` text from I to E an arithmetic expansion rather than a command
 ; one: two characters or more, the first `(` and the last `)`?
@@ -2732,22 +2855,23 @@
 ; and a plain run that reaches E says there is nothing to expand without
 ; building anything.
 ;
-; A word's plan reads the expression once (%sh-arith-read): its text, and
-; whether a plain run reaches its end.  Each run of the plan expands it when
-; it is not plain (%sh-arith-read-text).
-(def %sh-arith-text
-  (fn (_ s i e) (%sh-arith-read-text (%sh-arith-read s i e))))
-
+; A word's plan reads the expression once (%sh-arith-read): its text, and its
+; tree when there is nothing to expand, so each run of the plan runs the tree.
+; An expression with something to expand is expanded and read each time it
+; runs (%sh-arith-value).
 (def %sh-arith-read
   (fn (_ s i e)
-    (list (substring s i e)
-          (= (%sh-run-end (%sh-plain-run s i e %sh-mode-heredoc #t ())) e))))
+    (%sh-arith-read-plain (substring s i e)
+      (= (%sh-run-end (%sh-plain-run s i e %sh-mode-heredoc #t ())) e))))
 
-(def %sh-arith-read-text
+(def %sh-arith-read-plain
+  (fn (_ text plain?) (list text (match (plain? (%sh-ar-read text)) (#t ())))))
+
+(def %sh-arith-value
   (fn (_ read)
     (match
-      ((first (rest read)) (first read))
-      (#t (%sh-expand-str-dq (first read))))))
+      ((null? (first (rest read))) (%sh-arith-eval (%sh-expand-str-dq (first read))))
+      (#t (%sh-arith-run (first (rest read)))))))
 
 ; --- The walk ---------------------------------------------------------------
 ;
@@ -2963,7 +3087,7 @@
         (%sh-acc-add a (first (rest step)) (first (rest (rest step)))))
       ((eq? (first step) (lit arith))
         (%sh-add-expansion a (first (rest step))
-          (%sh-arith-eval (%sh-arith-read-text (rest (rest step)))) split?))
+          (%sh-arith-value (rest (rest step))) split?))
       ((eq? (first step) (lit subst))
         (%sh-add-expansion a (first (rest step))
           (%sh-cmd-subst (first (rest (rest step)))) split?))
