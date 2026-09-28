@@ -6444,55 +6444,58 @@
 ; while cond; do body; done
 ; until cond; do body; done, which goes round while its condition fails
 ;
-; SAVED is the loop past its opening word, where each time round starts.
+; SAVED is the loop past its opening word, where each time round starts, and
+; LAST the status of the body that ran last.  A loop answers LAST, or 0 when
+; its body never ran: the status of the last command it ran of its own, not
+; of the condition that ended it (POSIX, and ash's evalloop).
 (def %eval-while
-  (fn (_ cur) (%eval-while-body cur (rest (first cur)))))
+  (fn (_ cur) (%eval-while-body cur (rest (first cur)) 0)))
 
 (set! %eval-while-body
-  (fn (_ cur saved)
+  (fn (_ cur saved last)
     (set-first! cur saved)
-    (%sh-loop-test cur saved %eval-while-body
+    (%sh-loop-test cur saved last %eval-while-body
       (= (%sh-in-condition (fn (_) (%eval-list cur))) 0))))
 
 (def %eval-until
-  (fn (_ cur) (%eval-until-body cur (rest (first cur)))))
+  (fn (_ cur) (%eval-until-body cur (rest (first cur)) 0)))
 
 (set! %eval-until-body
-  (fn (_ cur saved)
+  (fn (_ cur saved last)
     (set-first! cur saved)
-    (%sh-loop-test cur saved %eval-until-body
+    (%sh-loop-test cur saved last %eval-until-body
       (not (= (%sh-in-condition (fn (_) (%eval-list cur))) 0)))))
 
 ; After the condition: its `do`, then the body when RUN? says so and AGAIN,
 ; the loop's own step, after it; else past the loop's `done`.
 (def %sh-loop-test
-  (fn (_ cur saved again run?)
+  (fn (_ cur saved last again run?)
     (%sh-take-opener! cur "do")
     (match
       (run? (%sh-loop-went cur saved again (%sh-run-loop-body cur)))
-      (#t (%sh-loop-over cur)))))
+      (#t (%sh-loop-over cur last)))))
 
-; R is how the body ended.  One that ran stopped at its `done`, which is
-; checked and left, as the loop goes round from its start.  One cut short by
-; `continue` or `break` is somewhere inside, so the loop is walked from its
-; start past its `done`, the same balanced skip a false condition's body
-; takes; `break` ends the loop there.
+; R is how the body ended, and its status.  One that ran stopped at its
+; `done`, which is checked and left, as the loop goes round from its start.
+; One cut short by `continue` or `break` is somewhere inside, so the loop is
+; walked from its start past its `done`, the same balanced skip a false
+; condition's body takes; `break` ends the loop there.
 (def %sh-loop-went
   (fn (_ cur saved again r)
     (match
-      ((eq? (first r) (lit ran)) (%sh-loop-again cur saved again))
+      ((eq? (first r) (lit ran)) (%sh-loop-again cur saved again (rest r)))
       ((eq? (first r) (lit break)) (%sh-loop-broke cur saved r))
-      (#t (%sh-loop-continued cur saved again)))))
+      (#t (%sh-loop-continued cur saved again (rest r))))))
 
 (def %sh-loop-again
-  (fn (_ cur saved again)
+  (fn (_ cur saved again last)
     (%sh-check-word cur "done")
-    (again cur saved)))
+    (again cur saved last)))
 
 (def %sh-loop-continued
-  (fn (_ cur saved again)
+  (fn (_ cur saved again last)
     (%sh-skip-past-from cur saved %sh-done? "while")
-    (again cur saved)))
+    (again cur saved last)))
 
 (def %sh-loop-broke
   (fn (_ cur start r)
@@ -6501,10 +6504,10 @@
     (rest r)))
 
 (def %sh-loop-over
-  (fn (_ cur)
+  (fn (_ cur last)
     (%skip-to-done cur 0)
-    (set! %sh-status 0)
-    0))
+    (set! %sh-status last)
+    last))
 
 (def %sh-done? (fn (_ tok) (%sh-word-is? tok "done")))
 
@@ -6601,18 +6604,19 @@
 
 ; R is how the body ended, as in %sh-loop-went, and MORE the words left.  The
 ; `done` a body that ran stopped at is taken after the last word, and only
-; checked before the others, as the next time round starts at BODY-START.
+; checked before the others, as the next time round starts at BODY-START.  The
+; loop answers the status of its last time round (POSIX, and ash's evalfor).
 (def %sh-for-went
   (fn (_ cur var more body-start r)
     (match
       ((eq? (first r) (lit break)) (%sh-loop-broke cur body-start r))
-      ((eq? (first r) (lit ran)) (%sh-for-ran cur var more body-start))
-      (#t (%sh-for-continued cur var more body-start)))))
+      ((eq? (first r) (lit ran)) (%sh-for-ran cur var more body-start (rest r)))
+      (#t (%sh-for-continued cur var more body-start (rest r))))))
 
 (def %sh-for-ran
-  (fn (_ cur var more body-start)
+  (fn (_ cur var more body-start last)
     (match
-      ((null? more) (%sh-for-last cur))
+      ((null? more) (%sh-for-last cur last))
       (#t (%sh-for-next cur var more body-start)))))
 
 (def %sh-for-next
@@ -6621,22 +6625,22 @@
     (%eval-for-body cur var more body-start)))
 
 (def %sh-for-last
-  (fn (_ cur)
+  (fn (_ cur last)
     (%sh-take-word! cur "done")
-    (set! %sh-status 0)
-    0))
+    (set! %sh-status last)
+    last))
 
 (def %sh-for-continued
-  (fn (_ cur var more body-start)
+  (fn (_ cur var more body-start last)
     (%sh-skip-past-from cur body-start %sh-done? "while")
     (match
-      ((null? more) (%sh-for-over))
+      ((null? more) (%sh-for-over last))
       (#t (%eval-for-body cur var more body-start)))))
 
 (def %sh-for-over
-  (fn (_)
-    (set! %sh-status 0)
-    0))
+  (fn (_ last)
+    (set! %sh-status last)
+    last))
 ; case WORD in PATTERN[|PATTERN]...) BODY;; ... esac
 
 ; case patterns are globs, matched with %sh-glob-match -- `a*)`, `*.txt)`,
@@ -7522,15 +7526,44 @@
     ; reaches %eval-command, whose compound branch applies the construct's
     ; redirections.  A simple command's stage is walked to its end first, and
     ; the command runs where it stands when no `|` is there (%sh-pipeline-at).
-    (def result (match
-                  ((%is-fn-def? cur) (%eval-fn-def cur))
-                  ((%is-compound-start? cur)
-                    (%sh-run-pipeline-stages cur (%collect-stages cur ()) negate))
-                  (#t (%sh-pipeline-at cur negate (%sh-stage-end (first cur) 0 0)))))
+    (match
+      ((%is-fn-def? cur) (%sh-pipeline-done cur negate (%eval-fn-def cur)))
+      ((%is-compound-start? cur)
+        (%sh-compound-pipeline cur negate (%collect-stages cur ())))
+      (#t (%sh-pipeline-done cur negate
+            (%sh-pipeline-at cur negate (%sh-stage-end (first cur) 0 0)))))))
+
+; After a pipeline that answered RESULT: a `!` turns it over, an operand of
+; && or || stands, and anything else is under `set -e`.
+(def %sh-pipeline-done
+  (fn (_ cur negate result)
     (match
       (negate (%sh-negated result))
       ((%sh-and-or-next? cur) result)
       (#t (%sh-exit-on-error result)))))
+
+; A compound command alone in its pipeline answers what its body answered, and
+; `set -e` has judged the commands in its body already: its own status ends
+; nothing, as in ash's evaltree, which checks a simple command, a pipeline, a
+; subshell and an asynchronous list, and no if, case, loop or group.  A
+; subshell's status is checked, and so is a pipeline's with a compound in it.
+(def %sh-compound-pipeline
+  (fn (_ cur negate stages)
+    (match
+      ((%sh-compound-alone? stages)
+        (%sh-compound-done negate (%sh-run-pipeline-stages cur stages negate)))
+      (#t (%sh-pipeline-done cur negate
+            (%sh-run-pipeline-stages cur stages negate))))))
+
+(def %sh-compound-alone?
+  (fn (_ stages)
+    (match
+      ((null? (rest stages)) (not (%tok-is-op? (first (first stages)) "(")))
+      (#t ()))))
+
+(def %sh-compound-done
+  (fn (_ negate result)
+    (match (negate (%sh-negated result)) (#t result))))
 
 ; Take a `!` at the cursor, and the newlines after it, answering whether there
 ; was one.
