@@ -7469,19 +7469,22 @@
     ; consume '('
 
     (%skip-newlines cur)
-    (let ((body (%collect-subshell-tokens cur 0 ())))
-      (let ((pid (sh-fork)))
-        (if (= pid 0)
-          (do
-            (set! %sh-traps ())
-            (%sh-in-child
-              (fn (_)
-                (do
-                  (%sh-eval-body body)
-                  %sh-status))))
-          (let ((status (sh-wait pid)))
-            (set! %sh-status status)
-            status))))))
+    (def body (%collect-subshell-tokens cur 0 ()))
+    (%sh-subshell (fn (_) (%sh-eval-body body) %sh-status))))
+
+; A child forked to run THUNK, which answers its status: the child's traps are
+; its own, and the shell waits for it and takes its status.
+(def %sh-subshell
+  (fn (_ thunk)
+    (def pid (sh-fork))
+    (match
+      ((= pid 0) (%sh-subshell-child thunk))
+      (#t (%sh-set-status (sh-wait pid))))))
+
+(def %sh-subshell-child
+  (fn (_ thunk)
+    (set! %sh-traps ())
+    (%sh-in-child thunk)))
 
 (def %skip-to-close-paren
   (fn (_ cur depth)
@@ -8999,12 +9002,11 @@
 ; lists and pipelines in them, and the compound commands among those -- ifs,
 ; cases, groups and loops.  So where each command ends, whether `&&`, `||` or
 ; `&` follows it, and where each construct's words stand are found once
-; however often the loop goes round or the function is called.  A simple command's node holds
-; where its words start and where its stage ends, and its words and
-; redirections are collected when it runs, as they always are.  A subshell,
-; and a compound command with redirections after it, is a stage: its tokens,
-; which %eval-command runs, as it runs a pipeline's stages.  An if, case or
-; group outside a loop or function is walked over its tokens: it runs once
+; however often the loop goes round or the function is called.  A simple
+; command's node holds where its words start and where its stage ends, and its
+; words and redirections are collected when it runs, as they always are; so
+; are the redirections after a compound command.  An if, case, group or
+; subshell outside a loop or function is walked over its tokens: it runs once
 ; where it is, and a read would cost it more than the walk.
 ;
 ; The read makes once the walks the evaluator makes each time round: where a
@@ -9012,9 +9014,11 @@
 ; where a skipped operand ends (%sh-operand-end), where the loop's `do` and
 ; `done` are.  It reads only what those walks agree on -- a skipped operand
 ; ending where its read ends, a loop's `done` where its body ends and where
-; the balanced walks find it -- and answers nil for anything else, which is
-; then walked over its tokens as before.  Malformed input is such a thing, so
-; its errors are raised when and where they always were.
+; the balanced walks find it, a subshell's `)` where the parens are counted to,
+; a construct with redirections after it ending where the skip over it ends --
+; and answers nil for anything else, which is then walked over its tokens as
+; before.  Malformed input is such a thing, so its errors are raised when and
+; where they always were.
 ;
 ; A read is (NODE . END), END the tokens after it, where the evaluator would
 ; leave its cursor.  The nodes:
@@ -9030,6 +9034,8 @@
 ;   (if CLAUSES ELSE)                 CLAUSES each (COND BODY); ELSE a list or nil
 ;   (case SUBJECT CLAUSES)            CLAUSES each (PATTERNS BODY)
 ;   (group BODY)
+;   (subshell BODY)                   BODY a list, run in a child
+;   (redirected NODE REDIRS)          REDIRS the tokens after NODE's construct
 ;
 ; ANDOR? says whether an `&&` or `||` follows the pipeline, ALONE? whether a
 ; compound is its pipeline's one stage, and NODE is the node of a compound
@@ -9168,23 +9174,58 @@
     (pair (list (lit fn-def) negate name body (%sh-and-or-at? (first cur)))
           (first cur))))
 
-; The compound command that is a pipeline's one stage and ends its stage,
-; read, or nil.  One with redirections after it runs as a stage, and a loop
-; among those is read when it runs.
+; The compound command that is a pipeline's one stage, read, or nil: one that
+; ends its stage, or one with only redirections after it.
 (def %sh-read-stage-compound
   (fn (_ stages)
     (match
-      ((null? (rest stages)) (%sh-stage-node (%sh-read-compound-at (first stages))))
+      ((null? (rest stages))
+        (%sh-stage-compound-node (first stages) (%sh-read-compound-at (first stages))))
+      (#t ()))))
+
+; R, the read of the compound command at the start of the stage TS.  The
+; redirections after one are read as %sh-eval-compound-redirected reads them:
+; from where the skip over the construct ends, which must be where its read
+; ends, and to the end of the stage.
+(def %sh-stage-compound-node
+  (fn (_ ts r)
+    (match
+      ((null? r) ())
+      ((null? (rest r)) (first r))
+      ((not (same? (%sh-skip-compound-walk ts 0 (eq? (first (first ts)) (lit tok-op)))
+                   (rest r)))
+        ())
+      ((%sh-redirs-only? (rest r)) (list (lit redirected) (first r) (rest r)))
+      (#t ()))))
+
+; Whether the tokens TS are redirections alone, each with its target, as
+; %sh-collect-trailing-redirs reads them to their end.
+(def %sh-redirs-only?
+  (fn (self ts)
+    (match
+      ((null? ts) #t)
+      ((%redir-op? (first ts)) (%sh-redir-then self (rest ts)))
+      ((%tok-is-io? (first ts)) (%sh-io-then self (rest ts)))
+      (#t ()))))
+
+(def %sh-redir-then
+  (fn (_ walk ts) (match ((null? ts) ()) (#t (walk (rest ts))))))
+
+(def %sh-io-then
+  (fn (_ walk ts)
+    (match
+      ((null? ts) ())
+      ((%redir-op? (first ts)) (%sh-redir-then walk (rest ts)))
       (#t ()))))
 
 (def %sh-stage-node
   (fn (_ r) (match ((null? r) ()) ((null? (rest r)) (first r)) (#t ()))))
 
-; The compound command at TS, read, by the word that opens it: a subshell is
-; left to its tokens.
+; The compound command at TS, read, by the word that opens it.
 (def %sh-read-compound-at
   (fn (_ ts)
     (match
+      ((%tok-is-op? (first ts) "(") (%sh-read-subshell ts))
       ((%sh-word-is? (first ts) "for") (%sh-read-for ts))
       ((%sh-word-is? (first ts) "if") (%sh-read-if ts))
       ((%sh-word-is? (first ts) "case") (%sh-read-case ts))
@@ -9463,6 +9504,51 @@
               (rest (%sh-past-newlines (rest body)))))
       (#t ()))))
 
+; The subshell at TS, as %eval-subshell reads one: past the `(` and the
+; newlines, its body to the `)` %collect-subshell-tokens stops at, read as the
+; child's %sh-eval-body reads the tokens collected, to their end.  An empty
+; body leaves the child's status as it was, and is left to its tokens.
+(def %sh-read-subshell
+  (fn (_ ts)
+    (%sh-read-subshell-at (%sh-past-newlines (rest ts))
+      (%sh-subshell-close (%sh-past-newlines (rest ts)) 0))))
+
+(def %sh-read-subshell-at
+  (fn (_ ts close)
+    (match
+      ((null? close) ())
+      ((same? ts close) ())
+      (#t (%sh-read-subshell-end close
+            (%sh-stage-node (%sh-read-list (%sh-tokens-before ts close ()))))))))
+
+(def %sh-read-subshell-end
+  (fn (_ close body)
+    (match
+      ((null? body) ())
+      (#t (pair (list (lit subshell) body) (rest close))))))
+
+; The tokens of TS in front of the cell END, a list of their own.
+(def %sh-tokens-before
+  (fn (self ts end toks)
+    (match
+      ((same? ts end) (reverse toks))
+      (#t (self (rest ts) end (pair (first ts) toks))))))
+
+; The `)` in TS that closes a subshell, as %collect-subshell-tokens counts
+; parens, or nil when there is none.
+(def %sh-subshell-close
+  (fn (self ts depth)
+    (match
+      ((null? ts) ())
+      ((%tok-pattern-paren? (first ts)) (self (rest ts) depth))
+      ((%tok-is-op? (first ts) "(") (self (rest ts) (fx+ depth 1)))
+      ((%tok-is-op? (first ts) ")") (%sh-subshell-close-at self ts depth))
+      (#t (self (rest ts) depth)))))
+
+(def %sh-subshell-close-at
+  (fn (_ walk ts depth)
+    (match ((= depth 0) ts) (#t (walk (rest ts) (fx+ depth -1))))))
+
 ; --- Running the nodes ---
 ;
 ; Each runs as the evaluator's walk over its tokens runs, and answers what it
@@ -9587,7 +9673,31 @@
       ((eq? (first node) (lit for)) (%sh-run-for node))
       ((eq? (first node) (lit if)) (%sh-run-if node))
       ((eq? (first node) (lit case)) (%sh-run-case node))
+      ((eq? (first node) (lit subshell)) (%sh-run-subshell (first (rest node))))
+      ((eq? (first node) (lit redirected)) (%sh-run-compound-redirected node))
       (#t (%sh-run-list (first (rest node)))))))
+
+; %eval-subshell: BODY, a list, run in a child.
+(def %sh-run-subshell
+  (fn (_ body) (%sh-subshell (fn (_) (%sh-run-list body) %sh-status))))
+
+; %sh-eval-compound-redirected: the redirections collected from their tokens,
+; made, the construct run, and the descriptors put back however it ends.  A
+; construct whose redirections are not made does not run, and the status is
+; set in its place.  NODE is (redirected NODE REDIRS).
+(def %sh-run-compound-redirected
+  (fn (_ node)
+    (%sh-run-compound-with (first (rest node))
+      (%sh-collect-trailing-redirs (%mk-cursor (first (rest (rest node)))) ()))))
+
+(def %sh-run-compound-with
+  (fn (_ node redirs)
+    (def parked (%sh-save-fds redirs))
+    (guard (e (%sh-restored-raise parked e))
+      (%sh-restored parked
+        (match
+          ((%sh-setup-redirs redirs) (%sh-run-compound-node node))
+          (#t (%sh-set-status %sh-redir-status)))))))
 
 ; %eval-for-body: once round for each word, the variable set to it; the loop
 ; answers the status of its last time round, or 0 with no words, and `break`
