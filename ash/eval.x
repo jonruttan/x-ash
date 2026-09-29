@@ -6459,11 +6459,8 @@
 (def %eval-for-body ())
 ; --- Compound command detection ---
 
-(def %is-compound-start?
-  (fn (_ cur)
-    (match
-      ((null? (first cur)) ())
-      (#t (%sh-compound-tok? (first (first cur)))))))
+(def %sh-compound-at?
+  (fn (_ ts) (match ((null? ts) ()) (#t (%sh-compound-tok? (first ts))))))
 
 ; Whether TOK opens a compound command: a reserved word that is a key of
 ; %sh-compound-table, so the two cannot disagree, or a `(`, which opens a
@@ -6819,10 +6816,14 @@
           (pair kind %sh-loop-status))))))
 
 (def %sh-run-loop-body
-  (fn (_ cur)
+  (fn (_ cur) (%sh-loop-body-run (fn (_) (%eval-list cur)))))
+
+; One time round a body, RUN, under the loop-control guard.
+(def %sh-loop-body-run
+  (fn (_ run)
     (set! %sh-loop-depth (fx+ %sh-loop-depth 1))
     (guard (e (%sh-loop-raised e))
-      (%sh-loop-ran (%eval-list cur)))))
+      (%sh-loop-ran (run)))))
 
 (def %sh-loop-ran
   (fn (_ result)
@@ -6842,7 +6843,7 @@
 ; its body never ran: the status of the last command it ran of its own, not
 ; of the condition that ended it (POSIX, and ash's evalloop).
 (def %eval-while
-  (fn (_ cur) (%eval-while-body cur (rest (first cur)) 0)))
+  (fn (_ cur) (%sh-eval-loop cur (%sh-read-loop (first cur)) %eval-while-body)))
 
 (set! %eval-while-body
   (fn (_ cur saved last)
@@ -6851,7 +6852,21 @@
       (= (%sh-in-condition (fn (_) (%eval-list cur))) 0))))
 
 (def %eval-until
-  (fn (_ cur) (%eval-until-body cur (rest (first cur)) 0)))
+  (fn (_ cur) (%sh-eval-loop cur (%sh-read-loop (first cur)) %eval-until-body)))
+
+; The loop at the cursor, R its read (see %sh-read-loop): its node runs, and
+; the cursor is left past its `done`.  A loop that reads otherwise is walked
+; over its tokens by WALK, from its start.
+(def %sh-eval-loop
+  (fn (_ cur r walk)
+    (match
+      ((null? r) (walk cur (rest (first cur)) 0))
+      (#t (%sh-loop-ended cur (rest r) (%sh-run-loop (first r)))))))
+
+(def %sh-loop-ended
+  (fn (_ cur end status)
+    (%sh-cursor-to! cur end)
+    status))
 
 (set! %eval-until-body
   (fn (_ cur saved last)
@@ -7500,7 +7515,7 @@
     (%sh-take-word! cur "}")
     result))
 
-; Which word opens which construct.  %is-compound-start? asks whether a word
+; Which word opens which construct.  %sh-compound-at? asks whether a word
 ; is a key of this table; %eval-compound-body asks what it maps to.  They were
 ; two lists of the same five words, one written as a predicate and one as a
 ; dispatch -- the same duplication the builtin table removed.
@@ -7611,9 +7626,8 @@
 ;
 ; Every pipeline is asked, and nearly every one answers at its second token, so
 ; the `(` is asked first and the reserved words last.
-(def %is-fn-def?
-  (fn (_ cur)
-    (def toks (first cur))
+(def %sh-fn-def-toks?
+  (fn (_ toks)
     (match
       ((null? toks) ())
       ((null? (rest toks)) ())
@@ -7648,16 +7662,18 @@
       ; consume )
 
       (%skip-newlines cur)
-      (if (not (%is-compound-start? cur))
+      (if (not (%sh-compound-at? (first cur)))
         (error (string-append "parse error: no compound command after "
                               name "()"))
-        (let ((body (%collect-stage cur () 0 0)))
-          ; A redefinition SHADOWS rather than replaces -- the lookup walks
-          ; from the front, so the newest wins and the list stays
-          ; append-free.
-          (set! %sh-functions (pair (pair name body) %sh-functions))
-          (set! %sh-status 0)
-          0)))))
+        (%sh-define-fn name (%collect-stage cur () 0 0))))))
+
+; A redefinition SHADOWS rather than replaces -- the lookup walks from the
+; front, so the newest wins and the list stays append-free.
+(def %sh-define-fn
+  (fn (_ name body)
+    (set! %sh-functions (pair (pair name body) %sh-functions))
+    (set! %sh-status 0)
+    0))
 
 (def %sh-fn-lookup
   (fn (self name fns)
@@ -7802,7 +7818,7 @@
 (set! %eval-command
   (fn (_ cur)
     (def status (match
-                  ((%is-compound-start? cur) (%eval-compound-redir cur))
+                  ((%sh-compound-at? (first cur)) (%eval-compound-redir cur))
                   (#t (%eval-simple-cmd cur))))
     (%sh-refuse-leftover cur)
     status))
@@ -7931,8 +7947,9 @@
     ; redirections.  A simple command's stage is walked to its end first, and
     ; the command runs where it stands when no `|` is there (%sh-pipeline-at).
     (match
-      ((%is-fn-def? cur) (%sh-pipeline-done cur negate (%eval-fn-def cur)))
-      ((%is-compound-start? cur)
+      ((%sh-fn-def-toks? (first cur))
+        (%sh-pipeline-done cur negate (%eval-fn-def cur)))
+      ((%sh-compound-at? (first cur))
         (%sh-compound-pipeline cur negate (%collect-stages cur ())))
       (#t (%sh-pipeline-done cur negate
             (%sh-pipeline-at cur negate (%sh-stage-end (first cur) 0 0)))))))
@@ -7944,6 +7961,14 @@
     (match
       (negate (%sh-negated result))
       ((%sh-and-or-next? cur) result)
+      (#t (%sh-exit-on-error result)))))
+
+; The same, ANDOR? saying whether a connective follows.
+(def %sh-pipeline-status
+  (fn (_ negate andor? result)
+    (match
+      (negate (%sh-negated result))
+      (andor? result)
       (#t (%sh-exit-on-error result)))))
 
 ; A compound command alone in its pipeline answers what its body answered, and
@@ -8228,6 +8253,13 @@
 ; Run the list at the cursor in a child and leave the cursor on its `&`.
 (def %sh-run-async
   (fn (_ cur amp)
+    (def status (%sh-async (fn (_) (%eval-and-or cur))))
+    (set-first! cur amp)
+    status))
+
+; RUN in a child the shell does not wait for; the shell answers 0 at once.
+(def %sh-async
+  (fn (_ run)
     (let ((pid (sh-fork)))
       (if (= pid 0)
         (do
@@ -8236,9 +8268,8 @@
             (fn (_)
               (do
                 (%sh-setup-redir (%sh-redir "<" 0 "/dev/null"))
-                (%eval-and-or cur)))))
+                (run)))))
         (do
-          (set-first! cur amp)
           (set! %sh-bg-pid pid)
           (set! %sh-bg-pids (pair pid %sh-bg-pids))
           (set! %sh-status 0)
@@ -8946,6 +8977,358 @@
       ((not (fx<? i limit)) i)
       ((%sh-hex-digit? (string-ref s i)) (self s (fx+ i 1) n limit))
       (#t i))))
+
+; --- A loop read into nodes ------------------------------------------------
+;
+; A while or until loop is read once, where the evaluator meets it, into nodes
+; that run as its tokens would: its condition and its body, and the lists,
+; and-or lists and pipelines in them, and the loops among those.  So where each
+; command ends, whether `&&`, `||` or `&` follows it, and where the loop's `do`
+; and `done` stand are found once however often the loop goes round.  A simple
+; command's node holds where its words start and where its stage ends, and its
+; words and redirections are collected when it runs, as they always are.  Any
+; other compound command is a stage: its tokens, which %eval-command runs, as
+; it runs a pipeline's stages.
+;
+; The read makes once the walks the evaluator makes each time round: where a
+; stage ends (%sh-stage-end), whether a list ends with `&` (%sh-async-end),
+; where a skipped operand ends (%sh-operand-end), where the loop's `do` and
+; `done` are.  It reads only what those walks agree on -- a skipped operand
+; ending where its read ends, a loop's `done` where its body ends and where
+; the balanced walks find it -- and answers nil for anything else, which is
+; then walked over its tokens as before.  Malformed input is such a thing, so
+; its errors are raised when and where they always were.
+;
+; A read is (NODE . END), END the tokens after it, where the evaluator would
+; leave its cursor.  The nodes:
+;
+;   (list ITEMS)                      ITEMS each (sync ANDOR) or (async ANDOR)
+;   (andor PIPELINE OPS)              OPS each (AND? . PIPELINE)
+;   (simple NEGATE TS END ANDOR?)     the command at TS, its stage ending at END
+;   (piped NEGATE STAGES ANDOR?)      stages joined by `|`, each its tokens
+;   (compound NEGATE STAGES ALONE? ANDOR? LOOP)
+;   (fn-def NEGATE NAME BODY ANDOR?)  a definition, BODY its tokens
+;   (loop KIND COND BODY)             KIND while or until; COND and BODY lists
+;
+; ANDOR? says whether an `&&` or `||` follows the pipeline, ALONE? whether a
+; compound is its pipeline's one stage, and LOOP is the node of a loop that is,
+; or nil.
+(def %sh-read-list
+  (fn (_ ts) (%sh-read-items (%sh-past-newlines ts) ())))
+
+; The and-or lists from TS, ITEMS those read before it, latest first.
+(def %sh-read-items
+  (fn (self ts items)
+    (match
+      ((null? ts) (%sh-read-list-end items ts))
+      ((%sh-stop-tok? (first ts)) (%sh-read-list-end items ts))
+      (#t (%sh-read-item self ts items (%sh-async-end ts 0))))))
+
+(def %sh-read-list-end
+  (fn (_ items ts) (pair (list (lit list) (reverse items)) ts)))
+
+; The and-or list at TS, which runs in a child when AMP, where it ends with
+; `&`, is not nil.
+(def %sh-read-item
+  (fn (_ walk ts items amp) (%sh-read-item-at walk items amp (%sh-read-andor ts))))
+
+(def %sh-read-item-at
+  (fn (_ walk items amp r)
+    (match
+      ((null? r) ())
+      ((null? amp)
+        (%sh-read-item-on walk (pair (list (lit sync) (first r)) items) (rest r)))
+      ((same? (rest r) amp)
+        (walk (%sh-past-newlines (rest amp))
+              (pair (list (lit async) (first r)) items)))
+      (#t ()))))
+
+; After an and-or list that ends at E: a separator goes on to the next.
+(def %sh-read-item-on
+  (fn (_ walk items e)
+    (match
+      ((null? e) (%sh-read-list-end items e))
+      ((%sh-separator? (first e)) (walk (%sh-past-newlines (rest e)) items))
+      (#t (%sh-read-list-end items e)))))
+
+(def %sh-read-andor
+  (fn (_ ts) (%sh-read-andor-first (%sh-read-pipeline ts))))
+
+(def %sh-read-andor-first
+  (fn (_ r)
+    (match ((null? r) ()) (#t (%sh-read-andor-ops (first r) (rest r) ())))))
+
+; FIRST, the and-or list's first pipeline, which ends at E, and OPS the
+; operands read after it, latest first.
+(def %sh-read-andor-ops
+  (fn (self first-pipe e ops)
+    (match
+      ((%sh-and-or-at? e)
+        (%sh-read-operand self first-pipe ops
+          (= (string-ref (first (rest (first e))) 0) #\&)
+          (%sh-past-newlines (rest e))))
+      (#t (pair (list (lit andor) first-pipe (reverse ops)) e)))))
+
+; The operand at NEXT, after an `&&` when AND?, an `||` when not.  Skipped, it
+; ends where %sh-operand-end says, which must be where its read ends.
+(def %sh-read-operand
+  (fn (_ walk first-pipe ops and? next)
+    (%sh-read-operand-at walk first-pipe ops and? next (%sh-read-pipeline next))))
+
+(def %sh-read-operand-at
+  (fn (_ walk first-pipe ops and? next r)
+    (match
+      ((null? r) ())
+      ((same? (%sh-operand-end next 0) (rest r))
+        (walk first-pipe (rest r) (pair (pair and? (first r)) ops)))
+      (#t ()))))
+
+; The pipeline at TS, past the newlines and any `!` in front of it.
+(def %sh-read-pipeline
+  (fn (_ ts) (%sh-read-pipeline-at (%sh-past-newlines ts))))
+
+(def %sh-read-pipeline-at
+  (fn (_ ts)
+    (match
+      ((null? ts) (%sh-read-negated () ts))
+      ((%sh-bang-tok? (first ts))
+        (%sh-read-negated #t (%sh-past-newlines (rest ts))))
+      (#t (%sh-read-negated () ts)))))
+
+(def %sh-read-negated
+  (fn (_ negate ts)
+    (match
+      ((%sh-fn-def-toks? ts) (%sh-read-fn-def negate ts))
+      ((%sh-compound-at? ts) (%sh-read-compound negate ts))
+      (#t (%sh-read-simple negate ts (%sh-stage-end ts 0 0))))))
+
+; A simple command, whose stage ends at END; a `|` there makes a pipeline.
+(def %sh-read-simple
+  (fn (_ negate ts end)
+    (match
+      ((%sh-pipe-at? end) (%sh-read-piped negate ts))
+      (#t (pair (list (lit simple) negate ts end (%sh-and-or-at? end)) end)))))
+
+(def %sh-read-piped
+  (fn (_ negate ts)
+    (def cur (%mk-cursor ts))
+    (def stages (%collect-stages cur ()))
+    (pair (list (lit piped) negate stages (%sh-and-or-at? (first cur)))
+          (first cur))))
+
+(def %sh-read-compound
+  (fn (_ negate ts)
+    (def cur (%mk-cursor ts))
+    (def stages (%collect-stages cur ()))
+    (pair (list (lit compound) negate stages (%sh-compound-alone? stages)
+                (%sh-and-or-at? (first cur)) (%sh-read-stage-loop stages))
+          (first cur))))
+
+; A definition, as %eval-fn-def reads one: the name, and past the `()` and the
+; newlines, the compound command's stage, its body.  A bad name, or no
+; compound command, is left to the tokens.
+(def %sh-read-fn-def
+  (fn (_ negate ts)
+    (match
+      ((%sh-name? (%tok-word-val (first ts)))
+        (%sh-read-fn-body negate (%tok-word-val (first ts))
+          (%sh-past-newlines (rest (rest (rest ts))))))
+      (#t ()))))
+
+(def %sh-read-fn-body
+  (fn (_ negate name ts)
+    (match
+      ((%sh-compound-at? ts) (%sh-read-fn-end negate name (%mk-cursor ts)))
+      (#t ()))))
+
+(def %sh-read-fn-end
+  (fn (_ negate name cur)
+    (def body (%collect-stage cur () 0 0))
+    (pair (list (lit fn-def) negate name body (%sh-and-or-at? (first cur)))
+          (first cur))))
+
+; The loop that is a pipeline's one stage and ends its stage, read, or nil.
+; One with redirections after it runs as a stage, and is read when it runs.
+(def %sh-read-stage-loop
+  (fn (_ stages)
+    (match
+      ((null? (rest stages)) (%sh-stage-loop (%sh-read-loop (first stages))))
+      (#t ()))))
+
+(def %sh-stage-loop
+  (fn (_ r) (match ((null? r) ()) ((null? (rest r)) (first r)) (#t ()))))
+
+; The while or until loop at TS, read, its END past its `done`; or nil.
+(def %sh-read-loop
+  (fn (_ ts)
+    (match
+      ((%sh-word-is? (first ts) "while") (%sh-read-loop-cond (lit while) ts))
+      ((%sh-word-is? (first ts) "until") (%sh-read-loop-cond (lit until) ts))
+      (#t ()))))
+
+(def %sh-read-loop-cond
+  (fn (_ kind ts) (%sh-read-loop-do kind ts (%sh-read-list (rest ts)))))
+
+; COND, the condition's read: its `do` must follow it.
+(def %sh-read-loop-do
+  (fn (_ kind ts cond)
+    (match
+      ((null? cond) ())
+      ((%sh-spells-at? (%sh-past-newlines (rest cond)) "do")
+        (%sh-read-loop-body kind ts (first cond)
+          (%sh-past-newlines (rest (%sh-past-newlines (rest cond))))))
+      (#t ()))))
+
+(def %sh-read-loop-body
+  (fn (_ kind ts cond start)
+    (%sh-read-loop-done kind ts cond start (%sh-read-list start))))
+
+(def %sh-read-loop-done
+  (fn (_ kind ts cond start body)
+    (match
+      ((null? body) ())
+      ((%sh-loop-done? ts start (%sh-past-newlines (rest body)))
+        (pair (list (lit loop) kind cond (first body))
+              (rest (%sh-past-newlines (rest body)))))
+      (#t ()))))
+
+; Whether D, past the newlines where the body's read ends, is the loop's
+; `done`: spelt so, and where the balanced walks the loop takes out of itself
+; find it, from its start at TS and from its body's START.
+(def %sh-loop-done?
+  (fn (_ ts start d)
+    (match
+      ((null? d) ())
+      ((not (%tok-spells? (first d) "done")) ())
+      ((not (same? d (%sh-skip-block-walk (rest ts) 0 %sh-done?))) ())
+      (#t (same? d (%sh-skip-block-walk start 0 %sh-done?))))))
+
+(def %sh-spells-at?
+  (fn (_ ts word) (match ((null? ts) ()) (#t (%tok-spells? (first ts) word)))))
+
+; --- Running the nodes ---
+;
+; Each runs as the evaluator's walk over its tokens runs, and answers what it
+; answers: the functions named beside each do the same over a cursor.
+
+; %sh-list-at: an empty list sets the status 0.
+(def %sh-run-list
+  (fn (_ node) (%sh-run-items (first (rest node)) ())))
+
+(def %sh-run-items
+  (fn (self items result)
+    (match
+      ((null? items) (match ((null? result) (%sh-set-status 0)) (#t result)))
+      (#t (self (rest items) (%sh-run-item (first items)))))))
+
+(def %sh-run-item
+  (fn (_ item)
+    (match
+      ((eq? (first item) (lit sync)) (%sh-run-andor (first (rest item))))
+      (#t (%sh-async (fn (_) (%sh-run-andor (first (rest item)))))))))
+
+; %eval-and-or: an operand runs after `&&` when the status is 0, after `||`
+; when it is not, and is passed over otherwise.
+(def %sh-run-andor
+  (fn (_ node)
+    (%sh-run-ops (first (rest (rest node))) (%sh-run-pipe (first (rest node))))))
+
+(def %sh-run-ops
+  (fn (self ops result)
+    (match
+      ((null? ops) result)
+      ((%sh-operand-runs? (first (first ops)) result)
+        (self (rest ops) (%sh-run-pipe (rest (first ops)))))
+      (#t (self (rest ops) result)))))
+
+; %eval-pipeline.
+(def %sh-run-pipe
+  (fn (_ node)
+    (match
+      ((eq? (first node) (lit simple)) (%sh-run-simple (rest node)))
+      ((eq? (first node) (lit compound)) (%sh-run-compound (rest node)))
+      ((eq? (first node) (lit piped)) (%sh-run-piped (rest node)))
+      (#t (%sh-run-fn-def (rest node))))))
+
+; PARTS (NEGATE TS END ANDOR?): %sh-pipeline-at and %sh-simple-to.
+(def %sh-run-simple
+  (fn (_ parts)
+    (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
+      (match
+        ((first parts) (%sh-in-condition (fn (_) (%sh-run-simple-at parts))))
+        ((first (rest (rest (rest parts))))
+          (%sh-in-condition (fn (_) (%sh-run-simple-at parts))))
+        (#t (%sh-run-simple-at parts))))))
+
+(def %sh-run-simple-at
+  (fn (_ parts)
+    (%sh-simple-to (%mk-cursor (first (rest parts))) (first (rest (rest parts))))))
+
+; PARTS (NEGATE STAGES ANDOR?): %sh-run-pipeline-stages.
+(def %sh-run-piped
+  (fn (_ parts)
+    (%sh-pipeline-status (first parts) (first (rest (rest parts)))
+      (%sh-run-stages-node (first parts) (first (rest parts))
+        (first (rest (rest parts))) ()))))
+
+; PARTS (NEGATE STAGES ALONE? ANDOR? LOOP): %sh-compound-pipeline.
+(def %sh-run-compound
+  (fn (_ parts)
+    (%sh-compound-status parts
+      (%sh-run-stages-node (first parts) (first (rest parts))
+        (first (rest (rest (rest parts))))
+        (first (rest (rest (rest (rest parts)))))))))
+
+(def %sh-compound-status
+  (fn (_ parts result)
+    (match
+      ((first (rest (rest parts))) (%sh-compound-done (first parts) result))
+      (#t (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
+            result)))))
+
+; STAGES, or LOOP in their place when it is not nil, as a condition when
+; NEGATE or ANDOR?.
+(def %sh-run-stages-node
+  (fn (_ negate stages andor? loop)
+    (match
+      (negate (%sh-in-condition (fn (_) (%sh-run-stages-or stages loop))))
+      (andor? (%sh-in-condition (fn (_) (%sh-run-stages-or stages loop))))
+      (#t (%sh-run-stages-or stages loop)))))
+
+(def %sh-run-stages-or
+  (fn (_ stages loop)
+    (match ((null? loop) (%sh-run-stages stages)) (#t (%sh-run-loop loop)))))
+
+; PARTS (NEGATE NAME BODY ANDOR?).
+(def %sh-run-fn-def
+  (fn (_ parts)
+    (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
+      (%sh-define-fn (first (rest parts)) (first (rest (rest parts)))))))
+
+; %eval-while-body and %eval-until-body: the loop answers the status of the
+; body that ran last, or 0; `break` ends it with the status it was given.
+(def %sh-run-loop
+  (fn (_ node) (%sh-run-loop-round node 0)))
+
+(def %sh-run-loop-round
+  (fn (self node last)
+    (match
+      ((%sh-loop-goes? (first (rest node))
+         (%sh-in-condition (fn (_) (%sh-run-list (first (rest (rest node)))))))
+        (%sh-run-loop-went self node
+          (%sh-loop-body-run
+            (fn (_) (%sh-run-list (first (rest (rest (rest node)))))))))
+      (#t (%sh-set-status last)))))
+
+(def %sh-loop-goes?
+  (fn (_ kind status)
+    (match ((eq? kind (lit while)) (= status 0)) (#t (not (= status 0))))))
+
+(def %sh-run-loop-went
+  (fn (_ round node r)
+    (match
+      ((eq? (first r) (lit break)) (%sh-set-status (rest r)))
+      (#t (round node (rest r))))))
 
 ; --- Public API ---
 
