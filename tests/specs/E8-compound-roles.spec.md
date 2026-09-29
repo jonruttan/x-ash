@@ -76,13 +76,14 @@ The first five cases are pins that hold on main too; their expectations match
 
 ### calling a function costs less than four commands
 
-The function is removed afterwards, so it is defined for this case alone.
+The function is removed afterwards, so it is defined for this case alone.  It
+is called once before the call measured, as its first call reads its body.
 
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (toks (fn (_ text) (first (%sh-mark-command (sh-tokenize text))))))
-  (sh-eval "e8f() { :; }")
+  (sh-eval "e8f() { :; }; e8f")
   (let ((call (toks "e8f")) (four (toks ": ; : ; : ; :")))
     (let ((got (< (cost (fn (_) (%eval-list (%mk-cursor call))))
                   (cost (fn (_) (%eval-list (%mk-cursor four)))))))
