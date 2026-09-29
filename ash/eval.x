@@ -6928,7 +6928,14 @@
 ; The words are read from the token list, and the cursor is first written
 ; where the body starts.
 (def %eval-for
-  (fn (_ cur) (%sh-for-at cur (%sh-past-newlines (rest (first cur))))))
+  (fn (_ cur) (%sh-eval-for cur (%sh-read-for (first cur)))))
+
+; The loop at the cursor, R its read (see %sh-read-for), as %sh-eval-loop.
+(def %sh-eval-for
+  (fn (_ cur r)
+    (match
+      ((null? r) (%sh-for-at cur (%sh-past-newlines (rest (first cur)))))
+      (#t (%sh-loop-ended cur (rest r) (%sh-run-for (first r)))))))
 
 ; TS stands on the loop's variable.
 (def %sh-for-at
@@ -8980,15 +8987,18 @@
 
 ; --- A loop read into nodes ------------------------------------------------
 ;
-; A while or until loop is read once, where the evaluator meets it, into nodes
-; that run as its tokens would: its condition and its body, and the lists,
-; and-or lists and pipelines in them, and the loops among those.  So where each
-; command ends, whether `&&`, `||` or `&` follows it, and where the loop's `do`
-; and `done` stand are found once however often the loop goes round.  A simple
-; command's node holds where its words start and where its stage ends, and its
-; words and redirections are collected when it runs, as they always are.  Any
-; other compound command is a stage: its tokens, which %eval-command runs, as
-; it runs a pipeline's stages.
+; A while, until or for loop is read once, where the evaluator meets it, into
+; nodes that run as its tokens would: its condition or words and its body, the
+; lists, and-or lists and pipelines in them, and the compound commands among
+; those -- ifs, cases, groups and loops.  So where each command ends, whether
+; `&&`, `||` or `&` follows it, and where each construct's words stand are
+; found once however often the loop goes round.  A simple command's node holds
+; where its words start and where its stage ends, and its words and
+; redirections are collected when it runs, as they always are.  A subshell,
+; and a compound command with redirections after it, is a stage: its tokens,
+; which %eval-command runs, as it runs a pipeline's stages.  An if, case or
+; group outside a loop is walked over its tokens: it runs once where it is,
+; and a read would cost it more than the walk.
 ;
 ; The read makes once the walks the evaluator makes each time round: where a
 ; stage ends (%sh-stage-end), whether a list ends with `&` (%sh-async-end),
@@ -9006,13 +9016,17 @@
 ;   (andor PIPELINE OPS)              OPS each (AND? . PIPELINE)
 ;   (simple NEGATE TS END ANDOR?)     the command at TS, its stage ending at END
 ;   (piped NEGATE STAGES ANDOR?)      stages joined by `|`, each its tokens
-;   (compound NEGATE STAGES ALONE? ANDOR? LOOP)
+;   (compound NEGATE STAGES ALONE? ANDOR? NODE)
 ;   (fn-def NEGATE NAME BODY ANDOR?)  a definition, BODY its tokens
 ;   (loop KIND COND BODY)             KIND while or until; COND and BODY lists
+;   (for VAR IN? WORDS BODY)          WORDS tokens, or the parameters unless IN?
+;   (if CLAUSES ELSE)                 CLAUSES each (COND BODY); ELSE a list or nil
+;   (case SUBJECT CLAUSES)            CLAUSES each (PATTERNS BODY)
+;   (group BODY)
 ;
 ; ANDOR? says whether an `&&` or `||` follows the pipeline, ALONE? whether a
-; compound is its pipeline's one stage, and LOOP is the node of a loop that is,
-; or nil.
+; compound is its pipeline's one stage, and NODE is the node of a compound
+; command that is, or nil.
 (def %sh-read-list
   (fn (_ ts) (%sh-read-items (%sh-past-newlines ts) ())))
 
@@ -9121,7 +9135,7 @@
     (def cur (%mk-cursor ts))
     (def stages (%collect-stages cur ()))
     (pair (list (lit compound) negate stages (%sh-compound-alone? stages)
-                (%sh-and-or-at? (first cur)) (%sh-read-stage-loop stages))
+                (%sh-and-or-at? (first cur)) (%sh-read-stage-compound stages))
           (first cur))))
 
 ; A definition, as %eval-fn-def reads one: the name, and past the `()` and the
@@ -9147,16 +9161,28 @@
     (pair (list (lit fn-def) negate name body (%sh-and-or-at? (first cur)))
           (first cur))))
 
-; The loop that is a pipeline's one stage and ends its stage, read, or nil.
-; One with redirections after it runs as a stage, and is read when it runs.
-(def %sh-read-stage-loop
+; The compound command that is a pipeline's one stage and ends its stage,
+; read, or nil.  One with redirections after it runs as a stage, and a loop
+; among those is read when it runs.
+(def %sh-read-stage-compound
   (fn (_ stages)
     (match
-      ((null? (rest stages)) (%sh-stage-loop (%sh-read-loop (first stages))))
+      ((null? (rest stages)) (%sh-stage-node (%sh-read-compound-at (first stages))))
       (#t ()))))
 
-(def %sh-stage-loop
+(def %sh-stage-node
   (fn (_ r) (match ((null? r) ()) ((null? (rest r)) (first r)) (#t ()))))
+
+; The compound command at TS, read, by the word that opens it: a subshell is
+; left to its tokens.
+(def %sh-read-compound-at
+  (fn (_ ts)
+    (match
+      ((%sh-word-is? (first ts) "for") (%sh-read-for ts))
+      ((%sh-word-is? (first ts) "if") (%sh-read-if ts))
+      ((%sh-word-is? (first ts) "case") (%sh-read-case ts))
+      ((%sh-word-is? (first ts) "{") (%sh-read-group ts))
+      (#t (%sh-read-loop ts)))))
 
 ; The while or until loop at TS, read, its END past its `done`; or nil.
 (def %sh-read-loop
@@ -9205,6 +9231,230 @@
 
 (def %sh-spells-at?
   (fn (_ ts word) (match ((null? ts) ()) (#t (%tok-spells? (first ts) word)))))
+
+; The for loop at TS, as %eval-for reads one: its variable, the words after
+; `in` or none, and its body, whose `done` must be where the balanced walk
+; from the body's start finds it (%sh-skip-past-from); or nil.  The words are
+; tokens, expanded each time the loop runs.
+(def %sh-read-for
+  (fn (_ ts) (%sh-read-for-var (%sh-past-newlines (rest ts)))))
+
+(def %sh-read-for-var
+  (fn (_ v)
+    (match
+      ((null? v) ())
+      ((%sh-name? (%tok-word-val (first v)))
+        (%sh-read-for-in (%tok-word-val (first v)) (%sh-past-newlines (rest v))))
+      (#t ()))))
+
+(def %sh-read-for-in
+  (fn (_ var ts)
+    (match
+      ((%sh-spells-at? ts "in") (%sh-read-for-words var (rest ts) ()))
+      (#t (%sh-read-for-do var () () ts)))))
+
+(def %sh-read-for-words
+  (fn (self var ts words)
+    (match
+      ((%sh-for-list-end? ts) (%sh-read-for-do var #t (reverse words) ts))
+      (#t (self var (rest ts) (pair (first ts) words))))))
+
+(def %sh-read-for-do
+  (fn (_ var in? words ts)
+    (%sh-read-for-body var in? words (%sh-past-semicolon (%sh-past-newlines ts)))))
+
+(def %sh-read-for-body
+  (fn (_ var in? words d)
+    (match
+      ((%sh-spells-at? d "do")
+        (%sh-read-for-done var in? words (%sh-past-newlines (rest d))
+          (%sh-read-list (%sh-past-newlines (rest d)))))
+      (#t ()))))
+
+(def %sh-read-for-done
+  (fn (_ var in? words start body)
+    (match
+      ((null? body) ())
+      ((%sh-body-done? start (%sh-past-newlines (rest body)))
+        (pair (list (lit for) var in? words (first body))
+              (rest (%sh-past-newlines (rest body)))))
+      (#t ()))))
+
+; Whether D is a `done` the balanced walk from START finds.
+(def %sh-body-done?
+  (fn (_ start d)
+    (match
+      ((null? d) ())
+      ((not (%tok-spells? (first d) "done")) ())
+      (#t (same? d (%sh-skip-block-walk start 0 %sh-done?))))))
+
+; The if at TS, as %eval-if reads one: each condition and its `then` body, to
+; the elif, else or fi the balanced walk from the body finds, and an else
+; body, to its fi.  Each body that runs is walked from its end to the fi
+; (%skip-to-fi), which must find the fi the clauses end at; or nil.
+(def %sh-read-if
+  (fn (_ ts) (%sh-read-if-clause (%sh-past-newlines (rest ts)) ())))
+
+; The clause whose condition starts at TS, CLAUSES those read before it,
+; latest first, each (COND BODY END), END where its body's read ends.
+(def %sh-read-if-clause
+  (fn (_ ts clauses) (%sh-read-if-then clauses (%sh-read-list ts))))
+
+(def %sh-read-if-then
+  (fn (_ clauses cond)
+    (match
+      ((null? cond) ())
+      ((%sh-spells-at? (%sh-past-newlines (rest cond)) "then")
+        (%sh-read-if-body clauses (first cond)
+          (%sh-past-newlines (rest (%sh-past-newlines (rest cond))))))
+      (#t ()))))
+
+(def %sh-read-if-body
+  (fn (_ clauses cond start)
+    (%sh-read-if-next clauses cond (%sh-read-list start)
+      (%sh-skip-block-walk start 0 %sh-elif-else-fi?))))
+
+(def %sh-read-if-next
+  (fn (_ clauses cond body x)
+    (match
+      ((null? body) ())
+      ((null? x) ())
+      (#t (%sh-read-if-at (pair (list cond (first body) (rest body)) clauses) x)))))
+
+; At X, the elif, else or fi after a clause.
+(def %sh-read-if-at
+  (fn (_ clauses x)
+    (match
+      ((%tok-spells? (first x) "elif")
+        (%sh-read-if-clause (%sh-past-newlines (rest x)) clauses))
+      ((%tok-spells? (first x) "else")
+        (%sh-read-if-else clauses (%sh-read-list (%sh-past-newlines (rest x)))))
+      (#t (%sh-read-if-end clauses () x)))))
+
+(def %sh-read-if-else
+  (fn (_ clauses body)
+    (match
+      ((null? body) ())
+      ((%sh-spells-at? (%sh-past-newlines (rest body)) "fi")
+        (%sh-read-if-end clauses (first body) (%sh-past-newlines (rest body))))
+      (#t ()))))
+
+; F, the fi, and ELSE the else body or nil.
+(def %sh-read-if-end
+  (fn (_ clauses else f)
+    (match
+      ((%sh-if-ends-at? clauses f)
+        (pair (list (lit if) (%sh-if-clauses (reverse clauses)) else) (rest f)))
+      (#t ()))))
+
+(def %sh-if-ends-at?
+  (fn (self clauses f)
+    (match
+      ((null? clauses) #t)
+      ((same? f
+         (%sh-skip-block-walk (first (rest (rest (first clauses)))) 0 %sh-fi?))
+        (self (rest clauses) f))
+      (#t ()))))
+
+; Each (COND BODY END) of CLAUSES as (COND BODY).
+(def %sh-if-clauses
+  (fn (self clauses)
+    (match
+      ((null? clauses) ())
+      (#t (pair (list (first (first clauses)) (first (rest (first clauses))))
+                (self (rest clauses)))))))
+
+; The case at TS, as %eval-case reads one: its subject, its `in`, and each
+; clause's patterns and body.  A clause that does not match is walked from its
+; `)` to its `;;` or the esac, where the next clause or the case's end is; one
+; that runs is walked from its body's end past the esac.  Every way out must
+; leave the case at the same place; or nil.
+(def %sh-read-case
+  (fn (_ ts)
+    (match
+      ((null? (rest ts)) ())
+      ((%sh-spells-at? (%sh-past-newlines (rest (rest ts))) "in")
+        (%sh-read-case-clauses (first (rest ts))
+          (rest (%sh-past-newlines (rest (rest ts)))) () ()))
+      (#t ()))))
+
+; The clause at TS, CLAUSES those read before it, latest first, and ENDS where
+; each one that runs leaves the case.
+(def %sh-read-case-clauses
+  (fn (_ subject ts clauses ends)
+    (%sh-read-case-clause subject (%sh-past-newlines ts) clauses ends)))
+
+(def %sh-read-case-clause
+  (fn (_ subject ts clauses ends)
+    (match
+      ((null? ts) (%sh-read-case-end subject clauses ends ts))
+      ((%sh-word-is? (first ts) "esac")
+        (%sh-read-case-end subject clauses ends (rest ts)))
+      (#t (%sh-read-case-pats subject ts clauses ends ())))))
+
+(def %sh-read-case-pats
+  (fn (self subject ts clauses ends pats)
+    (match
+      ((null? ts) ())
+      ((%tok-is-op? (first ts) ")")
+        (%sh-read-case-body subject (reverse pats) (rest ts) clauses ends))
+      ((%tok-is-op? (first ts) "|") (self subject (rest ts) clauses ends pats))
+      ((%tok-pattern-paren? (first ts)) (self subject (rest ts) clauses ends pats))
+      (#t (self subject (rest ts) clauses ends (pair (first ts) pats))))))
+
+; The body after the `)` at A: read from past the newlines, and walked from A
+; to X, its `;;` or the esac.
+(def %sh-read-case-body
+  (fn (_ subject pats a clauses ends)
+    (%sh-read-case-next subject pats (%sh-read-list (%sh-past-newlines a))
+      (%sh-skip-block-walk a 0 %sh-case-body-end?) clauses ends)))
+
+(def %sh-read-case-next
+  (fn (_ subject pats body x clauses ends)
+    (match
+      ((null? body) ())
+      (#t (%sh-read-case-after subject x (pair (list pats (first body)) clauses)
+            (pair (%sh-case-ran-end (rest body)) ends))))))
+
+; Where a body that ends at END leaves the case (%sh-case-ran).
+(def %sh-case-ran-end
+  (fn (_ end)
+    (%sh-past-or-end (%sh-skip-block-walk (%sh-past-dsemi end) 0 %sh-esac?))))
+
+(def %sh-read-case-after
+  (fn (_ subject x clauses ends)
+    (match
+      ((null? x) (%sh-read-case-end subject clauses ends x))
+      ((%tok-is-op? (first x) ";;")
+        (%sh-read-case-clauses subject (rest x) clauses ends))
+      (#t (%sh-read-case-end subject clauses ends (rest x))))))
+
+(def %sh-read-case-end
+  (fn (_ subject clauses ends end)
+    (match
+      ((%sh-all-same? ends end)
+        (pair (list (lit case) subject (reverse clauses)) end))
+      (#t ()))))
+
+(def %sh-all-same?
+  (fn (self l x)
+    (match
+      ((null? l) #t)
+      ((same? (first l) x) (self (rest l) x))
+      (#t ()))))
+
+; The group at TS, as %eval-brace-group reads one: its body, to its `}`.
+(def %sh-read-group
+  (fn (_ ts) (%sh-read-group-end (%sh-read-list (%sh-past-newlines (rest ts))))))
+
+(def %sh-read-group-end
+  (fn (_ body)
+    (match
+      ((null? body) ())
+      ((%sh-spells-at? (%sh-past-newlines (rest body)) "}")
+        (pair (list (lit group) (first body))
+              (rest (%sh-past-newlines (rest body)))))
+      (#t ()))))
 
 ; --- Running the nodes ---
 ;
@@ -9271,7 +9521,7 @@
       (%sh-run-stages-node (first parts) (first (rest parts))
         (first (rest (rest parts))) ()))))
 
-; PARTS (NEGATE STAGES ALONE? ANDOR? LOOP): %sh-compound-pipeline.
+; PARTS (NEGATE STAGES ALONE? ANDOR? NODE): %sh-compound-pipeline.
 (def %sh-run-compound
   (fn (_ parts)
     (%sh-compound-status parts
@@ -9286,24 +9536,106 @@
       (#t (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
             result)))))
 
-; STAGES, or LOOP in their place when it is not nil, as a condition when
+; STAGES, or NODE in their place when it is not nil, as a condition when
 ; NEGATE or ANDOR?.
 (def %sh-run-stages-node
-  (fn (_ negate stages andor? loop)
+  (fn (_ negate stages andor? node)
     (match
-      (negate (%sh-in-condition (fn (_) (%sh-run-stages-or stages loop))))
-      (andor? (%sh-in-condition (fn (_) (%sh-run-stages-or stages loop))))
-      (#t (%sh-run-stages-or stages loop)))))
+      (negate (%sh-in-condition (fn (_) (%sh-run-stages-or stages node))))
+      (andor? (%sh-in-condition (fn (_) (%sh-run-stages-or stages node))))
+      (#t (%sh-run-stages-or stages node)))))
 
 (def %sh-run-stages-or
-  (fn (_ stages loop)
-    (match ((null? loop) (%sh-run-stages stages)) (#t (%sh-run-loop loop)))))
+  (fn (_ stages node)
+    (match
+      ((null? node) (%sh-run-stages stages))
+      (#t (%sh-run-compound-node node)))))
 
 ; PARTS (NEGATE NAME BODY ANDOR?).
 (def %sh-run-fn-def
   (fn (_ parts)
     (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
       (%sh-define-fn (first (rest parts)) (first (rest (rest parts)))))))
+
+; A compound command's node, by its kind.
+(def %sh-run-compound-node
+  (fn (_ node)
+    (match
+      ((eq? (first node) (lit loop)) (%sh-run-loop node))
+      ((eq? (first node) (lit for)) (%sh-run-for node))
+      ((eq? (first node) (lit if)) (%sh-run-if node))
+      ((eq? (first node) (lit case)) (%sh-run-case node))
+      (#t (%sh-run-list (first (rest node)))))))
+
+; %eval-for-body: once round for each word, the variable set to it; the loop
+; answers the status of its last time round, or 0 with no words, and `break`
+; ends it with the status it was given.  NODE is (for VAR IN? WORDS BODY).
+(def %sh-run-for
+  (fn (_ node)
+    (%sh-run-for-words node
+      (match
+        ((first (rest (rest node)))
+          (%sh-expand-words (first (rest (rest (rest node)))) ()))
+        (#t %sh-args)))))
+
+; The words of TOKS, each expanded and spliced (%sh-for-words).
+(def %sh-expand-words
+  (fn (self toks ws)
+    (match
+      ((null? toks) (reverse ws))
+      (#t (self (rest toks)
+                (%sh-push-fields (%sh-expand-tok (first toks) ()) ws))))))
+
+(def %sh-run-for-words
+  (fn (_ node words)
+    (match ((null? words) (%sh-set-status 0)) (#t (%sh-run-for-each node words)))))
+
+(def %sh-run-for-each
+  (fn (self node words)
+    (%sh-var-set! (first (rest node)) (first words))
+    (%sh-run-for-went self node (rest words)
+      (%sh-loop-body-run
+        (fn (_) (%sh-run-list (first (rest (rest (rest (rest node)))))))))))
+
+(def %sh-run-for-went
+  (fn (_ each node more r)
+    (match
+      ((eq? (first r) (lit break)) (%sh-set-status (rest r)))
+      ((null? more) (%sh-set-status (rest r)))
+      (#t (each node more)))))
+
+; %eval-if: the first condition that answers 0 runs its body, else the else
+; body; the if answers what ran, or 0 when nothing did.  NODE is
+; (if CLAUSES ELSE), each clause (COND BODY).
+(def %sh-run-if
+  (fn (_ node) (%sh-run-if-clauses (first (rest node)) (first (rest (rest node))))))
+
+(def %sh-run-if-clauses
+  (fn (self clauses else)
+    (match
+      ((null? clauses)
+        (match
+          ((null? else) (%sh-set-status 0))
+          (#t (%sh-set-status (%sh-run-list else)))))
+      ((= (%sh-in-condition (fn (_) (%sh-run-list (first (first clauses))))) 0)
+        (%sh-set-status (%sh-run-list (first (rest (first clauses))))))
+      (#t (self (rest clauses) else)))))
+
+; %eval-case: the subject expanded without splitting, and the first clause
+; with a pattern that matches runs; the case answers what ran, or 0.  NODE is
+; (case SUBJECT CLAUSES), each clause (PATTERNS BODY).
+(def %sh-run-case
+  (fn (_ node)
+    (%sh-run-case-clauses (first (rest (rest node)))
+      (%sh-expand-tok-1 (first (rest node))))))
+
+(def %sh-run-case-clauses
+  (fn (self clauses word)
+    (match
+      ((null? clauses) (%sh-set-status 0))
+      ((%case-match? (first (first clauses)) word)
+        (%sh-set-status (%sh-run-list (first (rest (first clauses))))))
+      (#t (self (rest clauses) word)))))
 
 ; %eval-while-body and %eval-until-body: the loop answers the status of the
 ; body that ran last, or 0; `break` ends it with the status it was given.
