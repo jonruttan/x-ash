@@ -11,6 +11,16 @@
 ; Usage:
 ;   (def tokens (sh-tokenize "echo hello | grep h"))
 ;   ; -> ((tok-word "echo") (tok-word "hello") (tok-op "|") (tok-word "grep") (tok-word "h"))
+; The compiled base of the shell's tokens is made by the assembler lane's
+; compiler, reached as x/tool/compile's own door reaches it: the cache module
+; imported where it is first needed, and its function taken from the
+; catalogue.  The name compile-asm is bound by no import in the dialect this
+; bundle boots.
+(def %sh-compile-asm
+  (fn (_ form fvars)
+    (import x/tool/asm-cache)
+    ((prim-ref (lit compile) (lit asm-cached)) form fvars #t)))
+
 ; --- Create shell tokenizer base (bare, no sexp types) ---
 
 ; The tokenizer base is process state: (Base make-tok) puts it on a chain of
@@ -254,10 +264,10 @@
 
 ; The consumed run is 'text' -- quotes included, since neither reader un-reads
 ; the closing quote.  Drop one from each end.
-(def %sh-unquote
-  (fn (_ s)
-    (let ((n (string-length s)))
-      (if (< n 2) "" (substring s 1 (- n 1))))))
+(def %sh-unquote (fn (_ s) (%sh-unquote-of s (string-length s))))
+
+(def %sh-unquote-of
+  (fn (_ s n) (match ((fx<? n 2) "") (#t (substring s 1 (fx+ n -1))))))
 
 ; A quoted word that does not end at its closing quote is still one word:
 ; `"$HOME"/bin` and `'a'"$b"` are single arguments. So the closing quote hands
@@ -267,12 +277,52 @@
 ; quoted string keeps its tok-sq / tok-dq identity (the token vocabulary the
 ; specs assert), and anything mixed comes back as a tok-word carrying its raw
 ; text for %sh-expand-str to interpret. %sh-pure-quote? tells them apart.
-(def %sh-sq-read
-  (fn (_ . args)
-    (let ((text (buffer-token (first args))))
-      (if (%sh-pure-quote? text)
-        (mk-tok-sq (%sh-unquote text))
-        (mk-tok-word text)))))
+;
+; The analyser says which, as the label of its score: %sh-label-quote where
+; the opening quote's partner closes the token, %sh-label-word at every end
+; the token finds after that, and %sh-label-ask where a double-quoted string
+; that held a substitution or a `${...}` closes: a `"` inside one of those is
+; the first the text holds, and the reader asks the text (%sh-pure-quote?),
+; as it does on a platform whose score carries no label.
+(def %sh-label-quote 1)
+(def %sh-label-word 2)
+(def %sh-label-ask 3)
+
+(def %sh-sq-read (fn (_ . args) (%sh-quoted-read args mk-tok-sq)))
+
+(def %sh-quoted-read
+  (fn (_ args mk) (%sh-quoted-tok (buffer-token (first args)) (%read-label args) mk)))
+
+(def %sh-quoted-tok
+  (fn (_ text label mk)
+    (match
+      ((null? label) (%sh-quoted-asked text (%sh-pure-quote? text) mk))
+      ((= label %sh-label-ask) (%sh-quoted-asked text (%sh-pure-quote? text) mk))
+      ((= label %sh-label-quote) (mk (%sh-unquote text)))
+      (#t (mk-tok-word text)))))
+
+(def %sh-quoted-asked
+  (fn (_ text pure? mk)
+    (match (pure? (mk (%sh-unquote text))) (#t (mk-tok-word text)))))
+
+; The character after a quoted string's closing quote: a break ends the
+; token, a quoted string; any other character makes the token a word, which
+; the label says at once, as the text may end before the word finds an end,
+; and %sh-qword-body reads the character.  A quote is a break, and a word's
+; character first.
+(def %sh-quote-after
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\')) (%sh-quote-word buffer score chr))
+      ((= chr (char->integer #\")) (%sh-quote-word buffer score chr))
+      ((%sh-word-break? chr)
+        (do (buffer-unread buffer) (score-set score 1 buffer)))
+      (#t (%sh-quote-word buffer score chr)))))
+
+(def %sh-quote-word
+  (fn (_ buffer score chr)
+    (%score-label! score %sh-label-word)
+    (%sh-qword-body buffer score chr)))
 
 (def %sh-sq-body ())
 
@@ -288,8 +338,9 @@
         ; closing quote still produces a token. If it continues, %sh-qword-body
         ; scores again at the real break and that later score wins; this is the
         ; floor, like SH-WORD's -1 analyse entry.
+        (%score-label! score %sh-label-quote)
         (score-set score 1 buffer)
-        %sh-qword-body)
+        %sh-quote-after)
       %sh-sq-body)))
 
 (%sh-tok-type!
@@ -335,8 +386,9 @@
         ; closing quote still produces a token. If it continues, %sh-qword-body
         ; scores again at the real break and that later score wins; this is the
         ; floor, like SH-WORD's -1 analyse entry.
+        (%score-label! score %sh-label-quote)
         (score-set score 1 buffer)
-        %sh-qword-body))
+        %sh-quote-after))
       ; Backslash: the next character cannot close the string
 
       ((= chr (char->integer #\\)) %sh-dq-skip)
@@ -355,12 +407,35 @@
 ; %sh-expand-str in eval.x handles escaping and expansion in ONE left-to-right
 ; pass -- which is the only way to get `"\$X"` and `"$X"` both right.
 
-(def %sh-dq-read
-  (fn (_ . args)
-    (let ((text (buffer-token (first args))))
-      (if (%sh-pure-quote? text)
-        (mk-tok-dq (%sh-unquote text))
-        (mk-tok-word text)))))
+; %sh-dq-body after a substitution or a `${...}` in the string: the same
+; states, which close the string with %sh-label-ask.
+(def %sh-dq-rest ())
+
+(def %sh-dq-rest-skip (fn (_ buffer score chr) %sh-dq-rest))
+
+(def %sh-dq-rest-dollar
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\())
+        (do (set! %sh-cs-depth 0) (set! %sh-cs-return 2) %sh-cs-body))
+      ((= chr (char->integer #\{))
+        (do (set! %sh-pe-depth 0) (set! %sh-pe-return 2) %sh-pe-body))
+      (#t (%sh-dq-rest buffer score chr)))))
+
+(set! %sh-dq-rest
+  (fn (_ buffer score chr)
+    (match
+      ((= chr (char->integer #\$)) %sh-dq-rest-dollar)
+      ((= chr #\`) (do (set! %sh-cs-return 2) %sh-bt-scan))
+      ((= chr (char->integer #\"))
+        (do
+          (%score-label! score %sh-label-ask)
+          (score-set score 1 buffer)
+          %sh-quote-after))
+      ((= chr (char->integer #\\)) %sh-dq-rest-skip)
+      (#t %sh-dq-rest))))
+
+(def %sh-dq-read (fn (_ . args) (%sh-quoted-read args mk-tok-dq)))
 
 (%sh-tok-type!
   "SH-DQ"
@@ -430,7 +505,7 @@
           ; Closed.  Back to whatever the word was doing.
           (match
             ((= %sh-cs-return 1) %sh-word-in-dq)
-            ((= %sh-cs-return 2) %sh-dq-body)
+            ((= %sh-cs-return 2) %sh-dq-rest)
             (#t %sh-qword-body))
           (do (set! %sh-cs-depth (- %sh-cs-depth 1)) %sh-cs-body)))
       ((= chr (char->integer #\')) %sh-cs-sq)
@@ -481,7 +556,7 @@
           ; Closed.  Back to whatever the word was doing.
           (match
             ((= %sh-pe-return 1) %sh-word-in-dq)
-            ((= %sh-pe-return 2) %sh-dq-body)
+            ((= %sh-pe-return 2) %sh-dq-rest)
             (#t %sh-qword-body))
           (do (set! %sh-pe-depth (- %sh-pe-depth 1)) %sh-pe-body)))
       ((= chr (char->integer #\')) %sh-pe-sq)
@@ -509,7 +584,7 @@
       ((= chr #\`)
         (match
           ((= %sh-cs-return 1) %sh-word-in-dq)
-          ((= %sh-cs-return 2) %sh-dq-body)
+          ((= %sh-cs-return 2) %sh-dq-rest)
           (#t %sh-qword-body)))
       (#t %sh-bt-scan))))
 
@@ -581,6 +656,7 @@
         ; closing quote still produces a token. If it continues, %sh-qword-body
         ; scores again at the real break and that later score wins; this is the
         ; floor, like SH-WORD's -1 analyse entry.
+        (%score-label! score %sh-label-word)
         (score-set score 1 buffer)
         %sh-qword-body)
       %sh-word-in-sq)))
@@ -609,6 +685,7 @@
         ; closing quote still produces a token. If it continues, %sh-qword-body
         ; scores again at the real break and that later score wins; this is the
         ; floor, like SH-WORD's -1 analyse entry.
+        (%score-label! score %sh-label-word)
         (score-set score 1 buffer)
         %sh-qword-body))
       ((= chr (char->integer #\\)) %sh-word-dq-esc)
@@ -623,7 +700,10 @@
       ((= chr (char->integer #\")) %sh-word-in-dq)
       ((= chr (char->integer #\\)) %sh-qword-esc)
       ((%sh-word-break? chr)
-        (do (buffer-unread buffer) (score-set score 1 buffer)))
+        (do
+          (buffer-unread buffer)
+          (%score-label! score %sh-label-word)
+          (score-set score 1 buffer)))
       (#t %sh-qword-body))))
 
 (set! %sh-word-body
@@ -809,17 +889,334 @@
       ((eq? (first tok) (lit tok-dq)) (mk-tok-dq (first (rest tok))))
       (#t tok))))
 
+; The text is read through the compiled base once it is made (%sh-jit-tick!),
+; and through the interpreted one until then.
 (def sh-tokenize
-  (fn (_ input) (%sh-normalize-tokens (token-read-string %sh-base input))))
+  (fn (_ input)
+    (%sh-jit-tick! (string-length input))
+    (%sh-normalize-tokens (%token-read-str %sh-active-raw input))))
 
 ; --- The base itself: made here, and made again after an image load --------
 ; One door, called by the load and by the image's recache hook.  The transient
 ; nils it in the writer's child so the walk never meets a word it cannot
-; place.
-(def %sh-base-reset! (fn (_) (set! %sh-base (%sh-base-make))))
+; place.  The compiled base is this process's alone, so a reset forgets it.
+(def %sh-active-raw ())         ; the raw base sh-tokenize reads with
+(def %sh-cbase ())              ; roots the compiled base
+(def %sh-jit-states ())
+(def %sh-jit (lit off))         ; off | active | failed
+(def %sh-jit-bytes 0)
+(def %sh-jit-threshold 4096)
+
+(def %sh-base-reset!
+  (fn (_)
+    (set! %sh-base (%sh-base-make))
+    (set! %sh-active-raw (Base raw-of %sh-base))
+    (set! %sh-cbase ())
+    (set! %sh-jit-states ())
+    (set! %sh-jit (lit off))
+    (set! %sh-jit-bytes 0)))
 (%sh-base-reset!)
-(set! %image-transients (pair (lit %sh-base) %image-transients))
+(set! %image-transients
+  (pair (lit %sh-base) (pair (lit %sh-active-raw) (pair (lit %sh-cbase)
+    (pair (lit %sh-jit-states) %image-transients)))))
 (set! %image-recache-hooks (pair (fn (_) (%sh-base-reset!)) %image-recache-hooks))
+
+; --- The compiled base ---------------------------------------------------------
+;
+; An interpreted analyser is a call into x for each character of each token,
+; and for each type at each token's start.  The states every text goes
+; through -- each type's entry, and the states that read a run of whitespace,
+; a comment, an operator, a word, a number and a quoted string -- are compiled
+; to native code (x/tool/compile's assembler lane) and registered on a second
+; base, in the order and under the names of the first, with the read handlers
+; of the first: registration is write-once, so a base's analysers cannot be
+; changed.
+;
+; THE INTERPRETED STATES ARE THE CONTRACT, and each compiled state is one of
+; them spelled in the lane's vocabulary: characters as integers, a literal
+; sign and label, a loop through the state's own name.  A compiled state
+; hands a character it does not read itself -- a `$`, a backquote, a
+; backslash, a quote inside a word -- to the interpreted state that does, and
+; that state's successors are interpreted too, so the rest of such a token is
+; read as it always was.  A state that sets where a substitution returns to
+; before it hands over is interpreted for that reason: %sh-bt-word and
+; %sh-bt-dq.
+;
+; The attempt comes once %sh-jit-threshold bytes have been read in the
+; process, since compiling costs a few hundred milliseconds, which a short
+; script would not win back; it is made in the shell's own process only, as a
+; child's base ends with the child; and it runs under a guard: a refusal pins
+; `failed` and the interpreted base reads on.  The compiled states are rooted
+; in %sh-jit-states, since the collector cannot see an address baked into
+; code.
+(def %sh-bt-word
+  (fn (_ buffer score chr) (set! %sh-cs-return 0) (%sh-bt-scan buffer score chr)))
+(def %sh-bt-dq
+  (fn (_ buffer score chr) (set! %sh-cs-return 2) (%sh-bt-scan buffer score chr)))
+
+; A word's break characters, as a test of `chr` in a compiled form: those
+; %sh-word-break? names, less the quotes where QUOTES? is nil.
+(def %sh-jit-break
+  (fn (_ quotes?)
+    (append
+      (lit (or (= chr 32) (= chr 9) (= chr 10) (= chr 124) (= chr 38) (= chr 59)
+               (= chr 60) (= chr 62) (= chr 40) (= chr 41)))
+      (match (quotes? (lit ((= chr 39) (= chr 34)))) (#t ())))))
+
+(def %sh-jit-digit (lit (and (>= chr 48) (<= chr 57))))
+
+; The entries of the compiled base, by type name.
+(def %sh-jit-compile!
+  (fn (_)
+    (def jc
+      (fn (_ form fvars)
+        (def p (%sh-compile-asm form fvars))
+        (set! %sh-jit-states (pair p %sh-jit-states))
+        p))
+    (def ws-body
+      (jc (lit (fn (me buffer score chr)
+                 (if (or (= chr 32) (= chr 9))
+                   me
+                   (%seq (%buffer-unread buffer) (%score-set score -1 buffer)))))
+          ()))
+    (def comment-body
+      (jc (lit (fn (me buffer score chr)
+                 (if (= chr 10)
+                   (%seq (%buffer-unread buffer) (%score-set score -1 buffer))
+                   me)))
+          ()))
+    ; %sh-qword-body, %sh-word-body and %sh-quote-after: what each does with
+    ; a break, the state that reads on, and what GO makes of a state handed to.
+    (def word-form
+      (fn (_ accept on go)
+        (list (lit fn) (lit (me buffer score chr))
+          (list (lit match)
+            (list (lit (= chr 36)) (go (lit to-dollar)))
+            (list (lit (= chr 96)) (go (lit to-bt)))
+            (list (lit (= chr 39)) (go (lit to-sq)))
+            (list (lit (= chr 34)) (go (lit to-dq)))
+            (list (lit (= chr 92)) (go (lit to-esc)))
+            (list (%sh-jit-break ())
+              (list (lit %seq) (lit (%buffer-unread buffer)) accept))
+            (list #t (go on))))))
+    (def to (fn (_ state) state))
+    (def word-to (fn (_ state) (list (lit %seq) (lit (%score-label! score 2)) state)))
+    (def word-fvars
+      (fn (_ esc)
+        (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
+              (pair (lit to-sq) %sh-word-in-sq) (pair (lit to-dq) %sh-word-in-dq)
+              (pair (lit to-esc) esc))))
+    (def qword-body
+      (jc (word-form (lit (%seq (%score-label! score 2) (%score-set score 1 buffer)))
+                     (lit me) to)
+          (word-fvars %sh-qword-esc)))
+    (def word-body
+      (jc (word-form (lit (%score-set score -1 buffer)) (lit me) to)
+          (word-fvars %sh-word-esc)))
+    (def quote-after
+      (jc (word-form (lit (%score-set score 1 buffer)) (lit to-qword) word-to)
+          (pair (pair (lit to-qword) qword-body) (word-fvars %sh-qword-esc))))
+    (def sq-body
+      (jc (lit (fn (me buffer score chr)
+                 (if (= chr 39)
+                   (%seq (%score-label! score 1)
+                         (%seq (%score-set score 1 buffer) to-after))
+                   me)))
+          (list (pair (lit to-after) quote-after))))
+    (def dq-body
+      (jc (lit (fn (me buffer score chr)
+                 (match
+                   ((= chr 36) to-dollar)
+                   ((= chr 96) to-bt)
+                   ((= chr 34)
+                     (%seq (%score-label! score 1)
+                           (%seq (%score-set score 1 buffer) to-after)))
+                   ((= chr 92) to-skip)
+                   (#t me))))
+          (list (pair (lit to-dollar) %sh-sq-dq-dollar) (pair (lit to-bt) %sh-bt-dq)
+                (pair (lit to-after) quote-after) (pair (lit to-skip) %sh-dq-skip))))
+    ; The second and third characters of an operator: %sh-op-double and
+    ; %sh-op-triple, a state for each operator they are made for.
+    (def op-end
+      (jc (lit (fn (_ buffer score chr)
+                 (%seq (%buffer-unread buffer) (%score-set score 1 buffer))))
+          ()))
+    (def op-dash
+      (jc (lit (fn (_ buffer score chr)
+                 (if (= chr 45)
+                   (%score-set score 1 buffer)
+                   (%seq (%buffer-unread buffer) (%score-set score 1 buffer)))))
+          ()))
+    (def op-same
+      (fn (_ c)
+        (jc (list (lit fn) (lit (_ buffer score chr))
+              (list (lit if) (list (lit =) (lit chr) c)
+                (lit (%score-set score 1 buffer))
+                (lit (%seq (%buffer-unread buffer) (%score-set score 1 buffer)))))
+            ())))
+    (def op-less
+      (jc (lit (fn (_ buffer score chr)
+                 (match
+                   ((= chr 60) (%seq (%score-set score 1 buffer) to-third))
+                   ((or (= chr 38) (= chr 62)) (%score-set score 1 buffer))
+                   (#t (%seq (%buffer-unread buffer) (%score-set score 1 buffer))))))
+          (list (pair (lit to-third) op-dash))))
+    (def op-more
+      (jc (lit (fn (_ buffer score chr)
+                 (match
+                   ((= chr 62) (%seq (%score-set score 1 buffer) to-third))
+                   ((or (= chr 38) (= chr 124)) (%score-set score 1 buffer))
+                   (#t (%seq (%buffer-unread buffer) (%score-set score 1 buffer))))))
+          (list (pair (lit to-third) op-end))))
+    ; %sh-int-body: a character that makes the run a word is read as
+    ; %sh-qword-body reads one that is no break and no quote.
+    (def int-body
+      (jc (list (lit fn) (lit (me buffer score chr))
+            (list (lit match)
+              (list %sh-jit-digit (lit me))
+              (lit ((or (= chr 60) (= chr 62)) ()))
+              (list (%sh-jit-break #t)
+                (lit (%seq (%buffer-unread buffer) (%score-set score 1 buffer))))
+              (lit ((= chr 36) to-dollar))
+              (lit ((= chr 96) to-bt))
+              (lit ((= chr 92) to-esc))
+              (lit (#t to-qword))))
+          (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
+                (pair (lit to-esc) %sh-qword-esc) (pair (lit to-qword) qword-body))))
+    (def io-body
+      (jc (list (lit fn) (lit (me buffer score chr))
+            (list (lit match)
+              (list %sh-jit-digit (lit me))
+              (lit ((or (= chr 60) (= chr 62))
+                     (%seq (%buffer-unread buffer) (%score-set score 1 buffer))))
+              (lit (#t ()))))
+          ()))
+    (list
+      (pair "SH-WS"
+        (jc (lit (fn (_ buffer score chr)
+                   (if (or (= chr 32) (= chr 9))
+                     (%seq (%score-set score -1 buffer) to-body)
+                     ())))
+            (list (pair (lit to-body) ws-body))))
+      (pair "SH-NL"
+        (jc (lit (fn (_ buffer score chr)
+                   (if (= chr 10) (%score-set score 1 buffer) ())))
+            ()))
+      (pair "SH-COMMENT"
+        (jc (lit (fn (_ buffer score chr)
+                   (if (= chr 35)
+                     (%seq (%score-set score -1 buffer) to-body)
+                     ())))
+            (list (pair (lit to-body) comment-body))))
+      (pair "SH-OP"
+        (jc (lit (fn (_ buffer score chr)
+                   (match
+                     ((or (= chr 40) (= chr 41)) (%score-set score 1 buffer))
+                     ((= chr 124) (%seq (%score-set score 1 buffer) to-pipe))
+                     ((= chr 38) (%seq (%score-set score 1 buffer) to-amp))
+                     ((= chr 59) (%seq (%score-set score 1 buffer) to-semi))
+                     ((= chr 60) (%seq (%score-set score 1 buffer) to-less))
+                     ((= chr 62) (%seq (%score-set score 1 buffer) to-more))
+                     (#t ()))))
+            (list (pair (lit to-pipe) (op-same 124)) (pair (lit to-amp) (op-same 38))
+                  (pair (lit to-semi) (op-same 59)) (pair (lit to-less) op-less)
+                  (pair (lit to-more) op-more))))
+      (pair "SH-SQ"
+        (jc (lit (fn (_ buffer score chr) (if (= chr 39) to-body ())))
+            (list (pair (lit to-body) sq-body))))
+      (pair "SH-DQ"
+        (jc (lit (fn (_ buffer score chr) (if (= chr 34) to-body ())))
+            (list (pair (lit to-body) dq-body))))
+      (pair "SH-WORD"
+        (jc (list (lit fn) (lit (_ buffer score chr))
+              (list (lit match)
+                (list (%sh-jit-break #t) ())
+                (lit (#t (%seq (%score-set score -1 buffer)
+                               (match
+                                 ((= chr 36) to-dollar)
+                                 ((= chr 96) to-bt)
+                                 ((= chr 92) to-esc)
+                                 (#t to-body)))))))
+            (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
+                  (pair (lit to-esc) %sh-word-esc) (pair (lit to-body) word-body))))
+      (pair "INTEGER"
+        (jc (list (lit fn) (lit (_ buffer score chr))
+              (list (lit if)
+                (list (lit or) %sh-jit-digit (lit (= chr 45)) (lit (= chr 43)))
+                (lit (%seq (%score-set score 1 buffer) to-body))
+                ()))
+            (list (pair (lit to-body) int-body))))
+      (pair "IO-NUMBER"
+        (jc (list (lit fn) (lit (_ buffer score chr))
+              (list (lit if) %sh-jit-digit (lit to-body) ()))
+            (list (pair (lit to-body) io-body)))))))
+
+; A base of the types in TYPES, newest first, each with the entry ENTRIES
+; holds for its name and the read handler it has.
+(def %sh-jit-base
+  (fn (_ types entries)
+    (def b (make-token-base))
+    (%sh-jit-register b types entries)
+    b))
+
+(def %sh-jit-register
+  (fn (self b types entries)
+    (match
+      ((null? types) ())
+      (#t (%sh-jit-register-after (self b (rest types) entries) b (first types)
+            entries)))))
+
+; TYPE registered on B, after the types older than it.
+(def %sh-jit-register-after
+  (fn (_ older b type entries)
+    (base-make-type b (first type)
+      (%sh-jit-handlers (rest type) (%sh-table-entry (first type) entries)))))
+
+(def %sh-table-entry
+  (fn (self name l)
+    (match
+      ((str=? (first (first l)) name) (rest (first l)))
+      (#t (self name (rest l))))))
+
+; HANDLERS with ENTRY as their analyser.
+(def %sh-jit-handlers
+  (fn (self handlers entry)
+    (match
+      ((null? handlers) ())
+      ((eq? (first (first handlers)) (lit analyse))
+        (pair (pair (lit analyse) entry) (rest handlers)))
+      (#t (pair (first handlers) (self (rest handlers) entry))))))
+
+(def %sh-jit-adopt!
+  (fn (_)
+    (def b (%sh-jit-base (first %sh-tok-types) (%sh-jit-compile!)))
+    (set! %sh-cbase b)
+    (set! %sh-active-raw (Base raw-of b))
+    (lit active)))
+
+; N more bytes to read: the attempt is made when they reach the threshold.
+(def %sh-jit-tick!
+  (fn (_ n)
+    (match
+      ((eq? %sh-jit (lit off)) (%sh-jit-count! (+ %sh-jit-bytes n)))
+      (#t ()))))
+
+(def %sh-jit-count!
+  (fn (_ bytes)
+    (set! %sh-jit-bytes bytes)
+    (match
+      ((< bytes %sh-jit-threshold) ())
+      ((= (sh-getpid) %sh-pid)
+        (set! %sh-jit (guard (e (%sh-jit-refused)) (%sh-jit-adopt!))))
+      (#t (set! %sh-jit (lit failed))))))
+
+; A refused attempt leaves the interpreted base reading, and nothing rooted.
+(def %sh-jit-refused
+  (fn (_)
+    (set! %sh-cbase ())
+    (set! %sh-active-raw (Base raw-of %sh-base))
+    (set! %sh-jit-states ())
+    (lit failed)))
 
 ; --- The line base: here-documents -------------------------------------------
 ;
