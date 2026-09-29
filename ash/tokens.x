@@ -903,6 +903,10 @@
 (def %sh-active-raw ())         ; the raw base sh-tokenize reads with
 (def %sh-cbase ())              ; roots the compiled base
 (def %sh-jit-states ())
+; The cells of the compiled states, each (NAME . CELL), and whether the
+; states use them.  A cell is (STATE): it roots the state it holds.
+(def %sh-jit-cells ())
+(def %sh-jit-late? ())
 (def %sh-jit (lit off))         ; off | active | failed
 (def %sh-jit-bytes 0)
 (def %sh-jit-threshold 4096)
@@ -913,12 +917,13 @@
     (set! %sh-active-raw (Base raw-of %sh-base))
     (set! %sh-cbase ())
     (set! %sh-jit-states ())
+    (set! %sh-jit-cells ())
     (set! %sh-jit (lit off))
     (set! %sh-jit-bytes 0)))
 (%sh-base-reset!)
 (set! %image-transients
   (pair (lit %sh-base) (pair (lit %sh-active-raw) (pair (lit %sh-cbase)
-    (pair (lit %sh-jit-states) %image-transients)))))
+    (pair (lit %sh-jit-states) (pair (lit %sh-jit-cells) %image-transients))))))
 (set! %image-recache-hooks (pair (fn (_) (%sh-base-reset!)) %image-recache-hooks))
 
 ; --- The compiled base ---------------------------------------------------------
@@ -934,13 +939,24 @@
 ;
 ; THE INTERPRETED STATES ARE THE CONTRACT, and each compiled state is one of
 ; them spelled in the lane's vocabulary: characters as integers, a literal
-; sign and label, a loop through the state's own name.  A compiled state
-; hands a character it does not read itself -- a `$`, a backquote, a
-; backslash, a quote inside a word -- to the interpreted state that does, and
-; that state's successors are interpreted too, so the rest of such a token is
-; read as it always was.  A state that sets where a substitution returns to
-; before it hands over is interpreted for that reason: %sh-bt-word and
-; %sh-bt-dq.
+; sign and label, a loop through the state's own name.
+;
+; STATES THAT HAND TO EACH OTHER GO THROUGH CELLS.  A compiled state is given
+; the states it hands to when it is made, so of a word's state and the state
+; that reads the character after its backslash, which hand to each other, one
+; is compiled before the other exists.  Where the lane lowers `first`, such a
+; target is the first of a cell (%sh-jit-cell): the cell holds the
+; interpreted state until the compiled one is made, and the compiled one
+; from then on.  So the states a `$`, a backslash and a quote inside a word
+; lead to are compiled too, and the token is read compiled to its end.
+; Where the lane refuses `first`, the target is the interpreted state, whose
+; successors are interpreted, and the rest of such a token is read as it
+; always was.
+;
+; A substitution and a `${...}` are read interpreted on either: their states
+; count their nesting and keep where they return to, and the lane has no
+; form that writes.  A state that sets those before it hands over is
+; interpreted for that reason: %sh-bt-to, %sh-cs-to and %sh-pe-to make them.
 ;
 ; The attempt comes once %sh-jit-threshold bytes have been read in the
 ; process, since compiling costs a few hundred milliseconds, which a short
@@ -949,10 +965,86 @@
 ; `failed` and the interpreted base reads on.  The compiled states are rooted
 ; in %sh-jit-states, since the collector cannot see an address baked into
 ; code.
-(def %sh-bt-word
-  (fn (_ buffer score chr) (set! %sh-cs-return 0) (%sh-bt-scan buffer score chr)))
-(def %sh-bt-dq
-  (fn (_ buffer score chr) (set! %sh-cs-return 2) (%sh-bt-scan buffer score chr)))
+(def %sh-bt-to
+  (fn (_ back)
+    (fn (_ buffer score chr)
+      (set! %sh-cs-return back)
+      (%sh-bt-scan buffer score chr))))
+
+(def %sh-cs-to
+  (fn (_ back)
+    (fn (_ buffer score chr)
+      (set! %sh-cs-depth 0)
+      (set! %sh-cs-return back)
+      (%sh-cs-body buffer score chr))))
+
+(def %sh-pe-to
+  (fn (_ back)
+    (fn (_ buffer score chr)
+      (set! %sh-pe-depth 0)
+      (set! %sh-pe-return back)
+      (%sh-pe-body buffer score chr))))
+
+(def %sh-bt-word (%sh-bt-to 0))
+(def %sh-bt-in-dq (%sh-bt-to 1))
+(def %sh-bt-dq (%sh-bt-to 2))
+
+; What a `$(` and a `${` open, by where each returns to: a word, a quoted
+; region of a word, a quoted string.  Named here, as a compiled state holds
+; the address of a state it hands to, which roots nothing.
+(def %sh-opens
+  (list (list (pair (lit to-cs) (%sh-cs-to 0)) (pair (lit to-pe) (%sh-pe-to 0)))
+        (list (pair (lit to-cs) (%sh-cs-to 1)) (pair (lit to-pe) (%sh-pe-to 1)))
+        (list (pair (lit to-cs) (%sh-cs-to 2)) (pair (lit to-pe) (%sh-pe-to 2)))))
+
+; FORM with each of the names SYMS, a state's cell, read: `(first NAME)`.
+(def %sh-jit-late
+  (fn (self form syms)
+    (match
+      ((null? form) ())
+      ((pair? form) (pair (self (first form) syms) (self (rest form) syms)))
+      ((not (symbol? form)) form)
+      ((%sh-jit-named? form syms) (list (lit first) form))
+      (#t form))))
+
+(def %sh-jit-named?
+  (fn (self name syms)
+    (match
+      ((null? syms) ())
+      ((eq? (first syms) name) #t)
+      (#t (self name (rest syms))))))
+
+; Whether the lane lowers `first`: asked of a state of the form the states
+; below take, which is made and never called.
+(def %sh-jit-cells?
+  (fn (_)
+    (guard (e ())
+      (%sh-compile-asm
+        (lit (fn (me buffer score chr) (if (= chr 32) me (first to))))
+        (list (pair (lit to) (pair () ()))))
+      #t)))
+
+; NAME's cell, made holding the interpreted state WAS where there is none.
+(def %sh-jit-cell
+  (fn (_ name was) (%sh-jit-cell-in name was (%sh-jit-cell-at name %sh-jit-cells))))
+
+(def %sh-jit-cell-at
+  (fn (self name cells)
+    (match
+      ((null? cells) ())
+      ((eq? (first (first cells)) name) (rest (first cells)))
+      (#t (self name (rest cells))))))
+
+(def %sh-jit-cell-in
+  (fn (_ name was cell)
+    (match
+      ((null? cell) (%sh-jit-cell-new name (pair was ())))
+      (#t cell))))
+
+(def %sh-jit-cell-new
+  (fn (_ name cell)
+    (set! %sh-jit-cells (pair (pair name cell) %sh-jit-cells))
+    cell))
 
 ; A word's break characters, as a test of `chr` in a compiled form: those
 ; %sh-word-break? names, less the quotes where QUOTES? is nil.
@@ -968,11 +1060,32 @@
 ; The entries of the compiled base, by type name.
 (def %sh-jit-compile!
   (fn (_)
+    (set! %sh-jit-cells ())
+    (set! %sh-jit-late? (%sh-jit-cells?))
     (def jc
       (fn (_ form fvars)
         (def p (%sh-compile-asm form fvars))
         (set! %sh-jit-states (pair p %sh-jit-states))
         p))
+    ; A state some of whose targets are made after it.  LATES are those, each
+    ; (SYM NAME WAS): the name FORM calls it by, the state's name, and the
+    ; interpreted state.  With cells, FORM reads NAME's cell; without, WAS is
+    ; the target.
+    (def late-fvar
+      (fn (_ l)
+        (pair (first l)
+          (match
+            (%sh-jit-late? (%sh-jit-cell (first (rest l)) (first (rest (rest l)))))
+            (#t (first (rest (rest l))))))))
+    (def jl
+      (fn (_ form fvars lates)
+        (jc (match (%sh-jit-late? (%sh-jit-late form (map first lates))) (#t form))
+            (append fvars (map late-fvar lates)))))
+    ; STATE, in the cell of its NAME.
+    (def keep
+      (fn (_ name state)
+        (match (%sh-jit-late? (set-first! (%sh-jit-cell name ()) state)) (#t ()))
+        state))
     (def ws-body
       (jc (lit (fn (me buffer score chr)
                  (if (or (= chr 32) (= chr 9))
@@ -985,37 +1098,45 @@
                    (%seq (%buffer-unread buffer) (%score-set score -1 buffer))
                    me)))
           ()))
-    ; %sh-qword-body, %sh-word-body and %sh-quote-after: what each does with
-    ; a break, the state that reads on, and what GO makes of a state handed to.
+    ; What a word's state does with each character: FIRSTS its first clauses,
+    ; ACCEPT what it does with a break, ON the state that reads on, and GO
+    ; what is made of a state handed to.  %sh-qword-body, %sh-word-body,
+    ; %sh-quote-after and %sh-word-dollar are each one.
     (def word-form
-      (fn (_ accept on go)
+      (fn (_ firsts accept on go)
         (list (lit fn) (lit (me buffer score chr))
-          (list (lit match)
-            (list (lit (= chr 36)) (go (lit to-dollar)))
-            (list (lit (= chr 96)) (go (lit to-bt)))
-            (list (lit (= chr 39)) (go (lit to-sq)))
-            (list (lit (= chr 34)) (go (lit to-dq)))
-            (list (lit (= chr 92)) (go (lit to-esc)))
-            (list (%sh-jit-break ())
-              (list (lit %seq) (lit (%buffer-unread buffer)) accept))
-            (list #t (go on))))))
+          (pair (lit match)
+            (append firsts
+              (list
+                (list (lit (= chr 36)) (go (lit to-dollar)))
+                (list (lit (= chr 96)) (go (lit to-bt)))
+                (list (lit (= chr 39)) (go (lit to-sq)))
+                (list (lit (= chr 34)) (go (lit to-dq)))
+                (list (lit (= chr 92)) (go (lit to-esc)))
+                (list (%sh-jit-break ())
+                  (list (lit %seq) (lit (%buffer-unread buffer)) accept))
+                (list #t (go on))))))))
     (def to (fn (_ state) state))
     (def word-to (fn (_ state) (list (lit %seq) (lit (%score-label! score 2)) state)))
-    (def word-fvars
-      (fn (_ esc)
-        (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
-              (pair (lit to-sq) %sh-word-in-sq) (pair (lit to-dq) %sh-word-in-dq)
-              (pair (lit to-esc) esc))))
-    (def qword-body
-      (jc (word-form (lit (%seq (%score-label! score 2) (%score-set score 1 buffer)))
-                     (lit me) to)
-          (word-fvars %sh-qword-esc)))
+    (def word-ends (lit (%seq (%score-label! score 2) (%score-set score 1 buffer))))
+    (def word-lates
+      (fn (_ esc was)
+        (list (list (lit to-dollar) (lit word-dollar) %sh-word-dollar)
+              (list (lit to-sq) (lit word-in-sq) %sh-word-in-sq)
+              (list (lit to-dq) (lit word-in-dq) %sh-word-in-dq)
+              (list (lit to-esc) esc was))))
+    (def bt-word (list (pair (lit to-bt) %sh-bt-word)))
+    (def qword-lates (word-lates (lit qword-esc) %sh-qword-esc))
+    (def qword-body (jl (word-form () word-ends (lit me) to) bt-word qword-lates))
     (def word-body
-      (jc (word-form (lit (%score-set score -1 buffer)) (lit me) to)
-          (word-fvars %sh-word-esc)))
+      (jl (word-form () (lit (%score-set score -1 buffer)) (lit me) to)
+          bt-word
+          (word-lates (lit word-esc) %sh-word-esc)))
+    (def to-qword (pair (lit to-qword) qword-body))
     (def quote-after
-      (jc (word-form (lit (%score-set score 1 buffer)) (lit to-qword) word-to)
-          (pair (pair (lit to-qword) qword-body) (word-fvars %sh-qword-esc))))
+      (jl (word-form () (lit (%score-set score 1 buffer)) (lit to-qword) word-to)
+          (pair to-qword bt-word)
+          qword-lates))
     (def sq-body
       (jc (lit (fn (me buffer score chr)
                  (if (= chr 39)
@@ -1023,18 +1144,86 @@
                          (%seq (%score-set score 1 buffer) to-after))
                    me)))
           (list (pair (lit to-after) quote-after))))
-    (def dq-body
-      (jc (lit (fn (me buffer score chr)
-                 (match
-                   ((= chr 36) to-dollar)
-                   ((= chr 96) to-bt)
-                   ((= chr 34)
-                     (%seq (%score-label! score 1)
-                           (%seq (%score-set score 1 buffer) to-after)))
-                   ((= chr 92) to-skip)
-                   (#t me))))
-          (list (pair (lit to-dollar) %sh-sq-dq-dollar) (pair (lit to-bt) %sh-bt-dq)
-                (pair (lit to-after) quote-after) (pair (lit to-skip) %sh-dq-skip))))
+    ; %sh-dq-body and %sh-sq-dq-dollar: FIRSTS the first clauses, ON the
+    ; state that reads on.
+    (def dq-form
+      (fn (_ firsts on)
+        (list (lit fn) (lit (me buffer score chr))
+          (pair (lit match)
+            (append firsts
+              (list
+                (lit ((= chr 36) to-dollar))
+                (lit ((= chr 96) to-bt))
+                (lit ((= chr 34)
+                       (%seq (%score-label! score 1)
+                             (%seq (%score-set score 1 buffer) to-after))))
+                (lit ((= chr 92) to-skip))
+                (list #t on)))))))
+    (def dq-fvars
+      (list (pair (lit to-bt) %sh-bt-dq) (pair (lit to-after) quote-after)))
+    (def dq-lates
+      (list (list (lit to-dollar) (lit sq-dq-dollar) %sh-sq-dq-dollar)
+            (list (lit to-skip) (lit dq-skip) %sh-dq-skip)))
+    (def dq-body (jl (dq-form () (lit me)) dq-fvars dq-lates))
+    ; The states a `$`, a backslash and a quote inside a word lead to, made
+    ; where a cell can hold them.  After a `$`, a `(` or a `{` opens what is
+    ; read interpreted, and any other character is read as the state the `$`
+    ; stood in reads it.
+    (def opens
+      (lit (((= chr 40) to-cs) ((= chr 123) to-pe))))
+    (def opened (fn (_ back) (nth back %sh-opens)))
+    (def skip
+      (fn (_ name target)
+        (keep name
+          (jc (lit (fn (_ buffer score chr) to)) (list (pair (lit to) target))))))
+    ; %sh-word-in-dq and %sh-dq-dollar
+    (def in-dq-form
+      (fn (_ firsts on)
+        (list (lit fn) (lit (me buffer score chr))
+          (pair (lit match)
+            (append firsts
+              (list
+                (lit ((= chr 36) to-dollar))
+                (lit ((= chr 96) to-bt))
+                (lit ((= chr 34)
+                       (%seq (%score-label! score 2)
+                             (%seq (%score-set score 1 buffer) to-qword))))
+                (lit ((= chr 92) to-esc))
+                (list #t on)))))))
+    (def cycles!
+      (fn (_)
+        (skip (lit qword-esc) qword-body)
+        (skip (lit word-esc) word-body)
+        (skip (lit dq-skip) dq-body)
+        (def in-sq
+          (keep (lit word-in-sq)
+            (jc (lit (fn (me buffer score chr)
+                       (if (= chr 39)
+                         (%seq (%score-label! score 2)
+                               (%seq (%score-set score 1 buffer) to-qword))
+                         me)))
+                (list to-qword))))
+        (def in-dq-fvars
+          (list to-qword (pair (lit to-bt) %sh-bt-in-dq)))
+        (def in-dq-lates
+          (list (list (lit to-dollar) (lit dq-dollar) %sh-dq-dollar)
+                (list (lit to-esc) (lit word-dq-esc) %sh-word-dq-esc)))
+        (def in-dq
+          (keep (lit word-in-dq) (jl (in-dq-form () (lit me)) in-dq-fvars in-dq-lates)))
+        (skip (lit word-dq-esc) in-dq)
+        (keep (lit dq-dollar)
+          (jl (in-dq-form opens (lit to-in-dq))
+              (append (opened 1) (pair (pair (lit to-in-dq) in-dq) in-dq-fvars))
+              in-dq-lates))
+        (keep (lit word-dollar)
+          (jl (word-form opens word-ends (lit to-qword) to)
+              (append (opened 0) (pair to-qword bt-word))
+              qword-lates))
+        (keep (lit sq-dq-dollar)
+          (jl (dq-form opens (lit to-body))
+              (append (opened 2) (pair (pair (lit to-body) dq-body) dq-fvars))
+              dq-lates))))
+    (match (%sh-jit-late? (cycles!)) (#t ()))
     ; The second and third characters of an operator: %sh-op-double and
     ; %sh-op-triple, a state for each operator they are made for.
     (def op-end
@@ -1071,7 +1260,7 @@
     ; %sh-int-body: a character that makes the run a word is read as
     ; %sh-qword-body reads one that is no break and no quote.
     (def int-body
-      (jc (list (lit fn) (lit (me buffer score chr))
+      (jl (list (lit fn) (lit (me buffer score chr))
             (list (lit match)
               (list %sh-jit-digit (lit me))
               (lit ((or (= chr 60) (= chr 62)) ()))
@@ -1081,8 +1270,9 @@
               (lit ((= chr 96) to-bt))
               (lit ((= chr 92) to-esc))
               (lit (#t to-qword))))
-          (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
-                (pair (lit to-esc) %sh-qword-esc) (pair (lit to-qword) qword-body))))
+          (pair to-qword bt-word)
+          (list (list (lit to-dollar) (lit word-dollar) %sh-word-dollar)
+                (list (lit to-esc) (lit qword-esc) %sh-qword-esc))))
     (def io-body
       (jc (list (lit fn) (lit (me buffer score chr))
             (list (lit match)
@@ -1128,7 +1318,7 @@
         (jc (lit (fn (_ buffer score chr) (if (= chr 34) to-body ())))
             (list (pair (lit to-body) dq-body))))
       (pair "SH-WORD"
-        (jc (list (lit fn) (lit (_ buffer score chr))
+        (jl (list (lit fn) (lit (_ buffer score chr))
               (list (lit match)
                 (list (%sh-jit-break #t) ())
                 (lit (#t (%seq (%score-set score -1 buffer)
@@ -1137,8 +1327,9 @@
                                  ((= chr 96) to-bt)
                                  ((= chr 92) to-esc)
                                  (#t to-body)))))))
-            (list (pair (lit to-dollar) %sh-word-dollar) (pair (lit to-bt) %sh-bt-word)
-                  (pair (lit to-esc) %sh-word-esc) (pair (lit to-body) word-body))))
+            (pair (pair (lit to-body) word-body) bt-word)
+            (list (list (lit to-dollar) (lit word-dollar) %sh-word-dollar)
+                  (list (lit to-esc) (lit word-esc) %sh-word-esc))))
       (pair "INTEGER"
         (jc (list (lit fn) (lit (_ buffer score chr))
               (list (lit if)
@@ -1216,6 +1407,7 @@
     (set! %sh-cbase ())
     (set! %sh-active-raw (Base raw-of %sh-base))
     (set! %sh-jit-states ())
+    (set! %sh-jit-cells ())
     (lit failed)))
 
 ; --- The line base: here-documents -------------------------------------------

@@ -47,12 +47,14 @@ a refusal the guard swallowed cannot pass for agreement.
         "case $x in a*) y=1;; *) y=2;; esac\nf() { local v=$1; }\n"
         "\"unterminated" "'unterminated" "$(unterminated" "${unterminated" "`unterminated"
         "a\\" "\"a $(b \"c\" 'd') e\" \"${f:-\"g\"}\" \"`h`\" \"$$ $\"\n"
+        "$aaa $bbb ${ccc} $ddd x$ee $f $g$h \"$i\" \"j $k l $m\" n\\ o\\$p q'r'$s\"t\"\\u\n"
         "tab\tsep\t\tx\n\n\n  lead" "a$" "$" "$b$c" "1$" "1`x`" "1\;2" "<" ">>" "<<-" "&" "("
         "'a'" "'a' " "'a'b" "\"a\"b c" "'a''b'" "'a'\\'" "'a'\"b'" "\"a\"'b" "'a'$(b '" "'a'`b"))
       (def before (map sh-tokenize texts))
       (set! %sh-pid (sh-getpid))
       (set! %sh-jit-threshold 0)
       (sh-tokenize "x")
+      ((prim-ref (lit heap) (lit collect)))
       (def differ
         (fn (self ts a b)
           (match
@@ -64,6 +66,46 @@ a refusal the guard swallowed cannot pass for agreement.
           ((null? lane?) #t)
           ((eq? %sh-jit (lit active)) (null? (differ texts before (map sh-tokenize texts))))
           (#t (list (lit not-active) %sh-jit))))
+      (newline)
+      (sh-exit 7))
+    (sh-wait pid))
+  ())
+```
+---
+    #t
+
+### states that hand to each other are compiled where a cell can hold them
+
+Where the lane lowers `first` -- asked independently -- the base holds the
+states a `$`, a backslash and a quote inside a word lead to, each in its
+cell; where it does not, it holds none of them.
+
+```sh
+(do
+  (def pid (sh-fork))
+  (if (= pid 0)
+    (guard (e (do (display "error: ") (write e) (newline) (sh-exit 5)))
+      (alloc-limit! (+ (Heap count) 60000000))
+      (def lane? (guard (e ()) (do
+        (%sh-compile-asm (lit (fn (me buffer score chr) (if (= chr 10) me ()))) ())
+        #t)))
+      (def cells? (guard (e ()) (do
+        (%sh-compile-asm (lit (fn (me buffer score chr) (if (= chr 10) me (first to))))
+                         (list (pair (lit to) (pair () ()))))
+        #t)))
+      (set! %sh-pid (sh-getpid))
+      (set! %sh-jit-threshold 0)
+      (sh-tokenize "x")
+      (def held (map first %sh-jit-cells))
+      (def holds? (fn (_ name) (not (null? (%sh-jit-cell-at name %sh-jit-cells)))))
+      (write
+        (match
+          ((null? lane?) #t)
+          ((not (eq? %sh-jit (lit active))) (list (lit not-active) %sh-jit))
+          ((null? cells?) (null? held))
+          (#t (null? (filter (fn (_ name) (not (holds? name)))
+                (lit (word-dollar word-in-sq word-in-dq dq-dollar sq-dq-dollar
+                      qword-esc word-esc word-dq-esc dq-skip)))))))
       (newline)
       (sh-exit 7))
     (sh-wait pid))
