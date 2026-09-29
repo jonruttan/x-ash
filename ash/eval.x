@@ -6382,7 +6382,7 @@
 (def %sh-dispatch
   (fn (_ remaining redirs fns)
     (def name (first remaining))
-    (def body (%sh-fn-lookup name fns))
+    (def f (%sh-fn-lookup name fns))
     ; A function wins over a regular builtin and an external, and loses to a
     ; special builtin, the POSIX order.  FNS is which functions are in reach:
     ; `command` passes none, which is the whole of what it does differently.
@@ -6390,7 +6390,7 @@
     ; shell's own descriptors must survive it -- the same save/apply/restore a
     ; builtin gets.  A builtin is looked up once, and its handler handed on.
     (match
-      ((%sh-fn-wins? name body) (%sh-run-fn-redir body (rest remaining) redirs))
+      ((%sh-fn-wins? name f) (%sh-run-fn-redir f (rest remaining) redirs))
       (#t (%sh-dispatch-builtin name (rest remaining) redirs)))))
 
 (def %sh-dispatch-builtin
@@ -6405,12 +6405,12 @@
       ((null? run) (%sh-run-external name args redirs))
       (#t (%sh-run-builtin-redir name run args redirs)))))
 
-; Whether a function found as BODY runs for NAME: it does unless NAME is a
+; Whether a function found as F runs for NAME: it does unless NAME is a
 ; special builtin.  Only a name some function has is asked about the specials.
 (def %sh-fn-wins?
-  (fn (_ name body)
+  (fn (_ name f)
     (match
-      ((null? body) ())
+      ((null? f) ())
       ((%sh-special-builtin? name) ())
       (#t #t))))
 
@@ -6423,17 +6423,17 @@
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
 ; leave the SHELL writing there.
 (def %sh-run-fn-redir
-  (fn (_ body wds redirs)
+  (fn (_ f wds redirs)
     (match
-      ((null? redirs) (%sh-call-fn body wds))
-      (#t (%sh-call-fn-redirected body wds redirs)))))
+      ((null? redirs) (%sh-call-fn f wds))
+      (#t (%sh-call-fn-redirected f wds redirs)))))
 
 (def %sh-call-fn-redirected
-  (fn (_ body wds redirs)
+  (fn (_ f wds redirs)
     (let ((parked (%sh-save-fds redirs)))
       (guard (e (do (%sh-restore-fds parked) (error e)))
         (let ((status (if (%sh-setup-redirs redirs)
-                        (%sh-call-fn body wds)
+                        (%sh-call-fn f wds)
                         %sh-redir-status)))
           (%sh-restore-fds parked)
           status)))))
@@ -7676,9 +7676,15 @@
 
 ; A redefinition SHADOWS rather than replaces -- the lookup walks from the
 ; front, so the newest wins and the list stays append-free.
+;
+; A function is (BODY . NODE): BODY the tokens of its compound command, and
+; NODE the list they read into (%sh-run-fn-body), %sh-fn-unread until the
+; first call reads them, nil when the read leaves them to be walked.
+(def %sh-fn-unread (list (lit unread)))
+
 (def %sh-define-fn
   (fn (_ name body)
-    (set! %sh-functions (pair (pair name body) %sh-functions))
+    (set! %sh-functions (pair (pair name (pair body %sh-fn-unread)) %sh-functions))
     (set! %sh-status 0)
     0))
 
@@ -7707,13 +7713,13 @@
     (set! %sh-fn-depth (fx+ %sh-fn-depth -1))))
 
 (def %sh-call-fn
-  (fn (_ body args)
+  (fn (_ f args)
     (def saved %sh-args)
     (set! %sh-args args)
     (set! %sh-fn-depth (fx+ %sh-fn-depth 1))
     (%sh-push-locals!)
     (guard (e (%sh-fn-left saved e))
-      (%sh-eval-body body)
+      (%sh-run-fn-body f)
       (%sh-leave-fn! saved)
       %sh-status)))
 
@@ -8985,20 +8991,21 @@
       ((%sh-hex-digit? (string-ref s i)) (self s (fx+ i 1) n limit))
       (#t i))))
 
-; --- A loop read into nodes ------------------------------------------------
+; --- Loops and functions read into nodes -----------------------------------
 ;
-; A while, until or for loop is read once, where the evaluator meets it, into
-; nodes that run as its tokens would: its condition or words and its body, the
-; lists, and-or lists and pipelines in them, and the compound commands among
-; those -- ifs, cases, groups and loops.  So where each command ends, whether
-; `&&`, `||` or `&` follows it, and where each construct's words stand are
-; found once however often the loop goes round.  A simple command's node holds
+; A while, until or for loop is read once, where the evaluator meets it, and a
+; function's body at the function's first call, into nodes that run as their
+; tokens would: a loop's condition or words and its body, the lists, and-or
+; lists and pipelines in them, and the compound commands among those -- ifs,
+; cases, groups and loops.  So where each command ends, whether `&&`, `||` or
+; `&` follows it, and where each construct's words stand are found once
+; however often the loop goes round or the function is called.  A simple command's node holds
 ; where its words start and where its stage ends, and its words and
 ; redirections are collected when it runs, as they always are.  A subshell,
 ; and a compound command with redirections after it, is a stage: its tokens,
 ; which %eval-command runs, as it runs a pipeline's stages.  An if, case or
-; group outside a loop is walked over its tokens: it runs once where it is,
-; and a read would cost it more than the walk.
+; group outside a loop or function is walked over its tokens: it runs once
+; where it is, and a read would cost it more than the walk.
 ;
 ; The read makes once the walks the evaluator makes each time round: where a
 ; stage ends (%sh-stage-end), whether a list ends with `&` (%sh-async-end),
@@ -9556,6 +9563,21 @@
   (fn (_ parts)
     (%sh-pipeline-status (first parts) (first (rest (rest (rest parts))))
       (%sh-define-fn (first (rest parts)) (first (rest (rest parts)))))))
+
+; A function F's body, as %sh-eval-body runs its tokens: the list they read
+; into at its first call.  A read that answers nil, or leaves tokens after
+; the list, leaves the body to be walked at this call and every later one.
+(def %sh-run-fn-body
+  (fn (self f)
+    (match
+      ((same? (rest f) %sh-fn-unread) (self (%sh-read-fn! f)))
+      ((null? (rest f)) (%sh-eval-body (first f)))
+      (#t (%sh-run-list (rest f))))))
+
+(def %sh-read-fn!
+  (fn (_ f)
+    (set-rest! f (%sh-stage-node (%sh-read-list (first f))))
+    f))
 
 ; A compound command's node, by its kind.
 (def %sh-run-compound-node
