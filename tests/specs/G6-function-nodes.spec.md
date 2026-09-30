@@ -9,7 +9,7 @@ The first three cases are pins that hold on main too; their expectations match
 `dash` and `/bin/sh`.  The fourth keeps a read body across collects.  The last
 fails on main.
 
-### bodies of each kind
+### bodies of each variant
 
 ```sh
 (do (sh-eval "( f() { if [ $1 = a ]; then echo A; elif [ $1 = b ]; then echo B; else { echo C; }; fi; }; f a; f b; f c; g() { case $1 in x|y) echo xy;; *) echo other;; esac; }; g y; g z; h() for i in 1 2; do echo h$i; done; h; s() ( echo sub$1 ); s 1; r() { echo r; } >/dev/null; r; echo st=$? ) | tr '\\n' ','; echo") ())

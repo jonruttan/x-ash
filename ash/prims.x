@@ -15,7 +15,7 @@
 
 ; THE DIALECT IS HELIUM, so the doors this file forwards to arrive by NAME.
 ; lang.xon carries the arithmetic; the operative half is here.  x/sys/posix is
-; the Sys class -- fork, exec, wait, pipe, dup2, the open family, getenv and
+; the Sys class -- fork, exec, wait, pipe, dup2, open and its variants, getenv and
 ; chdir -- and importing it at the top of the platform layer is what makes an
 ; unsatisfiable requirement fail at ACQUISITION rather than at the first
 ; pipeline.  Base, Str8, Io and List are core; only this one is an opt-in.
@@ -36,7 +36,7 @@
   sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-open-new
   sh-open-existing sh-close sh-dup2 sh-pipe
   sh-getenv sh-setenv sh-unsetenv sh-environ sh-chdir sh-getcwd
-  sh-path-kind sh-path-size sh-path-mode sh-path-lkind sh-path-mtime
+  sh-path-file-type sh-path-size sh-path-mode sh-lpath-file-type sh-path-mtime
   sh-read-file sh-read-line sh-read-line-fd
   sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
@@ -328,18 +328,14 @@
 (def sh-getcwd (fn (_) (%sys-getcwd Sys)))
 
 ; --- What `test` needs to know about a path ------------------------------
-; The key the platform's stat record holds a file's type under: kind up to
-; x-lang v0.16.0, file-type after it.  Asked once, of the root directory.
-(def %sh-file-type-key
-  (if (null? (%assoc-entry Assoc (lit file-type) (%file-stat File "/")))
-    (lit kind)
-    (lit file-type)))
+; The key the platform's stat record holds a file's type under.
+(def %sh-file-type-key (lit file-type))
 
-; The kind symbol ('file, 'dir, 'link, ...) or nil when the path is not there
+; The file-type symbol ('file, 'dir, 'link, ...) or nil when the path is not there
 ; at all -- so one call answers -e, -f and -d, and a missing path is a nil
-; rather than a raise.  File stat raises a tag 'io Err on failure, which for
+; rather than a raise.  File stat raises a label 'io Err on failure, which for
 ; a shell test is an ANSWER, not an error.
-(def sh-path-kind
+(def sh-path-file-type
   (fn (_ path)
     (guard (_ ())
       (rest (%assoc-entry Assoc %sh-file-type-key (%file-stat File path))))))
@@ -354,9 +350,9 @@
   (fn (_ path)
     (guard (_ 0) (rest (%assoc-entry Assoc (lit mode) (%file-stat File path))))))
 
-; The kind of the path itself, a symbolic link reporting 'link rather than
-; its target's kind -- what `test -L` asks -- or nil when nothing is there.
-(def sh-path-lkind
+; The file type of the path itself, a symbolic link reporting 'link rather than
+; its target's file type -- what `test -L` asks -- or nil when nothing is there.
+(def sh-lpath-file-type
   (fn (_ path)
     (guard (_ ())
       (rest (%assoc-entry Assoc %sh-file-type-key (%file-lstat File path))))))

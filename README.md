@@ -162,7 +162,7 @@ suppresses splitting entirely.
 
 `test` knows `-n`, `-z`, `!`, `=`, `!=`, `<` and `>` (by byte); the file
 predicates `-e` `-f` `-d` `-s`, `-L`/`-h` for a symbolic link, `-p` `-S` `-b`
-`-c` for the other kinds, and `-u` `-g` `-k` for the setuid, setgid and
+`-c` for the other file types, and `-u` `-g` `-k` for the setuid, setgid and
 sticky bits; `-t FD`; `-nt` and `-ot` by modification time; and the numeric
 comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`, whose operands are decimal
 integers, blanks around them and a sign allowed. Up to four words are read

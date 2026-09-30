@@ -1,7 +1,7 @@
 ## sh-eval trap
 
-`trap ACTION CONDITION...` says what to do when a condition arrives.  The two
-kinds of condition are not equally answerable:
+`trap ACTION CONDITION...` says what to do when a condition arrives.  trap's
+two condition variants are not equally answerable:
 
   * **EXIT** (or `0`) is implemented, and it is what scripts overwhelmingly
     use trap for -- remove the temp file however the script ends.

@@ -50,15 +50,15 @@ none is looked up; `Makefile` follows the last pattern, so it is looked up in
 each of the two directories `*` reached.
 
 ```sh
-(let ((saved sh-path-kind)
+(let ((saved sh-path-file-type)
       (asked 0))
   (sh-eval "d=$(mktemp -d); mkdir -p \"$d/src\" \"$d/sub/a\" \"$d/sub/b\"; touch \"$d/src/x.c\" \"$d/sub/a/Makefile\"")
-  (set! sh-path-kind (fn (_ path) (set! asked (+ asked 1)) (saved path)))
+  (set! sh-path-file-type (fn (_ path) (set! asked (+ asked 1)) (saved path)))
   (sh-eval "set -- $d/src/*.c")
   (def before asked)
   (sh-eval "set -- $d/sub/*/Makefile")
   (def after asked)
-  (set! sh-path-kind saved)
+  (set! sh-path-file-type saved)
   (sh-eval "rm -rf \"$d\"")
   (list before (- after before)))
 ```

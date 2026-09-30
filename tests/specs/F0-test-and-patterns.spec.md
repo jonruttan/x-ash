@@ -1,7 +1,7 @@
 ## sh-eval test and pattern scans in the cheapest forms
 
 `[` takes its words before the closing `]` in one walk, and `test` tells how
-many there are from the list's shape rather than by counting.  A binary
+many there are from the list's structure rather than by counting.  A binary
 operator that starts with `-`, the numeric ones and the file dates, is sent
 to them by that character before any string operator is compared.  Whether a
 word is a pattern, and where a bracket expression in it ends, are scanned on

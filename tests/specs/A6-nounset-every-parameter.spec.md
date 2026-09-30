@@ -1,4 +1,4 @@
-## sh-eval `set -u` and every kind of parameter
+## sh-eval `set -u` and every parameter variant
 
 With `set -u`, expanding a parameter that is unset is an error: a name, in
 braces or not, and its length; a positional parameter past the last; `$!`

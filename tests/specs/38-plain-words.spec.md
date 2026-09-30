@@ -15,7 +15,7 @@ escapes.
 ### a plain word is its own field
 
 ```sh
-(write (%sh-expand-str "true" %sh-mode-bare #t ()))
+(write (%sh-expand-str "true" %sh-label-bare #t ()))
 ```
 ---
     (("true" () ()))
@@ -24,7 +24,7 @@ escapes.
 
 ```sh
 (let ((w "true"))
-  (same? (first (first (%sh-expand-str w %sh-mode-bare #t ()))) w))
+  (same? (first (first (%sh-expand-str w %sh-label-bare #t ()))) w))
 ```
 ---
     #t
@@ -32,7 +32,7 @@ escapes.
 ### a plain word holding a wildcard is a pattern
 
 ```sh
-(write (%sh-expand-str "*.c" %sh-mode-bare #t ()))
+(write (%sh-expand-str "*.c" %sh-label-bare #t ()))
 ```
 ---
     (("*.c" #t ()))
@@ -40,7 +40,7 @@ escapes.
 ### a tilde inside a plain run is plain
 
 ```sh
-(write (%sh-expand-str "a~b" %sh-mode-bare #t ()))
+(write (%sh-expand-str "a~b" %sh-label-bare #t ()))
 ```
 ---
     (("a~b" () ()))
@@ -49,7 +49,7 @@ escapes.
 
 ```sh
 (do (sh-eval "ASH_P=VAL")
-    (write (%sh-expand-str "a$ASH_P" %sh-mode-bare #t ())))
+    (write (%sh-expand-str "a$ASH_P" %sh-label-bare #t ())))
 ```
 ---
     (("aVAL" () ()))
@@ -57,7 +57,7 @@ escapes.
 ### and the quoted text after it
 
 ```sh
-(write (%sh-expand-str "pre'lit'post" %sh-mode-bare #t ()))
+(write (%sh-expand-str "pre'lit'post" %sh-label-bare #t ()))
 ```
 ---
     (("prelitpost" () ()))
@@ -65,7 +65,7 @@ escapes.
 ### a tilde in first place still expands
 
 ```sh
-(equal? (%sh-expand-str "~/x" %sh-mode-bare #t ())
+(equal? (%sh-expand-str "~/x" %sh-label-bare #t ())
         (list (list (string-append (sh-getenv "HOME") "/x") () ())))
 ```
 ---
@@ -74,7 +74,7 @@ escapes.
 ### so does an assignment's tilde after its plain name
 
 ```sh
-(equal? (%sh-expand-str "x=~/y" %sh-mode-bare () #t)
+(equal? (%sh-expand-str "x=~/y" %sh-label-bare () #t)
         (list (list (string-append "x=" (string-append (sh-getenv "HOME") "/y")) () ())))
 ```
 ---
@@ -83,7 +83,7 @@ escapes.
 ### a double-quoted word is walked
 
 ```sh
-(write (%sh-expand-str "a b" %sh-mode-dq () ()))
+(write (%sh-expand-str "a b" %sh-label-dq () ()))
 ```
 ---
     (("a b" () ()))

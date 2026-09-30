@@ -9,7 +9,7 @@ threshold to nothing, and hold the base to the walk: the same lines, the same
 marks, the same extractions.
 
 Each case answers the same wherever it runs.  Where the compile lane works --
-asked independently, with a state of the same shape -- the base must be
+asked independently, with an equivalent state -- the base must be
 active, so a refusal the guard swallowed cannot pass for agreement; where the
 lane does not, there is nothing to compare, and the case answers as if it
 had.

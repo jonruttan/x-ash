@@ -273,7 +273,7 @@
 ; `"$HOME"/bin` and `'a'"$b"` are single arguments. So the closing quote hands
 ; over to %sh-qword-body, which ends the token only at a real word break.
 ;
-; The read handler then decides the token's kind: a run that is nothing but one
+; The read handler then decides the token's label: a run that is nothing but one
 ; quoted string keeps its tok-sq / tok-dq identity (the token vocabulary the
 ; specs assert), and anything mixed comes back as a tok-word carrying its raw
 ; text for %sh-expand-str to interpret. %sh-pure-quote? tells them apart.
