@@ -7,10 +7,11 @@ list's cursor where it stands, with no stage collected, and what is left
 before its stage's end is refused.  `&&` and `||` are told by their two
 characters, and an operand that does not run is skipped on the token list.
 
-The first five cases are pins that hold on main too.  The first four match
-`dash` and `/bin/sh`; in the fifth, x-ash runs the command before refusing
-what is left of its stage, where `dash` reads the whole string first.  The
-last counts the cursor's writes.
+The first four cases are pins that hold on main too, and match `dash` and
+`/bin/sh`.  The fifth matches them too: a complete command is read whole
+before any of it runs, so a stage refused refuses the command, where main ran
+the command before refusing what was left of its stage.  The last counts the
+cursor's writes.
 
 ### separators, blank lines and a trailing `;`
 
@@ -50,7 +51,7 @@ last counts the cursor's writes.
 (do (sh-eval "{ ( eval 'echo a (' ) 2>&1; echo $?; } | tr '\\n' ','; echo") ())
 ```
 ---
-    a,ash: parse error: unexpected (,2,
+    ash: parse error: unexpected (,2,
 
 ### a command, a separator and a connective write the cursor once each
 
