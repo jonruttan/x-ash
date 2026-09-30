@@ -9025,7 +9025,8 @@
 ;
 ;   (list ITEMS)                      ITEMS each (sync ANDOR) or (async ANDOR)
 ;   (andor PIPELINE OPS)              OPS each (AND? . PIPELINE)
-;   (simple NEGATE TS END ANDOR?)     the command at TS, its stage ending at END
+;   (simple NEGATE TS END ANDOR? STEPS) the command at TS, its stage ending at
+;                                     END, STEPS its words read (%sh-simple-steps)
 ;   (piped NEGATE STAGES ANDOR?)      stages joined by `|`, each its tokens
 ;   (compound NEGATE STAGES ALONE? ANDOR? NODE)
 ;   (fn-def NEGATE NAME BODY ANDOR?)  a definition, BODY its tokens
@@ -9052,7 +9053,53 @@
       (#t (%sh-read-item self ts items (%sh-async-end ts 0))))))
 
 (def %sh-read-list-end
-  (fn (_ items ts) (pair (list (lit list) (reverse items)) ts)))
+  (fn (_ items ts)
+    (pair (%sh-list-node (reverse items)) ts)))
+
+; A list read, with the form it runs as: (list ITEMS FORM).
+(def %sh-list-node
+  (fn (_ items) (list (lit list) items (%sh-list-form items))))
+
+; ITEMS as a form the evaluator runs, as %sh-run-items runs them: in turn, the
+; list's status the last one's, and 0 when there are none.  A form's heads
+; are the functions themselves, so it names nothing: the engine's `do` for
+; the sequence, and a closure for each item, which runs the item's node.
+(def %sh-list-form
+  (fn (_ items)
+    (match
+      ((null? items) (list %sh-set-status 0))
+      ((null? (rest items)) (list %sh-list-status (%sh-item-form (first items))))
+      (#t (list %sh-list-status (pair do (map %sh-item-form items)))))))
+
+(def %sh-list-status
+  (fn (_ r) (match ((null? r) (%sh-set-status 0)) (#t r))))
+
+(def %sh-item-form
+  (fn (_ item)
+    (match
+      ((eq? (first item) (lit sync)) (%sh-andor-form (first (rest item))))
+      (#t (list %sh-async (%sh-andor-thunk (first (rest item))))))))
+
+(def %sh-andor-thunk
+  (fn (_ node) (fn (_) (%sh-run-andor node))))
+
+(def %sh-andor-form
+  (fn (_ node)
+    (match
+      ((null? (first (rest (rest node)))) (%sh-pipe-form (first (rest node))))
+      (#t (list (%sh-andor-thunk node))))))
+
+(def %sh-pipe-form
+  (fn (_ node)
+    (match
+      ((eq? (first node) (lit simple)) (list (%sh-simple-thunk (rest node))))
+      (#t (list (%sh-pipe-thunk node))))))
+
+(def %sh-simple-thunk
+  (fn (_ parts) (fn (_) (%sh-run-simple parts))))
+
+(def %sh-pipe-thunk
+  (fn (_ node) (fn (_) (%sh-run-pipe node))))
 
 ; The and-or list at TS, which runs in a child when AMP, where it ends with
 ; `&`, is not nil.
@@ -9134,7 +9181,157 @@
   (fn (_ negate ts end)
     (match
       ((%sh-pipe-at? end) (%sh-read-piped negate ts))
-      (#t (pair (list (lit simple) negate ts end (%sh-and-or-at? end)) end)))))
+      (#t (pair (list (lit simple) negate ts end (%sh-and-or-at? end)
+                      (%sh-simple-steps ts end))
+                end)))))
+
+; A simple command's tokens read once into STEPS: the tokens from TS to END in
+; order, each as %sh-collect-words takes it when the command runs.  A step is
+;
+;   (0 TEXT)          a field known when it is read: a word that is its own text
+;   (1 TEXT TOK)      the command's name, a tok-lit: %sh-name-tok is set to TOK
+;   (2 TOK)           an assignment of the leading run, made by %sh-run-cmd
+;   (3 TOK ASSIGN?)   a word expanded when it runs, as %sh-expand-tok takes it
+;   (4 ROP FD TS)     a redirection onto FD, its target at the head of TS
+;
+; So a command that runs often walks no tokens and asks no token what it is.
+; A token the walk stops at before END, and a redirection with no operator or
+; no target, is left to the walk: nil, and the walk raises what it raises.
+(def %sh-simple-steps
+  (fn (_ ts end) (%sh-steps-or-assigns (%sh-steps-from ts end () #t))))
+
+; A command that is assignments and nothing else is read further, into
+; (assigns (NAME HOW WHAT) ...): each assignment's name, and its value as
+; %sh-apply-assignments would make it --
+;
+;   (NAME 0 TEXT)   TEXT, a value that is its own text
+;   (NAME 1 PARAM)  the value of the variable PARAM, the value being `$PARAM`
+;                   or `${PARAM}`
+;   (NAME 2 TOK)    the value word TOK expanded, unsplit
+;
+; The name is plain text that no expansion changes, so the value is expanded
+; alone where the whole word was expanded and cut at its `=`.
+(def %sh-steps-or-assigns
+  (fn (_ steps)
+    (match
+      ((null? steps) steps)
+      ((%sh-all-assigns? steps) (pair (lit assigns) (map %sh-assign-spec steps)))
+      (#t steps))))
+
+(def %sh-all-assigns?
+  (fn (self steps)
+    (match
+      ((null? steps) #t)
+      ((= (first (first steps)) 2) (self (rest steps)))
+      (#t ()))))
+
+; The assignment step (2 TOK).
+(def %sh-assign-spec
+  (fn (_ step)
+    (%sh-assign-spec-of (%tok-word-val (first (rest step))))))
+
+(def %sh-assign-spec-of
+  (fn (_ word)
+    (%sh-assign-spec-at (%sh-assignment-name word) (%sh-assignment-value word))))
+
+(def %sh-assign-spec-at
+  (fn (_ name value)
+    (match
+      ((%sh-plain-value? value 0 (string-length value)) (list name 0 value))
+      ((%sh-lone-param value) (list name 1 (%sh-lone-param value)))
+      (#t (list name 2 (mk-tok-word value))))))
+
+; Whether VALUE from I to N holds nothing an assignment expands or removes: no
+; `$`, backquote, backslash, quote or tilde.  An assignment neither splits nor
+; globs.
+(def %sh-plain-value?
+  (fn (self s i n)
+    (match
+      ((not (fx<? i n)) #t)
+      ((= (string-ref s i) #\$) ())
+      ((= (string-ref s i) #\`) ())
+      ((= (string-ref s i) #\\) ())
+      ((= (string-ref s i) #\') ())
+      ((= (string-ref s i) #\") ())
+      ((= (string-ref s i) #\~) ())
+      (#t (self s (fx+ i 1) n)))))
+
+; The NAME of a VALUE that is `$NAME` or `${NAME}`, or nil.
+(def %sh-lone-param
+  (fn (_ value)
+    (match
+      ((fx<? (string-length value) 2) ())
+      ((not (= (string-ref value 0) #\$)) ())
+      ((= (string-ref value 1) #\{) (%sh-lone-braced value (string-length value)))
+      ((%sh-name? (substring value 1 (string-length value)))
+        (substring value 1 (string-length value)))
+      (#t ()))))
+
+(def %sh-lone-braced
+  (fn (_ value n)
+    (match
+      ((fx<? n 4) ())
+      ((not (= (string-ref value (fx+ n -1)) #\})) ())
+      ((%sh-name? (substring value 2 (fx+ n -1))) (substring value 2 (fx+ n -1)))
+      (#t ()))))
+
+(def %sh-steps-from
+  (fn (self ts end steps assign?)
+    (match
+      ((same? ts end) (reverse steps))
+      ((null? ts) ())
+      ((%tok-is-word? (first ts))
+        (self (rest ts) end (pair (%sh-word-step (first ts) assign?) steps)
+          (%sh-next-assign? assign? (first ts) (%tok-word-val (first ts)))))
+      ((%tok-is-io? (first ts))
+        (%sh-steps-io self (rest ts) end steps assign?
+          (%sh-digits-int (%tok-word-val (first ts)))))
+      (#t (%sh-steps-redir self ts end steps assign? (%redir-op? (first ts))
+            (%default-fd-or (%redir-op? (first ts))))))))
+
+; After the digits of `2>err`: the operator must follow them.
+(def %sh-steps-io
+  (fn (_ walk ts end steps assign? fd)
+    (match
+      ((same? ts end) ())
+      ((null? ts) ())
+      (#t (%sh-steps-redir walk ts end steps assign? (%redir-op? (first ts)) fd)))))
+
+; At the operator ROP, which is nil when the token is none: its target must
+; follow it, before END.
+(def %sh-steps-redir
+  (fn (_ walk ts end steps assign? rop fd)
+    (match
+      ((null? rop) ())
+      ((same? (rest ts) end) ())
+      ((null? (rest ts)) ())
+      (#t (walk (rest (rest ts)) end (pair (list 4 rop fd (rest ts)) steps)
+                assign?)))))
+
+(def %default-fd-or
+  (fn (_ rop) (match ((null? rop) ()) (#t (%default-fd rop)))))
+
+; The step for the word TOK where ASSIGN? says what a word there may be: as
+; %sh-collect-word and %sh-collect-assign-place take it.
+(def %sh-word-step
+  (fn (_ tok assign?)
+    (match
+      ((null? assign?) (%sh-field-step tok))
+      ((%sh-assignment-tok? tok)
+        (match ((eq? assign? #t) (list 2 tok)) (#t (list 3 tok #t))))
+      ((eq? assign? #t)
+        (match
+          ((eq? (first tok) (lit tok-lit)) (list 1 (%tok-word-val tok) tok))
+          (#t (%sh-field-step tok))))
+      (#t (%sh-field-step tok)))))
+
+; A word expanded unsplit: a tok-lit and a single-quoted word are their text.
+(def %sh-field-step
+  (fn (_ tok)
+    (match
+      ((eq? (first tok) (lit tok-lit)) (list 0 (%tok-word-val tok)))
+      ((eq? (first tok) (lit tok-sq)) (list 0 (%tok-word-val tok)))
+      (#t (list 3 tok ())))))
 
 (def %sh-read-piped
   (fn (_ negate ts)
@@ -9556,7 +9753,7 @@
 
 ; %sh-list-at: an empty list sets the status 0.
 (def %sh-run-list
-  (fn (_ node) (%sh-run-items (first (rest node)) ())))
+  (fn (_ node) (eval (first (rest (rest node))))))
 
 (def %sh-run-items
   (fn (self items result)
@@ -9605,7 +9802,82 @@
 
 (def %sh-run-simple-at
   (fn (_ parts)
-    (%sh-simple-to (%mk-cursor (first (rest parts))) (first (rest (rest parts))))))
+    (%sh-run-simple-with parts (first (rest (rest (rest (rest parts))))))))
+
+(def %sh-run-simple-with
+  (fn (_ parts steps)
+    (match
+      ((null? steps)
+        (%sh-simple-to (%mk-cursor (first (rest parts))) (first (rest (rest parts)))))
+      ((eq? (first steps) (lit assigns)) (%sh-run-assigns (rest steps)))
+      (#t (%sh-run-steps steps)))))
+
+; A command of assignments alone, SPECS each (NAME HOW WHAT)
+; (%sh-steps-or-assigns), run as %eval-simple-cmd and %sh-run-cmd run one
+; with no name and no redirection: each value made after the assignments
+; before it, and the status the last command substitution's, or 0.
+(def %sh-run-assigns
+  (fn (_ specs)
+    (set! %sh-subst-status ())
+    (match ((null? %sh-sweeps?) ()) (#t (%sh-sweep-tick!)))
+    (%sh-assigns-go specs)
+    (%sh-set-status (match ((null? %sh-subst-status) 0) (#t %sh-subst-status)))))
+
+(def %sh-assigns-go
+  (fn (self specs)
+    (match
+      ((null? specs) ())
+      (#t (self (%sh-assign-now specs))))))
+
+; The first of SPECS made: answers the rest.
+(def %sh-assign-now
+  (fn (_ specs)
+    (%sh-var-set! (first (first specs)) (%sh-assign-value (rest (first specs))))
+    (rest specs)))
+
+; (HOW WHAT): the value.
+(def %sh-assign-value
+  (fn (_ v)
+    (match
+      ((= (first v) 0) (first (rest v)))
+      ((= (first v) 1) (%sh-var-value-checked (first (rest v))))
+      (#t (%sh-assignment-word (first (rest v)))))))
+
+; %eval-simple-cmd over STEPS (%sh-simple-steps): the words and redirections
+; taken in order, each expanded as it is taken, then %sh-run-cmd.
+(def %sh-run-steps
+  (fn (_ steps)
+    (set! %sh-subst-status ())
+    (%sh-steps-go steps () ())))
+
+(def %sh-steps-go
+  (fn (self steps wds redirs)
+    (match
+      ((null? steps) (%sh-run-cmd (reverse wds) (reverse redirs)))
+      ((= (first (first steps)) 0)
+        (self (rest steps) (pair (first (rest (first steps))) wds) redirs))
+      ((= (first (first steps)) 3)
+        (self (rest steps)
+          (%sh-push-fields
+            (%sh-expand-tok (first (rest (first steps)))
+                            (first (rest (rest (first steps)))))
+            wds)
+          redirs))
+      ((= (first (first steps)) 1)
+        (self (rest steps) (%sh-name-step (first steps) wds) redirs))
+      ((= (first (first steps)) 2)
+        (self (rest steps) (pair (first (rest (first steps))) wds) redirs))
+      (#t
+        (self (rest steps) wds (pair (%sh-redir-step (rest (first steps))) redirs))))))
+
+(def %sh-name-step
+  (fn (_ step wds)
+    (set! %sh-name-tok (first (rest (rest step))))
+    (pair (first (rest step)) wds)))
+
+; (ROP FD TS): the redirection, its target expanded now.
+(def %sh-redir-step
+  (fn (_ r) (%sh-redir-at (first (rest (rest r))) (first r) (first (rest r)))))
 
 ; PARTS (NEGATE STAGES ANDOR?): %sh-run-pipeline-stages.
 (def %sh-run-piped
