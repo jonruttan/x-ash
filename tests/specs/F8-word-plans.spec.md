@@ -11,7 +11,7 @@ The first case is a pin that holds on main too; its expectation matches
 `dash` and `/bin/sh`.  The second counts the scans a word's text takes.  The
 third keeps plans across a collect before every simple command.
 
-### every kind of step, run twice round a loop
+### every variant of step, run twice round a loop
 
 ```sh
 (do (sh-eval "( HOME=/h; set -- p q; for i in 1 2; do x=\"a$i\"; echo \"$x\" ${x}b $((i*2)) \\$i '$i' ~/z \"$@\" ${u:-d e} `echo q$i`; done ) | tr '\\n' ','; echo") ())

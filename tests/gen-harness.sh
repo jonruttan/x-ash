@@ -50,7 +50,7 @@ fi
 # ash/repl is imported and safe to import: it is defs and a provide with no
 # top-level effect (run.x calls the loop, not repl.x). It is here because
 # %ash-complete?, which decides whether the prompt keeps reading, is testable
-# logic and the session it drives is the kind a suite stopping at sh-eval
+# logic and the session it drives is what a suite stopping at sh-eval
 # cannot see.
 #
 # The bundle root is armed the same way run.x arms it, so `import ash/base`

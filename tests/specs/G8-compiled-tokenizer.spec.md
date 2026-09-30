@@ -9,7 +9,7 @@ quoted string or a word, so its reader does not ask the text.
 The first case holds on main too.  The others compile the base in a child,
 by setting the threshold to nothing and the shell's pid to the child's.  Each
 answers the same wherever it runs: where the compile lane works -- asked
-independently, with a state of the same shape -- the base must be active, so
+independently, with an equivalent state -- the base must be active, so
 a refusal the guard swallowed cannot pass for agreement.
 
 ### a quoted string, and a word that holds one, to the end of the text

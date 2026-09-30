@@ -66,7 +66,7 @@
 ; The codes, read from the Ansi statics once per install rather than once per
 ; token: whether there is a terminal is a fact of the process, so the install
 ; runs again after a state image is loaded.
-(def %ash-c-keyword "")
+(def %ash-c-reserved-word "")
 (def %ash-c-builtin "")
 (def %ash-c-string "")
 (def %ash-c-variable "")
@@ -76,7 +76,7 @@
 (def %ash-paint-install!
   (fn (_)
     (guard (_ ())
-      (set! %ash-c-keyword (Str8 append (Ansi bold) (Ansi magenta)))
+      (set! %ash-c-reserved-word (Str8 append (Ansi bold) (Ansi magenta)))
       (set! %ash-c-builtin (Ansi cyan))
       (set! %ash-c-string (Ansi green))
       (set! %ash-c-variable (Ansi yellow))
@@ -130,10 +130,10 @@
 ; The code for a word: a reserved word, a builtin, a variable reference, or
 ; nothing.
 (def %ash-word-code
-  (fn (_ kind text)
-    (if (not (eq? kind (lit tok-word))) ""
+  (fn (_ label text)
+    (if (not (eq? label (lit tok-word))) ""
       (match
-        ((List includes? text %sh-reserved-words) %ash-c-keyword)
+        ((List includes? text %sh-reserved-words) %ash-c-reserved-word)
         ((List includes? text (%ash-builtin-names)) %ash-c-builtin)
         ((if (> (Str8 length text) 0) (eq? (Str8 ref 0 s-dollar) (Str8 ref 0 text)) #f) %ash-c-variable)
         (#t "")))))
@@ -160,11 +160,11 @@
         (let ((n (Str8 length s)))
           (let ((go (fn (self toks at segs)
                       (if (null? toks) (%ash-paint-tail s at n segs)
-                        (let ((kind (first (first toks)))
+                        (let ((label (first (first toks)))
                               (text (if (null? (rest (first toks))) "" (first (rest (first toks))))))
                           (match
-                            ((eq? kind (lit tok-newline)) (self (rest toks) at segs))
-                            ((if (eq? kind (lit tok-dq)) #t (eq? kind (lit tok-sq)))
+                            ((eq? label (lit tok-newline)) (self (rest toks) at segs))
+                            ((if (eq? label (lit tok-dq)) #t (eq? label (lit tok-sq)))
                               (let ((q (%ash-quote-from s at n)))
                                 (if (null? q) (%ash-paint-tail s at n segs)
                                   (let ((e (%ash-quote-end s q n)))
@@ -177,7 +177,7 @@
                                   (let ((e (+ p (Str8 length text))))
                                     (self (rest toks) e
                                           (%ash-seg (%ash-gap s at p segs)
-                                                    (%ash-word-code kind text)
+                                                    (%ash-word-code label text)
                                                     (Str8 sub p (- e p) s)))))))))))))
             (Str8 join "" (List reverse (go (sh-tokenize s) 0 ())))))))))
 
@@ -239,10 +239,10 @@
 
 ; A reserved word that a command follows, standing where a command would.
 (def %ash-head?
-  (fn (_ kind text)
-    (if (eq? kind (lit tok-word)) (List includes? text %ash-command-heads) #f)))
+  (fn (_ label text)
+    (if (eq? label (lit tok-word)) (List includes? text %ash-command-heads) #f)))
 
-; Answers (kind . name): name is the command's, or nil at command position.
+; Answers (label . name): name is the command's, or nil at command position.
 (def %ash-word-place
   (fn (_ before)
     (let ((toks (guard (_ (lit refused)) (sh-tokenize before))))
@@ -253,13 +253,13 @@
                         (redirect? (pair (lit redirect) name))
                         (cmd? (pair (lit command) ()))
                         (#t (pair (lit argument) name)))
-                      (let ((kind (first (first toks)))
+                      (let ((label (first (first toks)))
                             (text (%ash-tok-text (first toks)))
                             (more (rest toks)))
                         (match
-                          ((eq? kind (lit tok-newline)) (self more #t () #f))
-                          ((eq? kind (lit tok-io)) (self more cmd? name redirect?))
-                          ((eq? kind (lit tok-op))
+                          ((eq? label (lit tok-newline)) (self more #t () #f))
+                          ((eq? label (lit tok-io)) (self more cmd? name redirect?))
+                          ((eq? label (lit tok-op))
                             (match
                               ((List includes? text %ash-command-ops) (self more #t () #f))
                               ((List includes? text %ash-redirect-ops) (self more cmd? name #t))
@@ -267,7 +267,7 @@
                           ; A word after a redirection operator is its target,
                           ; and leaves the command where it was.
                           (redirect? (self more cmd? name #f))
-                          ((if cmd? (%ash-head? kind text) #f) (self more #t () #f))
+                          ((if cmd? (%ash-head? label text) #f) (self more #t () #f))
                           (cmd? (self more #f text #f))
                           (#t (self more #f name #f))))))))
           (go toks #t () #f))))))
@@ -287,7 +287,7 @@
 (def %ash-slashed
   (fn (_ hit)
     (if (Str8 ends? "/" hit) hit
-      (if (eq? (sh-path-kind hit) (lit dir)) (Str8 append hit "/") hit))))
+      (if (eq? (sh-path-file-type hit) (lit dir)) (Str8 append hit "/") hit))))
 
 ; A path under home written back as `~` and the rest.
 (def %ash-untilde
@@ -311,7 +311,7 @@
                 (if (null? home) (%ash-slashed hit) (%ash-untilde home (%ash-slashed hit))))
               ; When nothing matches the globber hands the pattern back; a
               ; name that is not there is not a candidate.
-              (List filter (fn (_ hit) (not (null? (sh-path-kind hit)))) hits))))))))
+              (List filter (fn (_ hit) (not (null? (sh-path-file-type hit)))) hits))))))))
 
 ; The commands a word could be: the reserved words, the builtins and the
 ; executables on PATH.  An empty word offers nothing rather than all of them.

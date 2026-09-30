@@ -15,7 +15,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 ### no arguments is a session
 
 ```sh
-(write (%ash-plan-get (lit kind) (ash-plan ())))
+(write (%ash-plan-get (lit label) (ash-plan ())))
 ```
 ---
     session
@@ -24,7 +24,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-c" "echo $1" "name" "a" "b"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit text) p)
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit text) p)
                (%ash-plan-get (lit arg0) p) (%ash-plan-get (lit params) p))))
 ```
 ---
@@ -42,7 +42,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 ### -c with no command is a usage error
 
 ```sh
-(write (%ash-plan-get (lit kind) (ash-plan (list "-c"))))
+(write (%ash-plan-get (lit label) (ash-plan (list "-c"))))
 ```
 ---
     usage
@@ -51,7 +51,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "s.sh" "one" "-x"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit text) p)
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit text) p)
                (%ash-plan-get (lit arg0) p) (%ash-plan-get (lit params) p))))
 ```
 ---
@@ -61,7 +61,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-e" "-u" "s.sh"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit opts) p))))
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit opts) p))))
 ```
 ---
     (file ("-e" "-u"))
@@ -70,7 +70,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-ec" "false; echo no"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit opts) p)
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit opts) p)
                (%ash-plan-get (lit text) p))))
 ```
 ---
@@ -80,7 +80,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-s" "arg"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit params) p))))
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit params) p))))
 ```
 ---
     (stdin ("arg"))
@@ -89,7 +89,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-e" "--" "-odd"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit opts) p)
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit opts) p)
                (%ash-plan-get (lit text) p))))
 ```
 ---
@@ -99,7 +99,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 
 ```sh
 (let ((p (ash-plan (list "-o" "errexit" "s.sh"))))
-  (write (list (%ash-plan-get (lit kind) p) (%ash-plan-get (lit opts) p))))
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit opts) p))))
 ```
 ---
     (file ("-o" "errexit"))

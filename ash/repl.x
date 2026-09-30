@@ -88,25 +88,25 @@
   (fn (_ s)
     (let ((n (Str8 length s)))
       (def go
-        (fn (self i mode out)
+        (fn (self i label out)
           (if (>= i n)
-            (%ash-bare out (if (= mode 0) () #t))
+            (%ash-bare out (if (= label 0) () #t))
             (let ((c (Str8 ref i s)))
               (cond
                 ; Inside '...' -- only the matching quote closes it, and a
                 ; backslash is literal (POSIX): 'it\' IS closed.
-                ((= mode 1)
+                ((= label 1)
                   (self (+ i 1) (if (= c #\') 0 1)
                         (Str8 append out " ")))
                 ; Inside "..." -- a backslash escapes the next character.
-                ((= mode 2)
+                ((= label 2)
                   (if (and (= c #\\) (< (+ i 1) n))
                     (self (+ i 2) 2 (Str8 append out "  "))
                     (self (+ i 1) (if (= c #\") 0 2)
                           (Str8 append out " "))))
                 ; Inside $'...' -- a backslash escapes the next character, so
                 ; $'it\'s' is closed.
-                ((= mode 3)
+                ((= label 3)
                   (if (and (= c #\\) (< (+ i 1) n))
                     (self (+ i 2) 3 (Str8 append out "  "))
                     (self (+ i 1) (if (= c #\') 0 3)
@@ -502,27 +502,27 @@
       (#t (= (string-ref w 0) #\+)))))
 
 ; The words `set` is to be handed, what is to be run, and what follows it, as
-; (OPTS MODE REST).  MODE is command, stdin or nil.  `-o` takes the word after
+; (OPTS LABEL REST).  LABEL is command, stdin or nil.  `-o` takes the word after
 ; it, which goes to `set` with it.
 (def %ash-plan-options
-  (fn (self ws opts mode)
+  (fn (self ws opts label)
     (match
-      ((null? ws) (list (List reverse opts) mode ws))
-      ((string=? (first ws) "--") (list (List reverse opts) mode (rest ws)))
-      ((string=? (first ws) "-") (list (List reverse opts) mode (rest ws)))
-      ((not (%ash-option-word? (first ws))) (list (List reverse opts) mode ws))
-      (#t (%ash-plan-option self ws opts mode)))))
+      ((null? ws) (list (List reverse opts) label ws))
+      ((string=? (first ws) "--") (list (List reverse opts) label (rest ws)))
+      ((string=? (first ws) "-") (list (List reverse opts) label (rest ws)))
+      ((not (%ash-option-word? (first ws))) (list (List reverse opts) label ws))
+      (#t (%ash-plan-option self ws opts label)))))
 
 (def %ash-plan-option
-  (fn (_ go ws opts mode)
+  (fn (_ go ws opts label)
     (def w (first ws))
     (def got (%ash-option-letters w 1 "" #f #f))
     (def kept (first got))
     (def mode1
       (match
         ((first (rest got)) (lit command))
-        ((first (rest (rest got))) (if (null? mode) (lit stdin) mode))
-        (#t mode)))
+        ((first (rest (rest got))) (if (null? label) (lit stdin) label))
+        (#t label)))
     (def opts1
       (if (= (string-length kept) 0)
         opts
@@ -533,27 +533,27 @@
       (go (rest (rest ws)) (pair (first (rest ws)) opts1) mode1)
       (go (rest ws) opts1 mode1))))
 
-; What the arguments ask for, as an alist: kind, opts, text, arg0, params.
-; kind is session, stdin, command, file, or usage when -c has no command.
+; What the arguments ask for, as an alist: label, opts, text, arg0, params.
+; label is session, stdin, command, file, or usage when -c has no command.
 (def ash-plan
   (fn (_ ops)
     (def got (%ash-plan-options ops () ()))
     (def opts (first got))
-    (def mode (first (rest got)))
+    (def label (first (rest got)))
     (def ws (first (rest (rest got))))
     (def plan
-      (fn (_ kind text arg0 params)
-        (list (pair (lit kind) kind) (pair (lit opts) opts)
+      (fn (_ label text arg0 params)
+        (list (pair (lit label) label) (pair (lit opts) opts)
               (pair (lit text) text) (pair (lit arg0) arg0)
               (pair (lit params) params))))
     (match
-      ((eq? mode (lit command))
+      ((eq? label (lit command))
         (match
           ((null? ws) (plan (lit usage) () () ()))
           ((null? (rest ws)) (plan (lit command) (first ws) () ()))
           (#t (plan (lit command) (first ws)
                     (first (rest ws)) (rest (rest ws))))))
-      ((eq? mode (lit stdin)) (plan (lit stdin) () () ws))
+      ((eq? label (lit stdin)) (plan (lit stdin) () () ws))
       ((null? ws) (plan (lit session) () () ()))
       (#t (plan (lit file) (first ws) (first ws) (rest ws))))))
 
@@ -583,7 +583,7 @@
 (def %ash-main
   (fn (_ raw)
     (def plan (ash-plan (ash-operands raw)))
-    (def kind (%ash-plan-get (lit kind) plan))
+    (def label (%ash-plan-get (lit label) plan))
     (def arg0 (%ash-plan-get (lit arg0) plan))
     (def set-status (%sh-set (%ash-plan-get (lit opts) plan)))
     (unless (null? arg0) (set! %sh-arg0 arg0))
@@ -591,13 +591,13 @@
       (set! %sh-args (%ash-plan-get (lit params) plan)))
     (match
       ((not (= set-status 0)) (%sh-exit-shell %sh-error-status))
-      ((eq? kind (lit usage))
+      ((eq? label (lit usage))
         (do (%stderr "ash: -c requires an argument\n")
             (%sh-exit-shell %sh-error-status)))
-      ((eq? kind (lit command))
+      ((eq? label (lit command))
         (do (%ash-take-stdin)
             (%ash-run-script (%ash-plan-get (lit text) plan))))
-      ((eq? kind (lit file)) (%ash-run-file (%ash-plan-get (lit text) plan)))
+      ((eq? label (lit file)) (%ash-run-file (%ash-plan-get (lit text) plan)))
       (%batch? (%ash-batch))
       (#t (do (%ash-banner) (%ash-repl))))))
 
