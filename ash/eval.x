@@ -9208,9 +9208,14 @@
 ;   (NAME 1 PARAM)  the value of the variable PARAM, the value being `$PARAM`
 ;                   or `${PARAM}`
 ;   (NAME 2 TOK)    the value word TOK expanded, unsplit
+;   (NAME 3 TOK)    the assignment word TOK expanded, unsplit, and cut at its
+;                   first `=`
 ;
-; The name is plain text that no expansion changes, so the value is expanded
-; alone where the whole word was expanded and cut at its `=`.
+; The name is plain text that no expansion changes, so a value is expanded
+; alone where the whole word was expanded and cut at its `=` -- unless it
+; holds an `=` of its own.  A tilde is expanded after an assignment's first
+; `=` and not after a later one, and in the value alone the first `=` is
+; the value's: `V=a=~/x` assigns a=~/x.
 (def %sh-steps-or-assigns
   (fn (_ steps)
     (match
@@ -9228,17 +9233,18 @@
 ; The assignment step (2 TOK).
 (def %sh-assign-spec
   (fn (_ step)
-    (%sh-assign-spec-of (%tok-word-val (first (rest step))))))
+    (%sh-assign-spec-of (first (rest step)) (%tok-word-val (first (rest step))))))
 
 (def %sh-assign-spec-of
-  (fn (_ word)
-    (%sh-assign-spec-at (%sh-assignment-name word) (%sh-assignment-value word))))
+  (fn (_ tok word)
+    (%sh-assign-spec-at tok (%sh-assignment-name word) (%sh-assignment-value word))))
 
 (def %sh-assign-spec-at
-  (fn (_ name value)
+  (fn (_ tok name value)
     (match
       ((%sh-plain-value? value 0 (string-length value)) (list name 0 value))
       ((%sh-lone-param value) (list name 1 (%sh-lone-param value)))
+      ((fx<? -1 (%sh-first-eq value 0 (string-length value))) (list name 3 tok))
       (#t (list name 2 (mk-tok-word value))))))
 
 ; Whether VALUE from I to N holds nothing an assignment expands or removes: no
@@ -9841,7 +9847,8 @@
     (match
       ((= (first v) 0) (first (rest v)))
       ((= (first v) 1) (%sh-var-value-checked (first (rest v))))
-      (#t (%sh-assignment-word (first (rest v)))))))
+      ((= (first v) 2) (%sh-assignment-word (first (rest v))))
+      (#t (%sh-assignment-value (%sh-assignment-word (first (rest v))))))))
 
 ; %eval-simple-cmd over STEPS (%sh-simple-steps): the words and redirections
 ; taken in order, each expanded as it is taken, then %sh-run-cmd.

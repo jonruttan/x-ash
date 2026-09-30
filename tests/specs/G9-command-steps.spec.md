@@ -7,8 +7,8 @@ assignment's name, and its value as a literal, a lone parameter, or a value
 word expanded by itself.  A list is read into a form the evaluator runs.  A
 command whose tokens the walk would read otherwise is walked as before.
 
-The first three cases are pins that hold on main too; their expectations match
-`dash` and `/bin/sh`.  The last fails on main.
+The first three cases are pins that hold on main too, and the fourth fails there;
+their expectations match `dash` and `/bin/sh`.  The last fails on main.
 
 ### assignments in loops and functions
 
@@ -17,6 +17,14 @@ The first three cases are pins that hold on main too; their expectations match
 ```
 ---
     [1][1][lit][][][1][/h/d],[2][2][lit][][][1][/h/d],a|a a,b|b b,
+
+### a tilde after an assignment's first `=` only
+
+```sh
+(do (sh-eval "( HOME=/h; for i in 1; do V=a=~/x; W=b:~/y; X=~/z=~; echo \"$V $W $X\"; done; f() { V=c=~; echo \"$V\"; }; f ) | tr '\\n' ','; echo") ())
+```
+---
+    a=~/x b:/h/y /h/z=~,c=~,
 
 ### the status of an assignment, and a read-only name
 
