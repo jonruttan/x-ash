@@ -3716,6 +3716,17 @@
         (self word (fx+ i 1) n (fx+ (fx* acc 10) (fx+ (string-ref word i) -48)) other))
       (#t (other word)))))
 
+; The integer WORD spells as `convert` reads it, nil for a word that spells
+; none: one to fifteen decimal digits, the usual word, are read in one walk,
+; at a tenth of the conversion's cost or less, and any other word converted.
+(def %sh-word-int
+  (fn (_ word)
+    (match
+      ((fx<? 15 (string-length word)) (%sh-word-int-converted word))
+      (#t (%sh-decimal-plain word 0 (string-length word) 0 %sh-word-int-converted)))))
+
+(def %sh-word-int-converted (fn (_ word) (convert word %ash-int-type)))
+
 ; The number S spells, S being digits only -- a descriptor, a here-document's
 ; index -- read by the arithmetic reader's digit loop rather than `convert`,
 ; which costs several times as much.  Nil when S is not all digits.
@@ -4440,7 +4451,7 @@
 ; names no descriptor, and is none.
 (def %sh-tty?
   (fn (_ word)
-    (let ((fd (convert word %ash-int-type)))
+    (let ((fd (%sh-word-int word)))
       (if (null? fd) () (Sys isatty fd)))))
 
 ; Whether A was modified after B.  A path that is not there is older than any
@@ -4970,7 +4981,7 @@
 
 (def %sh-return
   (fn (_ wds)
-    (let ((n (if (null? wds) %sh-status (convert (first wds) %ash-int-type))))
+    (let ((n (if (null? wds) %sh-status (%sh-word-int (first wds)))))
       (if (and (= %sh-fn-depth 0) (= %sh-dot-depth 0))
         ; Outside a function or a dot script POSIX leaves this unspecified;
         ; report and carry on rather than unwinding to somewhere there is no
@@ -5000,7 +5011,7 @@
   (fn (_ wds who)
     (if (null? wds)
       1
-      (let ((n (convert (first wds) %ash-int-type)))
+      (let ((n (%sh-word-int (first wds))))
         (if (< n 1)
           (do
             (%stderr (%ash-join "" (list "ash: " who ": " (first wds)
@@ -5025,7 +5036,7 @@
 ; `while shift; do` relies on to terminate.
 (def %sh-shift
   (fn (_ wds)
-    (let ((n (if (null? wds) 1 (convert (first wds) %ash-int-type))))
+    (let ((n (if (null? wds) 1 (%sh-word-int (first wds)))))
       (if (< n 0)
         1
         (if (> n (length %sh-args))
@@ -5229,7 +5240,7 @@
   (fn (self wds status)
     (if (null? wds)
       status
-      (let ((pid (convert (first wds) %ash-int-type)))
+      (let ((pid (%sh-word-int (first wds))))
         (if (and (not (null? pid)) (%sh-char-in? pid %sh-bg-pids))
           (do
             (set! %sh-bg-pids (%sh-pids-without pid %sh-bg-pids))
@@ -5245,7 +5256,7 @@
 (def %sh-exit
   (fn (_ wds)
     (%sh-exit-shell
-      (if (null? wds) %sh-status (convert (first wds) %ash-int-type)))))
+      (if (null? wds) %sh-status (%sh-word-int (first wds))))))
 
 ; `[ ... ]` is `test` with the closing bracket dropped.  Without one it is a
 ; usage error, 2, as it is in dash and bash: `[ a = a` does not answer true.
@@ -5564,7 +5575,7 @@
 (def %sh-getopts-optind
   (fn (_)
     (let ((v (%sh-var-get "OPTIND")))
-      (let ((n (if (null? v) 1 (convert v %ash-int-type))))
+      (let ((n (if (null? v) 1 (%sh-word-int v))))
         (unless (= n %sh-optind-seen) (set! %sh-optchar 1))
         n))))
 
