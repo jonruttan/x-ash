@@ -39,6 +39,7 @@
 ; input.
 (def %sh-rd-read (prim-ref (lit tok) (lit read)))
 (def %sh-rd-buf ())       ; the buffer
+(def %sh-rd-next ())      ; (tok read BUF), evaluated in the reading base
 (def %sh-rd-pend ())      ; tokens given back, the first taken first
 (def %sh-rd-raw ())       ; the command's tokens as read, latest first
 (def %sh-rd-err ())       ; the first error found, or nil
@@ -47,7 +48,8 @@
 (def %sh-rd-peek
   (fn (_)
     (match
-      ((null? %sh-rd-pend) (%sh-rd-fetch (%sh-rd-own (%sh-rd-read %sh-rd-buf))))
+      ((null? %sh-rd-pend)
+        (%sh-rd-fetch (%sh-rd-own (%sh-base-eval %sh-rd-raw-base %sh-rd-next))))
       (#t (first %sh-rd-pend)))))
 
 (def %sh-rd-fetch
@@ -133,6 +135,7 @@
 (def %sh-rd-command
   (fn (_ tok buf)
     (set! %sh-rd-buf buf)
+    (set! %sh-rd-next (list %sh-rd-read buf))
     (set! %sh-rd-pend (list tok))
     (set! %sh-rd-raw ())
     (set! %sh-rd-err ())
@@ -719,7 +722,21 @@
   (fn (_ tok buf)
     (match
       ((%sh-rd-newline? tok) tok)
-      (#t (%sh-rd-command (%sh-rd-own tok) buf)))))
+      (#t (do (set! %sh-rd-start (list tok buf))
+              (%sh-base-eval %sh-rd-main %sh-rd-begin))))))
+
+; A command is read in the evaluator's base, not the reading base a handler
+; runs in: the engine's types an evaluation makes objects of are registered on
+; the base it runs in, and on the reading base their analysers would try every
+; token after.  Only `tok read` (%sh-rd-next) is evaluated in the reading base.
+(def %sh-base-eval (prim-ref (lit base) (lit eval)))
+(def %sh-rd-main (%base))
+(def %sh-rd-start ())     ; the (TOK BUF) a command starts from
+(def %sh-rd-begin (lit (%sh-rd-begun)))
+
+(def %sh-rd-begun
+  (fn (_)
+    (%sh-rd-command (%sh-rd-own (first %sh-rd-start)) (first (rest %sh-rd-start)))))
 
 (def %sh-rd-wrap
   (fn (_ read) (fn (_ . args) (%sh-rd-yield (apply read args) (first args)))))
@@ -762,13 +779,14 @@
 
 (def %sh-rd-reset!
   (fn (_)
+    (set! %sh-rd-main (%base))
     (set! %sh-rd-base (%sh-rd-base-make (first %sh-tok-types)))
     (set! %sh-rd-cbase ())
     (set! %sh-rd-raw-base (Base raw-of %sh-rd-base))))
 (%sh-rd-reset!)
 (set! %image-transients
-  (pair (lit %sh-rd-base) (pair (lit %sh-rd-cbase)
-    (pair (lit %sh-rd-raw-base) %image-transients))))
+  (pair (lit %sh-rd-main) (pair (lit %sh-rd-base) (pair (lit %sh-rd-cbase)
+    (pair (lit %sh-rd-raw-base) %image-transients)))))
 (set! %image-recache-hooks (pair (fn (_) (%sh-rd-reset!)) %image-recache-hooks))
 
 ; The compiled reading base: the compiled tokenizer's ENTRIES under the
@@ -789,3 +807,19 @@
     (%sh-jit-tick! (string-length text))
     (set! %sh-rd-depth 0)
     (%token-read-str %sh-rd-raw-base text)))
+
+; The reading base TYPES make with each read handler wrapped by WRAP.
+(def %sh-rd-base-make-with
+  (fn (_ types wrap)
+    (def b (make-token-base))
+    (%sh-rd-register b
+      (map (fn (_ t) (pair (first t) (%sh-rd-wrapped (rest t) wrap))) types))
+    b))
+
+(def %sh-rd-wrapped
+  (fn (self hs wrap)
+    (match
+      ((null? hs) ())
+      ((eq? (first (first hs)) (lit read))
+        (pair (pair (lit read) (wrap (rest (first hs)))) (rest hs)))
+      (#t (pair (first hs) (self (rest hs) wrap))))))
