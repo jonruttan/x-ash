@@ -109,3 +109,11 @@ each other and this follows bash:
 ```
 ---
     prefix
+
+### a closing bracket after each count of words
+
+```sh
+(do (sh-eval "( for k in 1; do [ a ] ]; echo $?; [ ]; echo $?; [ a; echo $?; [ ! a ]; echo $?; [ -n \"\" ]; echo $?; [ ! a = b ]; echo $?; [ a = a ]; echo $?; [ x ]; echo $?; done ) 2>&1 | tr '\\n' ','; echo") ())
+```
+---
+    ash: test: a: unary operator expected,2,1,ash: [: missing ],2,1,1,0,0,0,
