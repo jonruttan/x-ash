@@ -25,6 +25,8 @@
 ; Sys alone answers only "does this path exist", and a shell that cannot tell
 ; a directory from a file has no working `test`.
 (import x/sys/file)
+; x/platform/syscall is syscall-door, which File opens and closes through.
+(import x/platform/syscall)
 
 (provide ash/prims
   make-token-base base-make-type token-read-string
@@ -234,7 +236,6 @@
 (def %sys-wait (method-of Sys (lit wait)))
 (def %sys-exit (method-of Sys (lit exit)))
 (def %sys-getpid (method-of Sys (lit getpid)))
-(def %sys-close (method-of Sys (lit close)))
 (def %sys-dup2 (method-of Sys (lit dup2)))
 (def %sys-pipe (method-of Sys (lit pipe)))
 (def %sys-getenv (method-of Sys (lit getenv)))
@@ -245,7 +246,6 @@
 (def %sys-getcwd (method-of Sys (lit getcwd)))
 (def %sys-fd-read (method-of Sys (lit fd-read)))
 (def %sys-fd-write (method-of Sys (lit fd-write)))
-(def %file-open (method-of File (lit open)))
 (def %file-stat (method-of File (lit stat)))
 (def %file-lstat (method-of File (lit lstat)))
 (def %file-read-all (method-of File (lit read-all)))
@@ -302,15 +302,23 @@
 (def %sh-o-new (%sh-open-flags (list (lit wronly) (lit creat) (lit excl)) 0))
 (def %sh-o-existing (%sh-open-flags (list (lit wronly)) 0))
 
-(def sh-open-read (fn (_ path) (%file-open File path %sh-o-read)))
-(def sh-open-write (fn (_ path) (%file-open File path %sh-o-write 438)))
-(def sh-open-append (fn (_ path) (%file-open File path %sh-o-append 438)))
-(def sh-open-rdwr (fn (_ path) (%file-open File path %sh-o-rdwr 438)))
+; The opens and the close go through the doors (File open) and (File close)
+; make their calls through, called directly: the flags are numbers already, so
+; nothing the methods do first applies, and a method call costs three times
+; the call itself.  Each answers what the syscall answers, negative on failure.
+; dup2 stays with Sys, as the generic Linux table has no dup2 for a door.
+(def %sh-sys-open (syscall-door (lit open)))
+(def %sh-sys-close (syscall-door (lit close)))
+
+(def sh-open-read (fn (_ path) (%sh-sys-open path %sh-o-read 0)))
+(def sh-open-write (fn (_ path) (%sh-sys-open path %sh-o-write 438)))
+(def sh-open-append (fn (_ path) (%sh-sys-open path %sh-o-append 438)))
+(def sh-open-rdwr (fn (_ path) (%sh-sys-open path %sh-o-rdwr 438)))
 ; For `set -C`: a file created only when none is there, and one already there
 ; opened as it is.
-(def sh-open-new (fn (_ path) (%file-open File path %sh-o-new 438)))
-(def sh-open-existing (fn (_ path) (%file-open File path %sh-o-existing)))
-(def sh-close (fn (_ fd) (%sys-close Sys fd)))
+(def sh-open-new (fn (_ path) (%sh-sys-open path %sh-o-new 438)))
+(def sh-open-existing (fn (_ path) (%sh-sys-open path %sh-o-existing 0)))
+(def sh-close (fn (_ fd) (%sh-sys-close fd)))
 (def sh-dup2 (fn (_ from to) (%sys-dup2 Sys from to)))
 
 ; (Sys pipe) answers a (read-fd . write-fd) pair, which is what
