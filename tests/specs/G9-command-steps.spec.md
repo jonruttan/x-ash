@@ -3,10 +3,12 @@
 A simple command in a loop or a function is read once into steps: its words
 and redirections in order, each as the walk over its tokens takes it when the
 command runs.  A command of assignments alone is read further: each
-assignment's name, and its value as a literal, a lone parameter, or a value
-word expanded by itself.  An argument that is one parameter is read as that
-parameter, its value taken as the field when nothing in it would split or
-glob.  A list is read into a form the evaluator runs.  A command whose tokens
+assignment's name, and its value as a literal, a lone parameter, a lone
+arithmetic expansion, or a value word expanded by itself.  An argument that
+is one parameter is read as that parameter, its value taken as the field when
+nothing in it would split or glob, and one that is an arithmetic expansion
+whose expression has nothing to expand is read as the expression's tree,
+run when the command runs.  A list is read into a form the evaluator runs.  A command whose tokens
 the walk would read otherwise is walked as before.
 
 The expectations match `dash` and `/bin/sh`, save for the wording of ash's own
@@ -35,6 +37,14 @@ error messages.
 ```
 ---
     <><5><5><5><5><a><b><a  b></no/such*><x><y><x:y><5>ash: nope: parameter not set,
+
+### a lone arithmetic expansion as an argument and as a value
+
+```sh
+(do (sh-eval "( for k in 1; do i=7; printf '<%s>' $((i+1)) \"$((i-10))\" $((i*2)); n=0; IFS=1; printf '<%s>' $((n+=101)); echo \" n=$n\"; unset IFS; x=$((i*3)); y=$((x/2)); echo \"$x $y\"; done; f() { echo before; z=$((1+)); echo after; }; f; echo \"st=$?\" ) 2>&1 | tr '\\n' ','; echo") ())
+```
+---
+    <8><-3><14><><0> n=101,21 10,before,ash: arithmetic: syntax error in 1+,
 
 ### the status of an assignment, and a read-only name
 
