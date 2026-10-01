@@ -38,6 +38,14 @@ error messages.
 ---
     <><5><5><5><5><a><b><a  b></no/such*><x><y><x:y><5>ash: nope: parameter not set,
 
+### a bare parameter holding a tab, a backslash or a glob character
+
+```sh
+(do (sh-eval "( for k in 1; do t=$(printf 'a\\tb'); b='a\\\\b'; q='/no/x?'; printf '<%s>' $t $b $q; done ); echo") ())
+```
+---
+    <a><b><a\\b></no/x?>
+
 ### a lone arithmetic expansion as an argument and as a value
 
 ```sh
