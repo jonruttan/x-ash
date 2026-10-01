@@ -2420,6 +2420,15 @@
     (def len (string-length text))
     (match
       ((= len 0) 0)
+      ((fx<? 15 len) (%sh-ar-value-other text))
+      ((= (string-ref text 0) #\0) (%sh-ar-value-other text))
+      (#t (%sh-decimal-plain text 0 len 0 %sh-ar-value-other)))))
+
+; A value that is not one to fifteen decimal digits opening with no 0.
+(def %sh-ar-value-other
+  (fn (_ text)
+    (def len (string-length text))
+    (match
       ((%sh-ar-decimal? text len) (%sh-ar-digits-value text 0 len 10))
       ((%sh-digit? (string-ref text 0))
         (match
@@ -3696,6 +3705,17 @@
   (fn (_ s)
     (if (= (string-length s) 0) () (%all-digits-from? s 0 (string-length s)))))
 
+; WORD's value when it is one to fifteen decimal digits and nothing else,
+; read in one walk on the integer doors from I with ACC so far; any other
+; word, the empty one included, is what OTHER answers for it.
+(def %sh-decimal-plain
+  (fn (self word i n acc other)
+    (match
+      ((= i n) (match ((= n 0) (other word)) (#t acc)))
+      ((%sh-digit? (string-ref word i))
+        (self word (fx+ i 1) n (fx+ (fx* acc 10) (fx+ (string-ref word i) -48)) other))
+      (#t (other word)))))
+
 ; The number S spells, S being digits only -- a descriptor, a here-document's
 ; index -- read by the arithmetic reader's digit loop rather than `convert`,
 ; which costs several times as much.  Nil when S is not all digits.
@@ -4479,17 +4499,7 @@
   (fn (_ word)
     (match
       ((fx<? 15 (string-length word)) (%sh-test-int-padded word))
-      (#t (%sh-test-int-plain word 0 (string-length word) 0)))))
-
-; WORD's value when it is one to fifteen digits and nothing else, read in one
-; walk on the integer doors; any other word is %sh-test-int-padded's.
-(def %sh-test-int-plain
-  (fn (self word i n acc)
-    (match
-      ((= i n) (match ((= n 0) ()) (#t acc)))
-      ((%sh-digit? (string-ref word i))
-        (self word (fx+ i 1) n (fx+ (fx* acc 10) (fx+ (string-ref word i) -48))))
-      (#t (%sh-test-int-padded word)))))
+      (#t (%sh-decimal-plain word 0 (string-length word) 0 %sh-test-int-padded)))))
 
 (def %sh-test-int-padded
   (fn (_ word)
@@ -9212,6 +9222,8 @@
 ;   (5 NAME)          a word that is `"$NAME"`: the variable's value, one field
 ;   (6 NAME TOK)      a word that is `$NAME`: the value split and globbed, TOK
 ;                     expanded when it would split or glob
+;   (7 TREE)          a word that is `"$((EXPR))"`: the number, one field
+;   (8 TREE)          a word that is `$((EXPR))`: the number, split
 ;
 ; So a command that runs often walks no tokens and asks no token what it is.
 ; A token the walk stops at before END, and a redirection with no operator or
@@ -9229,6 +9241,7 @@
 ;   (NAME 2 TOK)    the value word TOK expanded, unsplit
 ;   (NAME 3 TOK)    the assignment word TOK expanded, unsplit, and cut at its
 ;                   first `=`
+;   (NAME 4 TREE)   the number TREE runs to, the value being `$((EXPR))`
 ;
 ; The name is plain text that no expansion changes, so a value is expanded
 ; alone where the whole word was expanded and cut at its `=` -- unless it
@@ -9263,6 +9276,14 @@
     (match
       ((%sh-plain-value? value 0 (string-length value)) (list name 0 value))
       ((%sh-lone-param value) (list name 1 (%sh-lone-param value)))
+      (#t (%sh-assign-spec-word tok name value (%sh-lone-arith value %sh-label-bare))))))
+
+; The spec of a value that is one arithmetic expansion, TREE its expression's
+; tree, or of a value word.
+(def %sh-assign-spec-word
+  (fn (_ tok name value tree)
+    (match
+      ((not (null? tree)) (list name 4 tree))
       ((fx<? -1 (%sh-first-eq value 0 (string-length value))) (list name 3 tok))
       (#t (list name 2 (mk-tok-word value))))))
 
@@ -9364,10 +9385,44 @@
 (def %sh-param-step
   (fn (_ tok name)
     (match
-      ((null? name) (list 3 tok ()))
+      ((null? name)
+        (%sh-arith-step tok (%sh-lone-arith (%tok-word-val tok) (%sh-tok-label tok))))
       ((eq? (first tok) (lit tok-dq)) (list 5 name))
       ((eq? (first tok) (lit tok-word)) (list 6 name tok))
       (#t (list 3 tok ())))))
+
+; A word that is one arithmetic expansion whose expression reads once into
+; TREE: (7 TREE) in double quotes, (8 TREE) bare.  Any other word, TREE nil,
+; is (3 TOK ()).
+(def %sh-arith-step
+  (fn (_ tok tree)
+    (match
+      ((null? tree) (list 3 tok ()))
+      ((eq? (first tok) (lit tok-dq)) (list 7 tree))
+      ((eq? (first tok) (lit tok-word)) (list 8 tree))
+      (#t (list 3 tok ())))))
+
+; The tree of TEXT, read in LABEL, when the text is one arithmetic expansion
+; and nothing else and its expression has nothing to expand -- the plan is
+; that one arith step, holding its tree (%sh-arith-read) -- or nil.  Only text
+; that opens with `$((` is read into a plan to see.
+(def %sh-lone-arith
+  (fn (_ text label)
+    (match
+      ((fx<? (string-length text) 6) ())
+      ((not (= (string-ref text 0) #\$)) ())
+      ((not (= (string-ref text 1) #\()) ())
+      ((not (= (string-ref text 2) #\()) ())
+      (#t (%sh-plan-arith-tree
+            (%sh-word-plan text (string-length text) label ()))))))
+
+(def %sh-plan-arith-tree
+  (fn (_ plan)
+    (match
+      ((null? plan) ())
+      ((not (null? (rest plan))) ())
+      ((eq? (first (first plan)) (lit arith)) (first (rest (rest (rest (first plan))))))
+      (#t ()))))
 
 (def %sh-read-piped
   (fn (_ negate ts)
@@ -9877,6 +9932,7 @@
     (match
       ((= (first v) 0) (first (rest v)))
       ((= (first v) 1) (%sh-var-value-checked (first (rest v))))
+      ((= (first v) 4) (%sh-arith-run (first (rest v))))
       ((= (first v) 2) (%sh-assignment-word (first (rest v))))
       (#t (%sh-assignment-value (%sh-assignment-word (first (rest v))))))))
 
@@ -9909,6 +9965,11 @@
           (pair (%sh-var-value-checked (first (rest (first steps)))) wds) redirs))
       ((= (first (first steps)) 6)
         (self (rest steps) (%sh-bare-param (first steps) wds) redirs))
+      ((= (first (first steps)) 7)
+        (self (rest steps) (pair (%sh-arith-run (first (rest (first steps)))) wds)
+          redirs))
+      ((= (first (first steps)) 8)
+        (self (rest steps) (%sh-bare-arith (first (rest (first steps))) wds) redirs))
       (#t
         (self (rest steps) wds (pair (%sh-redir-step (rest (first steps))) redirs))))))
 
@@ -9927,6 +9988,16 @@
       ((= (string-length v) 0) wds)
       ((%sh-plain-field? v 0 (string-length v) (%sh-ifs)) (pair v wds))
       (#t (%sh-push-fields (%sh-expand-tok (first (rest (rest step))) ()) wds)))))
+
+; (8 TREE): the number TREE runs to, split onto WDS.  A number holds no glob
+; character, and no IFS character unless IFS holds a digit or `-`; the tree
+; is run once either way, so an assignment in it is made once.
+(def %sh-bare-arith
+  (fn (_ tree wds)
+    (def v (%sh-arith-run tree))
+    (match
+      ((%sh-plain-field? v 0 (string-length v) (%sh-ifs)) (pair v wds))
+      (#t (%sh-push-fields (%sh-ifs-split v (string-length v) (%sh-ifs)) wds)))))
 
 (def %sh-plain-field?
   (fn (self v i n ifs)
