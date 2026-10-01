@@ -4,11 +4,13 @@ A simple command in a loop or a function is read once into steps: its words
 and redirections in order, each as the walk over its tokens takes it when the
 command runs.  A command of assignments alone is read further: each
 assignment's name, and its value as a literal, a lone parameter, or a value
-word expanded by itself.  A list is read into a form the evaluator runs.  A
-command whose tokens the walk would read otherwise is walked as before.
+word expanded by itself.  An argument that is one parameter is read as that
+parameter, its value taken as the field when nothing in it would split or
+glob.  A list is read into a form the evaluator runs.  A command whose tokens
+the walk would read otherwise is walked as before.
 
-The first three cases are pins that hold on main too, and the fourth fails there;
-their expectations match `dash` and `/bin/sh`.  The last fails on main.
+The expectations match `dash` and `/bin/sh`, save for the wording of ash's own
+error messages.
 
 ### assignments in loops and functions
 
@@ -25,6 +27,14 @@ their expectations match `dash` and `/bin/sh`.  The last fails on main.
 ```
 ---
     a=~/x b:/h/y /h/z=~,c=~,
+
+### a lone parameter as an argument, quoted and bare
+
+```sh
+(do (sh-eval "( for i in 1; do e=; s='a  b'; n=5; g='/no/such*'; printf '<%s>' $e \"$e\" $n \"$n\" ${n} \"${n}\" $s \"$s\" $g; IFS=:; c=x:y; printf '<%s>' $c \"$c\"; unset IFS; done; set -u; f() { printf '<%s>' \"$n\"; echo $nope; }; f ) 2>&1 | tr '\\n' ','; echo") ())
+```
+---
+    <><5><5><5><5><a><b><a  b></no/such*><x><y><x:y><5>ash: nope: parameter not set,
 
 ### the status of an assignment, and a read-only name
 
