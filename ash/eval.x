@@ -10011,6 +10011,27 @@
       (#t (%sh-push-fields (%sh-ifs-split v (string-length v) (%sh-ifs)) wds)))))
 
 (def %sh-plain-field?
+  (fn (_ v i n ifs)
+    (match
+      ((eq? ifs %sh-ifs-default) (%sh-plain-default? v i n))
+      (#t (%sh-plain-field-ifs? v i n ifs)))))
+
+; Under the default IFS, whose characters are blanks, a character above the
+; space that is no glob character is plain: one test a character, where the
+; walk below asks the glob set and IFS for each.  A control character is
+; left to that walk.
+(def %sh-plain-default?
+  (fn (self v i n)
+    (match
+      ((not (fx<? i n)) #t)
+      ((not (fx<? #\space (string-ref v i))) (%sh-plain-field-ifs? v i n %sh-ifs-default))
+      ((= (string-ref v i) #\*) ())
+      ((= (string-ref v i) #\?) ())
+      ((= (string-ref v i) #\[) ())
+      ((= (string-ref v i) #\\) ())
+      (#t (self v (fx+ i 1) n)))))
+
+(def %sh-plain-field-ifs?
   (fn (self v i n ifs)
     (match
       ((not (fx<? i n)) #t)
