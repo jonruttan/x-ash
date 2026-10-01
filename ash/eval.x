@@ -4477,6 +4477,22 @@
 ; or nil for anything else.
 (def %sh-test-int
   (fn (_ word)
+    (match
+      ((fx<? 15 (string-length word)) (%sh-test-int-padded word))
+      (#t (%sh-test-int-plain word 0 (string-length word) 0)))))
+
+; WORD's value when it is one to fifteen digits and nothing else, read in one
+; walk on the integer doors; any other word is %sh-test-int-padded's.
+(def %sh-test-int-plain
+  (fn (self word i n acc)
+    (match
+      ((= i n) (match ((= n 0) ()) (#t acc)))
+      ((%sh-digit? (string-ref word i))
+        (self word (fx+ i 1) n (fx+ (fx* acc 10) (fx+ (string-ref word i) -48))))
+      (#t (%sh-test-int-padded word)))))
+
+(def %sh-test-int-padded
+  (fn (_ word)
     (def n (%sh-ar-ws-before word (string-length word)))
     (def i (%sh-ar-skip-ws word 0 n))
     (match
