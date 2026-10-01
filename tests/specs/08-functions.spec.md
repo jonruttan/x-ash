@@ -130,6 +130,14 @@
 ---
     [a b]
 
+### a count written with leading zeros is decimal
+
+```sh
+(do (sh-eval "( f() { return 010; }; f; echo $?; set -- a b c d e f g h; shift 007; echo $1; ( exit 020 ); echo $? ) | tr '\\n' ','; echo") ())
+```
+---
+    10,h,20,
+
 ## sh-eval parameter scoping
 
 ### a call restores the caller's parameters
