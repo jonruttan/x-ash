@@ -9193,6 +9193,9 @@
 ;   (2 TOK)           an assignment of the leading run, made by %sh-run-cmd
 ;   (3 TOK ASSIGN?)   a word expanded when it runs, as %sh-expand-tok takes it
 ;   (4 ROP FD TS)     a redirection onto FD, its target at the head of TS
+;   (5 NAME)          a word that is `"$NAME"`: the variable's value, one field
+;   (6 NAME TOK)      a word that is `$NAME`: the value split and globbed, TOK
+;                     expanded when it would split or glob
 ;
 ; So a command that runs often walks no tokens and asks no token what it is.
 ; A token the walk stops at before END, and a redirection with no operator or
@@ -9337,6 +9340,17 @@
     (match
       ((eq? (first tok) (lit tok-lit)) (list 0 (%tok-word-val tok)))
       ((eq? (first tok) (lit tok-sq)) (list 0 (%tok-word-val tok)))
+      (#t (%sh-param-step tok (%sh-lone-param (%tok-word-val tok)))))))
+
+; A word that is one parameter by name, `$NAME` or `${NAME}`, NAME being
+; %sh-lone-param's: (5 NAME) in double quotes, (6 NAME TOK) bare.  Any other
+; word, NAME nil, is (3 TOK ()).
+(def %sh-param-step
+  (fn (_ tok name)
+    (match
+      ((null? name) (list 3 tok ()))
+      ((eq? (first tok) (lit tok-dq)) (list 5 name))
+      ((eq? (first tok) (lit tok-word)) (list 6 name tok))
       (#t (list 3 tok ())))))
 
 (def %sh-read-piped
@@ -9874,6 +9888,11 @@
         (self (rest steps) (%sh-name-step (first steps) wds) redirs))
       ((= (first (first steps)) 2)
         (self (rest steps) (pair (first (rest (first steps))) wds) redirs))
+      ((= (first (first steps)) 5)
+        (self (rest steps)
+          (pair (%sh-var-value-checked (first (rest (first steps)))) wds) redirs))
+      ((= (first (first steps)) 6)
+        (self (rest steps) (%sh-bare-param (first steps) wds) redirs))
       (#t
         (self (rest steps) wds (pair (%sh-redir-step (rest (first steps))) redirs))))))
 
@@ -9881,6 +9900,25 @@
   (fn (_ step wds)
     (set! %sh-name-tok (first (rest (rest step))))
     (pair (first (rest step)) wds)))
+
+; (6 NAME TOK): NAME's value split and globbed onto WDS.  An empty value is no
+; field, and a value with no IFS character and no glob character in it is the
+; one field it would split and glob to.  Any other is TOK expanded.
+(def %sh-bare-param
+  (fn (_ step wds)
+    (def v (%sh-var-value-checked (first (rest step))))
+    (match
+      ((= (string-length v) 0) wds)
+      ((%sh-plain-field? v 0 (string-length v) (%sh-ifs)) (pair v wds))
+      (#t (%sh-push-fields (%sh-expand-tok (first (rest (rest step))) ()) wds)))))
+
+(def %sh-plain-field?
+  (fn (self v i n ifs)
+    (match
+      ((not (fx<? i n)) #t)
+      ((%sh-char-in? (string-ref v i) %sh-glob-meta) ())
+      ((%sh-in-ifs? (string-ref v i) ifs) ())
+      (#t (self v (fx+ i 1) n ifs)))))
 
 ; (ROP FD TS): the redirection, its target expanded now.
 (def %sh-redir-step
