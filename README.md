@@ -207,7 +207,7 @@ dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 
 ## Status
 
-The specs are green against x-lang **v0.17.0**, the release `lang.xon`
+The specs are green against x-lang **v0.19.0**, the release `lang.xon`
 declares. v0.15.0 or later is required: this shell names the base types
 through the door that release added, `(Type named INTEGER)`, rather than the
 handles type/convert.x keeps to itself.
