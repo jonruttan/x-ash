@@ -6462,13 +6462,23 @@
       (#t (%sh-run-builtin-redir name run args redirs)))))
 
 ; Whether a function found as F runs for NAME: it does unless NAME is a
-; special builtin.  Only a name some function has is asked about the specials.
+; special builtin.  Only a name some function has is asked about the specials,
+; and a name its token's facts say no builtin has is none of them (see
+; %sh-dispatch-builtin for when the facts are NAME's).
 (def %sh-fn-wins?
   (fn (_ name f)
     (match
       ((null? f) ())
+      ((%sh-no-builtin? name) #t)
       ((%sh-special-builtin? name) ())
       (#t #t))))
+
+(def %sh-no-builtin?
+  (fn (_ name)
+    (match
+      ((null? %sh-name-tok) ())
+      ((same? name (first (rest %sh-name-tok))) (null? (first (%sh-lit-facts %sh-name-tok))))
+      (#t ()))))
 
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error

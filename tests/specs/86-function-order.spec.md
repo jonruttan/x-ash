@@ -72,3 +72,11 @@ its own first line.
 ```
 ---
     echo is a shell function
+
+### in a loop, a function beats a builtin and a special builtin beats a function
+
+```sh
+(do (sh-eval "( for k in 1; do echo() { printf 'mine:%s\\n' \"$1\"; }; echo a; unset -f echo; f() { printf 'f\\n'; }; f; g() { printf 'g\\n'; }; g; done; eval() { printf 'fn\\n'; }; eval 'printf \"special\\n\"' ) 2>&1 | tr '\\n' ','; echo") ())
+```
+---
+    mine:a,f,g,special,
