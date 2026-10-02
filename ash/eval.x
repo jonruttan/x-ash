@@ -5260,12 +5260,31 @@
 
 ; `[ ... ]` is `test` with the closing bracket dropped.  Without one it is a
 ; usage error, 2, as it is in dash and bash: `[ a = a` does not answer true.
+;
+; Three words and then the `]`, and two, are what scripts write most, and are
+; read where they stand, as %sh-test reads three words and two; any other
+; count is taken without its `]` first.
 (def %sh-bracket
   (fn (_ wds)
-    (def inner (%sh-bracket-words wds ()))
+    (match
+      ((%sh-closed-after? wds 3)
+        (%sh-test-three (first wds) (first (rest wds)) (first (rest (rest wds)))))
+      ((%sh-closed-after? wds 2) (%sh-test-2 (first wds) (first (rest wds))))
+      (#t (%sh-bracket-taken (%sh-bracket-words wds ()))))))
+
+(def %sh-bracket-taken
+  (fn (_ inner)
     (match
       ((eq? inner (lit open)) (%sh-bracket-open))
       (#t (%sh-test inner)))))
+
+; Whether WDS are K words and then a closing `]`, and nothing after it.
+(def %sh-closed-after?
+  (fn (self wds k)
+    (match
+      ((null? wds) ())
+      ((= k 0) (match ((null? (rest wds)) (string=? (first wds) "]")) (#t ())))
+      (#t (self (rest wds) (fx+ k -1))))))
 
 ; The words WDS hold before their closing `]`, in order, taken in one walk, or
 ; `open` when the last word is no `]`.
