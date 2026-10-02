@@ -247,7 +247,8 @@
 (def %sys-fd-read (method-of Sys (lit fd-read)))
 (def %sys-fd-write (method-of Sys (lit fd-write)))
 (def %file-stat (method-of File (lit stat)))
-(def %file-lstat (method-of File (lit lstat)))
+(def %file-type (method-of File (lit type)))
+(def %file-ltype (method-of File (lit ltype)))
 (def %file-read-all (method-of File (lit read-all)))
 (def %file-list-dir (method-of File (lit list-dir)))
 (def %assoc-entry (method-of Assoc (lit entry)))
@@ -336,17 +337,12 @@
 (def sh-getcwd (fn (_) (%sys-getcwd Sys)))
 
 ; --- What `test` needs to know about a path ------------------------------
-; The key the platform's stat record holds a file's type under.
-(def %sh-file-type-key (lit file-type))
 
 ; The file-type symbol ('file, 'dir, 'link, ...) or nil when the path is not there
-; at all -- so one call answers -e, -f and -d, and a missing path is a nil
-; rather than a raise.  File stat raises a label 'io Err on failure, which for
-; a shell test is an ANSWER, not an error.
-(def sh-path-file-type
-  (fn (_ path)
-    (guard (_ ())
-      (rest (%assoc-entry Assoc %sh-file-type-key (%file-stat File path))))))
+; at all -- so one call answers -e, -f and -d.  (File type) reads the mode
+; alone and answers nil for a path that is not there, where (File stat)
+; decodes the whole record and raises.
+(def sh-path-file-type (fn (_ path) (%file-type File path)))
 
 (def sh-path-size
   (fn (_ path)
@@ -360,10 +356,7 @@
 
 ; The file type of the path itself, a symbolic link reporting 'link rather than
 ; its target's file type -- what `test -L` asks -- or nil when nothing is there.
-(def sh-lpath-file-type
-  (fn (_ path)
-    (guard (_ ())
-      (rest (%assoc-entry Assoc %sh-file-type-key (%file-lstat File path))))))
+(def sh-lpath-file-type (fn (_ path) (%file-ltype File path)))
 
 ; The last modification, in whole seconds, or nil when nothing is there --
 ; what `test -nt` and `-ot` compare.
