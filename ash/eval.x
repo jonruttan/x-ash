@@ -7622,7 +7622,7 @@
     (if (null? (rest cmds))
       ; Last command: evaluate directly
 
-      (let ((cur (%mk-cursor (first cmds)))) (%eval-command cur))
+      (%sh-run-stage (first cmds))
       ; Pipe: fork left, chain right
 
       (let ((p (%sh-pipe-create))
@@ -7639,7 +7639,7 @@
               (%sh-in-child
                 (fn (_)
                   (do
-                    (%eval-command (%mk-cursor left-tokens))
+                    (%sh-run-stage left-tokens)
                     %sh-status))))
             ; Parent: stdin ← pipe, continue chain
 
@@ -7648,6 +7648,13 @@
               (%sh-move-fd read-fd 0)
               (let ((result (%sh-pipe-chain rest-cmds)))
                 (%sh-pipe-status result (sh-wait pid))))))))))
+
+; A stage: a node the reader read (ash/reader.x), or its tokens.
+(def %sh-run-stage
+  (fn (_ stage)
+    (match
+      ((symbol? (first stage)) (%sh-run-pipe stage))
+      (#t (%eval-command (%mk-cursor stage))))))
 
 ; A pipeline's status is its last stage's.  Under pipefail it is the last
 ; stage's that failed: RIGHT is the answer for the stages after this one, and
@@ -7748,12 +7755,20 @@
 ;
 ; A function is (BODY . NODE): BODY the tokens of its compound command, and
 ; NODE the list they read into (%sh-run-fn-body), %sh-fn-unread until the
-; first call reads them, nil when the read leaves them to be walked.
+; first call reads them, nil when the read leaves them to be walked.  A body
+; the reader read already (ash/reader.x) is its list node, and the function
+; (() . NODE).
 (def %sh-fn-unread (list (lit unread)))
+
+(def %sh-fn-made
+  (fn (_ body)
+    (match
+      ((eq? (first body) (lit list)) (pair () body))
+      (#t (pair body %sh-fn-unread)))))
 
 (def %sh-define-fn
   (fn (_ name body)
-    (set! %sh-functions (pair (pair name (pair body %sh-fn-unread)) %sh-functions))
+    (set! %sh-functions (pair (pair name (%sh-fn-made body)) %sh-functions))
     (set! %sh-status 0)
     0))
 
@@ -10269,15 +10284,67 @@
 ; goes through the full entry.  The text is edited there as well, after the
 ; extraction (%sh-edit-text), so a fragment's continuations and
 ; dollar-single-quotes went with the text around it.
+;
+; The text is read a complete command at a time into items (sh-read, in
+; ash/reader.x), and each item runs before the next.  Aliases are substituted
+; as a command is read, and those in effect are only known by running the
+; commands before it: so text read while there are aliases, and the rest of a
+; text once one of its commands has made some, is run by the walk over its
+; tokens, which marks each command as it reaches it.
 (def sh-eval-extracted
   (fn (_ input)
-    (let ((tokens (sh-tokenize input)))
-      (match
-        ((null? tokens) 0)
-        ((null? %sh-sweeps?) (%sh-eval-tokens tokens))
-        ((%sh-list-longer? tokens %sh-sweep-long)
-          (%sh-sweeps-held (fn (_) (%sh-eval-tokens tokens))))
-        (#t (%sh-eval-tokens tokens))))))
+    (match
+      ((null? %sh-aliases) (%sh-rd-run (sh-read input)))
+      (#t (%sh-eval-walked (sh-tokenize input))))))
+
+(def %sh-eval-walked
+  (fn (_ tokens)
+    (match
+      ((null? tokens) 0)
+      ((null? %sh-sweeps?) (%sh-eval-tokens tokens))
+      ((%sh-list-longer? tokens %sh-sweep-long)
+        (%sh-sweeps-held (fn (_) (%sh-eval-tokens tokens))))
+      (#t (%sh-eval-tokens tokens)))))
+
+; The items ITEMS run in turn: the status the last command's, 0 when there is
+; none, and nothing changed for text with no token at all.  A long script's
+; items are one list, which a collect would walk as deep as it is long: sweeps
+; are held for it, as %sh-eval-walked holds them for a long token list.
+(def %sh-rd-run
+  (fn (_ items)
+    (match
+      ((null? items) 0)
+      ((null? %sh-sweeps?) (%sh-rd-run-items items ()))
+      ((%sh-list-longer? items %sh-sweep-long)
+        (%sh-sweeps-held (fn (_) (%sh-rd-run-items items ()))))
+      (#t (%sh-rd-run-items items ())))))
+
+(def %sh-rd-run-items
+  (fn (self items result)
+    (match
+      ((null? items) (match ((null? result) (%sh-set-status 0)) (#t result)))
+      ((eq? (first (first items)) (lit tok-newline)) (self (rest items) result))
+      ((eq? (first (first items)) (lit err)) (error (first (rest (first items)))))
+      (#t (%sh-rd-ran self items (%sh-run-list (first (rest (first items)))))))))
+
+; After the command at the head of ITEMS, which answered R: the rest walked
+; when the command made an alias.
+(def %sh-rd-ran
+  (fn (_ walk items r)
+    (match
+      ((null? %sh-aliases) (walk (rest items) r))
+      (#t (%sh-eval-walked
+            (%sh-normalize-tokens (%sh-rd-raw-of (rest items) ())))))))
+
+; The tokens ITEMS were read from, in order.
+(def %sh-rd-raw-of
+  (fn (self items acc)
+    (match
+      ((null? items) (reverse acc))
+      ((eq? (first (first items)) (lit tok-newline))
+        (self (rest items) (pair (first items) acc)))
+      (#t (self (rest items)
+                (%sh-push-fields (first (rest (rest (first items)))) acc))))))
 
 ; One complete command at a time, each marked just before it runs (see
 ; %sh-mark-walk).  The status is the last command's; text with no command in

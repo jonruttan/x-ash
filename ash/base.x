@@ -24,3 +24,4 @@
 
 (include-once "./tokens.x")
 (include-once "./eval.x")
+(include-once "./reader.x")

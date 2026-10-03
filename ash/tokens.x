@@ -1189,9 +1189,11 @@
 
 (def %sh-jit-adopt!
   (fn (_)
-    (def b (%sh-jit-base (first %sh-tok-types) (%sh-jit-compile!)))
+    (def entries (%sh-jit-compile!))
+    (def b (%sh-jit-base (first %sh-tok-types) entries))
     (set! %sh-cbase b)
     (set! %sh-active-raw (Base raw-of b))
+    (%sh-rd-adopt! entries)
     (lit active)))
 
 ; N more bytes to read: the attempt is made when they reach the threshold.
@@ -1215,6 +1217,7 @@
   (fn (_)
     (set! %sh-cbase ())
     (set! %sh-active-raw (Base raw-of %sh-base))
+    (%sh-rd-refused)
     (set! %sh-jit-states ())
     (lit failed)))
 

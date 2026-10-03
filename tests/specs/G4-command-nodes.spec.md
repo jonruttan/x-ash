@@ -4,12 +4,13 @@ A while or until loop is read once, where the evaluator meets it, into nodes:
 its condition and body, and the lists, and-or lists and pipelines in them.  So
 where each command ends, whether `&&`, `||` or `&` follows it, and where the
 loop's `do` and `done` stand are found once however often the loop goes round.
-A loop whose walks read otherwise -- malformed input -- is walked over its
-tokens as before, so its errors come where they always did.
+A malformed loop is refused when the command holding it is read, before any
+of it runs.
 
 The first three cases are pins that hold on main too; their expectations match
-`dash` and `/bin/sh`.  The fourth pins this shell's own errors, and holds on
-main too.  The last fails on main.
+`dash` and `/bin/sh`.  The fourth pins this shell's own error messages, each
+loop read in an `eval` of its own; `dash` refuses both without running any
+of them, as this does.  The last fails on main.
 
 ### lists, and-or lists, `!` and `&` in a loop's body
 
@@ -36,13 +37,13 @@ echo split; echo bg & wait; done ) | tr '\\n' ','; echo") ())
 ---
     alive,1,
 
-### a loop that reads otherwise fails where it always did
+### a malformed loop is refused before any of it runs
 
 ```sh
-(do (sh-eval "( while false; do echo x; fi; echo after ) 2>&1 | tr '\\n' ','; ( while false; echo x; done ) 2>&1 | tr '\\n' ','; echo") ())
+(do (sh-eval "( eval 'while false; do echo x; fi; echo after' ) 2>&1 | tr '\\n' ','; ( eval 'while false; echo x; done' ) 2>&1 | tr '\\n' ','; echo") ())
 ```
 ---
-    ash: parse error: unexpected EOF in while,x,ash: parse error: expected do,
+    ash: parse error: expected done,ash: parse error: expected do,
 
 ### a loop's commands are read once however often it goes round
 
