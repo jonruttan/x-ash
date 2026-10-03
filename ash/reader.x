@@ -722,24 +722,24 @@
   (fn (_ tok buf)
     (match
       ((%sh-rd-newline? tok) tok)
-      (#t (do (set! %sh-rd-start (list tok buf))
-              (%sh-base-eval %sh-rd-main %sh-rd-begin))))))
+      (#t (%sh-rd-command (%sh-rd-own tok) buf)))))
 
-; A command is read in the evaluator's base, not the reading base a handler
-; runs in: the engine's types an evaluation makes objects of are registered on
-; the base it runs in, and on the reading base their analysers would try every
-; token after.  Only `tok read` (%sh-rd-next) is evaluated in the reading base.
+; Everything a read handler makes is made in the evaluator's base, not the
+; reading base the engine calls the handler in: the token, and at the start of
+; a command its node.  An object made in the reading base registers its type
+; there, with that type's s-expression analyser, which would then try every
+; token after; and the evaluator's objects held from the reading base's chain
+; are not kept by its collects.  So the whole handler is evaluated in the
+; evaluator's base (%sh-rd-main), and only `tok read` (%sh-rd-next) in the
+; reading base.
 (def %sh-base-eval (prim-ref (lit base) (lit eval)))
 (def %sh-rd-main (%base))
-(def %sh-rd-start ())     ; the (TOK BUF) a command starts from
-(def %sh-rd-begin (lit (%sh-rd-begun)))
-
-(def %sh-rd-begun
-  (fn (_)
-    (%sh-rd-command (%sh-rd-own (first %sh-rd-start)) (first (rest %sh-rd-start)))))
 
 (def %sh-rd-wrap
-  (fn (_ read) (fn (_ . args) (%sh-rd-yield (apply read args) (first args)))))
+  (fn (_ read)
+    (def made (fn (_ args) (%sh-rd-yield (apply read args) (first args))))
+    (fn (_ . args)
+      (%sh-base-eval %sh-rd-main (list (list (lit lit) made) (list (lit lit) args))))))
 
 ; HANDLERS with their read handler wrapped.
 (def %sh-rd-handlers
