@@ -6,17 +6,15 @@
 ; the shell, and gives the loop one reader that uses the editor when there is
 ; a terminal to drive and the byte reader otherwise.
 ;
-; Colour comes from the shell's own tokenizer: sh-tokenize decides what is a
-; word, an operator or a quoted string, and this file only locates each
-; token's bytes in the line so the display keeps the author's spacing.  The
-; one thing it scans for itself is the extent of a quoted string, since the
-; tokenizer answers a string's contents rather than its span.
+; Colour comes from a Lexer whose tokens cover every byte of the line, each
+; drawn in the colour its tag names (see "colour" below).
 
 (import x/type/class)
 (import x/type/str)
 (import x/type/list)
 (import x/sys/file)
 (import x/sys/posix)
+(import x/reader/lexer)
 ; The editor, when the platform has one.  Imported here rather than left to
 ; the launcher so that its Line class exists when the completer is installed
 ; below; a platform without it leaves the guard to answer.
@@ -62,6 +60,18 @@
       (do (%ash-show-prompt prompt) (sh-read-line)))))
 
 ; --- colour -------------------------------------------------------------------
+;
+; A line is coloured by the tokens of a Lexer (x/reader/lexer) whose rules read
+; every byte, through the platform's (Paint lexer): each token is drawn as the
+; bytes it read, in the colour its tag names, so the display keeps the
+; author's spacing without a scan of its own.  Blanks are a run rather than
+; dropped, and a comment, a string or a word still open at the end of the
+; line -- the normal state of one being typed -- is a token to the end.
+;
+; The lexer is made on the first paint, which is the first prompt's redraw:
+; only an interactive session with colour on pays for it, and a script, a pipe
+; or an image write never does.  The Lexer remakes its own states after an
+; image load.
 
 ; The codes, read from the Ansi statics once per install rather than once per
 ; token: whether there is a terminal is a fact of the process, so the install
@@ -71,7 +81,6 @@
 (def %ash-c-string "")
 (def %ash-c-variable "")
 (def %ash-c-comment "")
-(def %ash-c-reset "")
 
 (def %ash-paint-install!
   (fn (_)
@@ -80,106 +89,76 @@
       (set! %ash-c-builtin (Ansi cyan))
       (set! %ash-c-string (Ansi green))
       (set! %ash-c-variable (Ansi yellow))
-      (set! %ash-c-comment (Ansi dim))
-      (set! %ash-c-reset (Ansi reset)))))
+      (set! %ash-c-comment (Ansi dim)))))
 
-; One coloured piece onto the reversed segment list; an empty code pushes the
-; bare text, so nothing emits a stray reset.
-(def %ash-seg
-  (fn (_ segs code text)
-    (if (= 0 (Str8 length text)) segs
-      (if (= 0 (Str8 length code)) (pair text segs)
-        (pair %ash-c-reset (pair text (pair code segs)))))))
+; A word's span is read in context w, which no byte closes; each context is
+; (NAME CLOSE ESC OPENS), an opener entering a context whose close returns to
+; the one it was entered from, so `"$(echo ")")"` is one span.
+(def %ash-paint-contexts
+  (list
+    (list (lit w) () 92
+      (list (pair "\"" (lit dq)) (pair "'" (lit sq)) (pair "$(" (lit cmd))
+            (pair "${" (lit brace)) (pair "`" (lit bq))))
+    (list (lit dq) 34 92
+      (list (pair "$(" (lit cmd)) (pair "${" (lit brace)) (pair "`" (lit bq))))
+    (list (lit sq) 39 () ())
+    (list (lit cmd) 41 92
+      (list (pair "(" (lit cmd)) (pair "\"" (lit dq)) (pair "'" (lit sq))
+            (pair "${" (lit brace)) (pair "`" (lit bq))))
+    (list (lit brace) 125 92
+      (list (pair "\"" (lit dq)) (pair "'" (lit sq)) (pair "$(" (lit cmd))
+            (pair "${" (lit brace)) (pair "`" (lit bq))))
+    (list (lit bq) 96 92
+      (list (pair "'" (lit sq)) (pair "\"" (lit dq)) (pair "$(" (lit cmd))))))
 
-; The bytes between the last token and the next, uncoloured.
-(def %ash-gap
-  (fn (_ s from to segs)
-    (if (>= from to) segs (pair (Str8 sub from (- to from) s) segs))))
+; `#` opens a comment only where a token starts: there the comment reads at
+; least as far as a word would, and listed first it wins a tie.
+(def %ash-paint-rules
+  (fn (_)
+    (list
+      (Lexer run (lit blank) " \t" " \t")
+      (Lexer table (lit nl) (list "\n"))
+      (Lexer until (lit comment) "#" "\n" (lit to-end))
+      (Lexer run (lit io) (list (pair 48 57)) (list (pair 48 57)) "<>")
+      (Lexer table (lit op)
+        (list ";" ";;" "&" "&&" "|" "||" "(" ")" "<" ">" "<<" ">>" "<&" ">&" "<>" ">|" "<<-"))
+      (Lexer until (lit sq) "'" "'" (lit take) (lit to-end))
+      (Lexer nested (lit dq) "\"" (lit dq) (rest %ash-paint-contexts) (lit to-end))
+      (Lexer word (lit word) (lit w) %ash-paint-contexts " \t\n;&|<>()" (lit to-end)))))
 
-; Where `text` next occurs at or after `from`, or nil.
-(def %ash-find
-  (fn (_ s text from n)
-    (if (>= from n) ()
-      (let ((i (Str8 index-of text (Str8 sub from (- n from) s))))
-        (if (null? i) () (+ from i))))))
-
-; The first quote character at or after `from`, or nil.
-(def %ash-quote-from
-  (fn (self s from n)
-    (if (>= from n) ()
-      (let ((c (Str8 ref from s)))
-        (if (if (eq? c #\") #t (eq? c #\')) from (self s (+ from 1) n))))))
-
-; The offset just past the string opened by the quote at `q`, or n when it
-; is not closed.  A backslash inside double quotes escapes the next byte.
-(def %ash-quote-end
-  (fn (_ s q n)
-    (let ((open (Str8 ref q s)))
-      (let ((go (fn (self i)
-                  (if (>= i n) n
-                    (let ((c (Str8 ref i s)))
-                      (match
-                        ((eq? c open) (+ i 1))
-                        ((if (eq? open #\") (eq? c #\\) #f) (self (+ i 2)))
-                        (#t (self (+ i 1)))))))))
-        (go (+ q 1))))))
-
-(def %ash-builtin-names
-  (fn (_) (List map first %sh-builtin-table)))
-
-; The code for a word: a reserved word, a builtin, a variable reference, or
-; nothing.
+; A word's colour: a reserved word, a builtin, a variable reference, or none.
+; The builtin names are taken once, when the painter is made.
+(def %ash-builtin-names ())
 (def %ash-word-code
-  (fn (_ label text)
-    (if (not (eq? label (lit tok-word))) ""
-      (match
-        ((List includes? text %sh-reserved-words) %ash-c-reserved-word)
-        ((List includes? text (%ash-builtin-names)) %ash-c-builtin)
-        ((if (> (Str8 length text) 0) (eq? (Str8 ref 0 s-dollar) (Str8 ref 0 text)) #f) %ash-c-variable)
-        (#t "")))))
-(def s-dollar "$")
+  (fn (_ text)
+    (match
+      ((List includes? text %sh-reserved-words) %ash-c-reserved-word)
+      ((List includes? text %ash-builtin-names) %ash-c-builtin)
+      ((if (> (Str8 length text) 0) (eq? (Str8 ref 0 text) #\$) #f) %ash-c-variable)
+      (#t ()))))
 
-; What is left after the last token: a comment from its `#`, an unclosed
-; string from its quote, or plain bytes.
-(def %ash-paint-tail
-  (fn (_ s from n segs)
-    (if (>= from n) segs
-      (let ((hash (%ash-find s "#" from n))
-            (q (%ash-quote-from s from n)))
-        (match
-          ((if (null? hash) #f (if (null? q) #t (< hash q)))
-            (%ash-seg (%ash-gap s from hash segs) %ash-c-comment (Str8 sub hash (- n hash) s)))
-          ((not (null? q))
-            (%ash-seg (%ash-gap s from q segs) %ash-c-string (Str8 sub q (- n q) s)))
-          (#t (%ash-gap s from n segs)))))))
+(def %ash-painter ())
 
+(def %ash-painter-make
+  (fn (_)
+    (set! %ash-builtin-names (List map first %sh-builtin-table))
+    (Paint lexer (Lexer make (%ash-paint-rules) "\n")
+      (list (pair (lit comment) (fn (_ t) %ash-c-comment))
+            (pair (lit sq) (fn (_ t) %ash-c-string))
+            (pair (lit dq) (fn (_ t) %ash-c-string))
+            (pair (lit word) %ash-word-code)))))
+
+; The seam the editor calls: (%repl-paint window marks before).  Guarded, and
+; the line drawn plain, if the painter cannot be made.
 (def %ash-paint
-  (fn (_ s)
+  (fn (_ s . more)
     (if (not (guard (_ #f) (Ansi enabled?))) s
       (guard (_ s)
-        (let ((n (Str8 length s)))
-          (let ((go (fn (self toks at segs)
-                      (if (null? toks) (%ash-paint-tail s at n segs)
-                        (let ((label (first (first toks)))
-                              (text (if (null? (rest (first toks))) "" (first (rest (first toks))))))
-                          (match
-                            ((eq? label (lit tok-newline)) (self (rest toks) at segs))
-                            ((if (eq? label (lit tok-dq)) #t (eq? label (lit tok-sq)))
-                              (let ((q (%ash-quote-from s at n)))
-                                (if (null? q) (%ash-paint-tail s at n segs)
-                                  (let ((e (%ash-quote-end s q n)))
-                                    (self (rest toks) e
-                                          (%ash-seg (%ash-gap s at q segs) %ash-c-string
-                                                    (Str8 sub q (- e q) s)))))))
-                            (#t
-                              (let ((p (%ash-find s text at n)))
-                                (if (null? p) (%ash-paint-tail s at n segs)
-                                  (let ((e (+ p (Str8 length text))))
-                                    (self (rest toks) e
-                                          (%ash-seg (%ash-gap s at p segs)
-                                                    (%ash-word-code label text)
-                                                    (Str8 sub p (- e p) s)))))))))))))
-            (Str8 join "" (List reverse (go (sh-tokenize s) 0 ())))))))))
+        (do
+          (if (null? %ash-painter) (set! %ash-painter (%ash-painter-make)) ())
+          (%ash-painter s
+            (if (null? more) () (first more))
+            (if (if (null? more) #t (null? (rest more))) () (first (rest more)))))))))
 
 ; --- completion ---------------------------------------------------------------
 
