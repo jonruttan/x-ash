@@ -114,8 +114,10 @@
       (Lexer nested (lit tok-dq) "\"" (lit dq) (rest %sh-lexer-contexts))
       (Lexer word (lit tok-word) (lit w) %sh-lexer-contexts " \t\n;&|<>()" (lit to-end)))))
 
-; Made on the first read; the Lexer remakes its own base after an image load.
-(def %sh-lexer ())
+; Made at load, so a boot image carries it with its cache group's entries and
+; plan: after an image load the Lexer remakes its own base from what the image
+; holds, with no file read and no form made.
+(def %sh-lexer (Lexer make (%sh-lexer-rules) "\n"))
 
 ; --- Reading ------------------------------------------------------------------
 ; The Lexer's tokens are fresh lists in this heap, so a token whose label or
@@ -152,7 +154,6 @@
 
 (def sh-tokenize
   (fn (_ input)
-    (if (null? %sh-lexer) (set! %sh-lexer (Lexer make (%sh-lexer-rules) "\n")) ())
     (def toks (%sh-lexer read-str input))
     (%sh-tok-fix! toks)
     toks))
