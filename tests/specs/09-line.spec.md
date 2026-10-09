@@ -14,6 +14,31 @@ or a redirection target as a path, by the shell's own globbing.
 ---
     #t
 
+With colour on, a line is coloured by the tokens of the shell's colouring
+Lexer, each drawn as the bytes it read. These cases force colour on and set
+the codes to markers, since the harness has no terminal and its codes are
+empty; the reset code is empty for the same reason.
+
+### each token takes its colour, and a string or comment left open runs to the end
+
+```sh
+(do (import ash/line)
+    (eval (lit (set! %ansi? #t)) (module x/repl/ansi))
+    (set! %ash-c-reserved-word "<k>")
+    (set! %ash-c-builtin "<b>")
+    (set! %ash-c-string "<s>")
+    (set! %ash-c-variable "<v>")
+    (set! %ash-c-comment "<c>")
+    (let ((r (list (%ash-paint "if x \"a b\" $y 'c' 2>e # z")
+                   (%ash-paint "echo \"a $(b \"c\") d")
+                   (%ash-paint "b\" c" () "echo \"a ")
+                   (%ash-paint "x='a"))))
+      (eval (lit (set! %ansi? #f)) (module x/repl/ansi))
+      r))
+```
+---
+    ("<k>if x <s>\"a b\" <v>$y <s>'c' 2>e <c># z" "<b>echo <s>\"a $(b \"c\") d" "<s>b\" c" "x='a")
+
 The completer reads the buffer through one method, `before`, the text to the
 left of the cursor; a stand-in with that method is enough to test it, and
 lets these cases run on a platform that has no editor to build a buffer with.
