@@ -7,9 +7,12 @@ a character as its code point and allocates nothing, rather than with the
 platform's `<`, `<=` and `>=`, which are wrappers costing hundreds of heap
 objects a comparison.
 
-The classes are checked over every byte.  The costs are compared rather than
-counted: a character test must cost less than one platform comparison, and
-telling whether a name is all digits less than one conversion.
+The classes are checked over every byte.  A character test must cost less
+than one platform comparison, and telling whether a name is all digits less
+than one conversion.  A comparison is counted as what `(>= 5 1)` allocates on
+x-lang v0.29.0, 338 objects over what measuring an empty call costs; a loop
+of N comparisons, as the other specs write one, is 139 + 356N.  The counts
+are written out, so a faster `>=` leaves every bound where it was.
 
 ### the digits
 
@@ -80,7 +83,7 @@ The reader passes its analyse hooks an integer rather than a character.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-digit? #\5))) (cost (fn (_) (>= #\5 #\0)))))
+  (< (cost (fn (_) (%sh-digit? #\5))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t
@@ -90,7 +93,7 @@ The reader passes its analyse hooks an integer rather than a character.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-name-start? #\q))) (cost (fn (_) (>= #\q #\a)))))
+  (< (cost (fn (_) (%sh-name-start? #\q))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t

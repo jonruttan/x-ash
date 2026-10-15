@@ -8,8 +8,8 @@ environment.  An exported name, a name marked for export, one assigned under
 `set -a`, and a prefix assignment to a command still reach the environment.
 
 Expectations match `/bin/sh` and `dash`.  The first three cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### names and values
 
@@ -41,7 +41,7 @@ compares its tests.
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) ((fn (self i) (if (fx<? i 5) (do (%sh-assignment-name "i=6") (%sh-assignment-value "i=6") (self (fx+ i 1))) ())) 0)))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 12) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 4411)))
 ```
 ---
     #t

@@ -8,7 +8,7 @@ accumulator a word is built in are written in the forms that allocate least,
 with no closure made for a step of the plan.
 
 The first four cases are pins that hold on main too; their expectations match
-`/bin/sh` and `dash`.  The costs are compared rather than counted.
+`/bin/sh` and `dash`.  The costs are counted in comparisons, as spec 36 counts them.
 
 ### IFS as each change leaves it
 
@@ -50,7 +50,7 @@ The first four cases are pins that hold on main too; their expectations match
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (%sh-ifs)
-  (< (cost (fn (_) (%sh-ifs))) (cost (fn (_) (>= 5 1)))))
+  (< (cost (fn (_) (%sh-ifs))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t
@@ -62,7 +62,7 @@ The first four cases are pins that hold on main too; their expectations match
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (%sh-ifs)
   (< (cost (fn (_) (%sh-add-split %sh-acc-empty "5")))
-     (cost (fn (_) (do (>= 5 1) (>= 5 1))))))
+     (+ (cost (fn (_) ())) 676)))
 ```
 ---
     #t
@@ -82,7 +82,7 @@ in a loop's body does after the first time round.
   (%sh-ifs)
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
-                (cost (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1)))))))
+                (+ (cost (fn (_) ())) 1690))))
     (set! %sh-vars saved)
     got))
 ```

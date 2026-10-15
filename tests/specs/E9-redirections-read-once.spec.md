@@ -8,7 +8,7 @@ redirection, parking the descriptors it changes and putting them back are
 written in the forms that allocate least.
 
 The first five cases are pins that hold on main too; their expectations match
-`/bin/sh` and `dash`.  The cost is compared rather than counted.
+`/bin/sh` and `dash`.  The cost is counted in comparisons, as spec 36 counts them.
 
 ### each file operator
 
@@ -56,7 +56,7 @@ The first five cases are pins that hold on main too; their expectations match
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (semi (first (sh-tokenize "; :"))))
-  (< (cost (fn (_) (%redir-op? semi))) (cost (fn (_) (>= 5 1)))))
+  (< (cost (fn (_) (%redir-op? semi))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t

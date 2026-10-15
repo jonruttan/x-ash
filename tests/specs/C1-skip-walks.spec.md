@@ -8,8 +8,8 @@ inside what is skipped is balanced, and a subshell counts its parens but not a
 case pattern's.
 
 Expectations match `/bin/sh` and `dash`.  The first two cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### branches, loop bodies and clauses not taken
 
@@ -34,7 +34,7 @@ compares its tests.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (toks (%sh-mark-keywords (sh-tokenize "if true; then :; fi"))))
   (< (cost (fn (_) (%sh-skip-compound (%mk-cursor toks) 0 ())))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 10) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 3699)))
 ```
 ---
     #t

@@ -8,7 +8,7 @@ the integer doors.
 
 The first four cases are pins that hold on main too; their expectations match
 `dash` and `/bin/sh`.  A `case` with nothing after it is a parse error, as any
-other construct cut short is.  The costs are compared rather than counted.
+other construct cut short is.  The costs are counted in comparisons, as spec 36 counts them.
 
 ### if, elif and else across lines
 
@@ -55,7 +55,6 @@ other construct cut short is.  The costs are compared rather than counted.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (ge5 (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1))))
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
                (fn (_) (%eval-list (%mk-cursor ts)))))))
@@ -63,7 +62,7 @@ other construct cut short is.  The costs are compared rather than counted.
   (def one (run "case e in e) ;; esac"))
   (five)
   (one)
-  (< (- (cost five) (cost one)) (cost (fn (_) (do (ge5) (ge5) (ge5) (ge5))))))
+  (< (- (cost five) (cost one)) (+ (cost (fn (_) ())) 6776)))
 ```
 ---
     #t
@@ -73,7 +72,6 @@ other construct cut short is.  The costs are compared rather than counted.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (ge5 (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1))))
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
                (fn (_) (%eval-list (%mk-cursor ts)))))))
@@ -81,7 +79,7 @@ other construct cut short is.  The costs are compared rather than counted.
   (def one (run "for x in a; do done"))
   (five)
   (one)
-  (< (- (cost five) (cost one)) (cost (fn (_) (do (ge5) (ge5) (ge5) (ge5))))))
+  (< (- (cost five) (cost one)) (+ (cost (fn (_) ())) 6776)))
 ```
 ---
     #t

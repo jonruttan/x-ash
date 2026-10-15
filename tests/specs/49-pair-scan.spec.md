@@ -46,7 +46,7 @@ counted once per character.
       (s "for i in 1 2 3; do if [ $i -gt 1 ]; then echo big $i; else echo small; fi; done"))
   (let ((base (cost (fn (_) ()))))
     (< (- (cost (fn (_) (%sh-str-has-heredoc-op? s))) base)
-       (* (string-length s) (- (cost (fn (_) (>= 5 1))) base)))))
+       (* (string-length s) 338))))
 ```
 ---
     #t
