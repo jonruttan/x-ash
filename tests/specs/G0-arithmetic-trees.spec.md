@@ -78,7 +78,7 @@ in a loop's body does after the first time round.
   (%sh-var-set! "i" "5")
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
-                (cost (fn (_) ((fn (self k) (if (fx<? k 8) (do (>= k 3) (self (fx+ k 1))) ())) 0))))))
+                (+ (cost (fn (_) ())) 2987))))
     (set! %sh-vars saved)
     got))
 ```

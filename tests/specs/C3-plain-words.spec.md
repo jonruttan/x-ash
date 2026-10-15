@@ -8,8 +8,8 @@ directory, `set -f` still stops it there, and a pattern that matches nothing
 stands with its escapes removed.
 
 Expectations match `/bin/sh` and `dash`.  The first three cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### plain, quoted and wildcard words
 
@@ -42,7 +42,7 @@ compares its tests.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (tok (first (%sh-mark-keywords (sh-tokenize "-lt")))))
   (< (cost (fn (_) ((fn (self i) (if (fx<? i 10) (do (%sh-expand-tok tok ()) (self (fx+ i 1))) ())) 0)))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 20) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 7259)))
 ```
 ---
     #t

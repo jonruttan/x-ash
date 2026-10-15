@@ -8,8 +8,8 @@ stands, decides with `match` and binds with `def`, so the steps cost less
 than the command they carry.
 
 Expectations match `/bin/sh` and `dash`.  The first four cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### separators, connectives and negation
 
@@ -53,7 +53,7 @@ runs.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (toks (%sh-mark-keywords (sh-tokenize ": ; :"))))
   (< (cost (fn (_) (%eval-list (%mk-cursor toks))))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 40) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 14379)))
 ```
 ---
     #t

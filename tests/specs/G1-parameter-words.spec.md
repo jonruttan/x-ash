@@ -46,7 +46,7 @@ token is expanded once before it is measured, so it holds its plan.
   (%sh-var-set! "i" "5")
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
-                (cost (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1)))))))
+                (+ (cost (fn (_) ())) 1014))))
     (set! %sh-vars saved)
     got))
 ```
@@ -63,7 +63,7 @@ token is expanded once before it is measured, so it holds its plan.
   (%sh-var-set! "x" "abc")
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
-                (cost (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1)))))))
+                (+ (cost (fn (_) ())) 1014))))
     (set! %sh-vars saved)
     got))
 ```

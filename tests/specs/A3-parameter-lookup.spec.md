@@ -6,8 +6,8 @@ begins with a letter or underscore, and no special's does.  A positional
 parameter's number is read by the arithmetic reader's digit loop rather than
 `convert`, and the `}` that closes `${...}` is found on the integer doors.
 
-Expectations match `/bin/sh` and `dash`.  The costs are compared rather than
-counted, as spec 36 compares its tests.
+Expectations match `/bin/sh` and `dash`.  The costs are counted in
+comparisons, as spec 36 counts them.
 
 ### the characters that name a one-character parameter
 
@@ -85,7 +85,7 @@ specials is given an entry of its own.
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (%sh-brace-end "${i}" 2 4 0)))
-     (cost (fn (_) (do (>= #\i #\a) (>= #\} #\a))))))
+     (+ (cost (fn (_) ())) 676)))
 ```
 ---
     #t

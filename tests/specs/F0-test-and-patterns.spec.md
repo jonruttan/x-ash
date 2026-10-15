@@ -8,7 +8,7 @@ word is a pattern, and where a bracket expression in it ends, are scanned on
 the integer doors: the lone `[` of every test is such a word.
 
 The first four cases are pins that hold on main too; their expectations match
-`/bin/sh` and `dash`.  The costs are compared rather than counted.
+`/bin/sh` and `dash`.  The costs are counted in comparisons, as spec 36 counts them.
 
 ### integer operands, padded, signed and led by zeros
 
@@ -61,7 +61,7 @@ The first four cases are pins that hold on main too; their expectations match
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (%sh-glob-pattern? "abcdefghij")))
-     (cost (fn (_) (do (>= 5 1) (>= 5 1))))))
+     (+ (cost (fn (_) ())) 676)))
 ```
 ---
     #t

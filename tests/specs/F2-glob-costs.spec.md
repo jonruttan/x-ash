@@ -9,7 +9,7 @@ that allocate least.
 
 The first four cases are pins that hold on main too; their expectations match
 `dash`.  The next two count what a glob asks for: the names it compares and
-the paths it looks up.  The costs are compared rather than counted.
+the paths it looks up.  The costs are counted in comparisons, as spec 36 counts them.
 
 ### names come out in byte order
 
@@ -90,10 +90,9 @@ Forty names are read, none matches, and none is compared; the eleven that
 
 ```sh
 (let ((cost (fn (_ thunk)
-              (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (ge5 (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1)))))
+              (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (sh-sort-strings (list "g5.c" "g3.c" "g1.c" "g4.c" "g2.c"))))
-     (cost (fn (_) (do (ge5) (ge5) (ge5) (ge5))))))
+     (+ (cost (fn (_) ())) 6776)))
 ```
 ---
     #t
@@ -102,10 +101,9 @@ Forty names are read, none matches, and none is compared; the eleven that
 
 ```sh
 (let ((cost (fn (_ thunk)
-              (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (ge5 (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1)))))
+              (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (%sh-glob-split "usr/local/share/x/lib/*.x")))
-     (cost (fn (_) (do (ge5) (ge5) (ge5) (ge5))))))
+     (+ (cost (fn (_) ())) 6776)))
 ```
 ---
     #t
@@ -114,10 +112,9 @@ Forty names are read, none matches, and none is compared; the eleven that
 
 ```sh
 (let ((cost (fn (_ thunk)
-              (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (ge5 (fn (_) (do (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1) (>= 5 1)))))
+              (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (< (cost (fn (_) (%sh-pattern-match? "*[!a-z]" "f01.txt")))
-     (cost (fn (_) (do (ge5) (ge5) (ge5) (ge5))))))
+     (+ (cost (fn (_) ())) 6776)))
 ```
 ---
     #t
