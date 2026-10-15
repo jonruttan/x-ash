@@ -9,8 +9,8 @@ holds a metacharacter, `*`, `?`, `[` or `\`, which is what makes its field a
 pattern.
 
 Each character is decided by one match, and once a run has found a
-metacharacter it stops asking.  The cost is compared rather than counted: past
-a wildcard, a character costs less than one platform comparison.
+metacharacter it stops asking.  Past a wildcard, a
+character costs less than one comparison, counted as spec 36 counts it.
 
 The characters are printable ASCII, shown by code.
 
@@ -114,7 +114,7 @@ comparisons would otherwise count that overhead ten times.
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (let ((base (cost (fn (_) ()))))
     (< (- (cost (fn (_) (%sh-plain-run "*bcdefghij" 0 10 %sh-label-bare () ()))) base)
-       (* 10 (- (cost (fn (_) (>= 5 1))) base)))))
+       (* 10 338))))
 ```
 ---
     #t

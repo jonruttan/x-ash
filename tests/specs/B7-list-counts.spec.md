@@ -7,7 +7,7 @@ its words but the closing `]`, `shift` drops the first ones, `getopts` reads
 the word at `OPTIND`, and `$2` the second parameter.
 
 Expectations match `/bin/sh` and `dash`, and hold on main too.  The cost is
-compared rather than counted, as spec 36 compares its tests.
+counted in comparisons, as spec 36 counts them.
 
 ### what the walks answer
 
@@ -33,7 +33,7 @@ compared rather than counted, as spec 36 compares its tests.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (wds (list "5" "-lt" "20" "]")))
   (< (cost (fn (_) (take 3 wds)))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 4) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 1563)))
 ```
 ---
     #t

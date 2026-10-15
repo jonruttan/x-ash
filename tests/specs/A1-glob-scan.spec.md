@@ -6,9 +6,8 @@ escaped.  The scan runs over every character of every value, so it steps on
 the integer doors rather than the platform's `>=` and `+`, and asks each
 character with a `match`.
 
-The classes are checked over every byte.  The cost is compared rather than
-counted, as spec 36 compares its tests: a scan costs less than one platform
-comparison per character.
+The classes are checked over every byte.  A scan costs less than one
+comparison per character, counted as spec 36 counts it.
 
 ### every glob character
 
@@ -72,11 +71,7 @@ comparison per character.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (text "/usr/local/bin"))
   (< (cost (fn (_) (%sh-has-glob-meta? text)))
-     (cost (fn (_) ((fn (self i)
-                      (if (fx<? i (string-length text))
-                        (do (>= (string-ref text i) #\*) (self (fx+ i 1)))
-                        ()))
-                    0)))))
+     (+ (cost (fn (_) ())) 5040)))
 ```
 ---
     #t

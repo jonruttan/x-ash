@@ -7,7 +7,7 @@ to it.  A word that no mark made a keyword -- most of any command -- can end
 nothing and nests nothing, so it is taken without being asked.
 
 Expectations match `/bin/sh` and `dash`, and hold on main too.  The cost is
-compared rather than counted, as spec 36 compares its tests.
+counted in comparisons, as spec 36 counts them.
 
 ### compounds as stages, and the separators after them
 
@@ -32,9 +32,7 @@ compared rather than counted, as spec 36 compares its tests.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (toks (%sh-mark-keywords (sh-tokenize "echo a b c d e"))))
   (< (cost (fn (_) (%collect-stages (%mk-cursor toks) ())))
-     (cost (fn (_) ((fn (self i)
-                      (if (fx<? i 6) (do (>= i 3) (self (fx+ i 1))) ()))
-                    0)))))
+     (+ (cost (fn (_) ())) 2275)))
 ```
 ---
     #t

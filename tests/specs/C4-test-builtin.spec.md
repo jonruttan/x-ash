@@ -7,8 +7,8 @@ a bignum to its own comparison; a length is asked of the door too.  Each step
 binds with `def`.
 
 Expectations match `/bin/sh` and `dash`.  The first three cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### every numeric operator, signs included
 
@@ -41,7 +41,7 @@ compares its tests.
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (w (list "-n" "x" "]")))
   (< (cost (fn (_) ((fn (self i) (if (fx<? i 10) (do (%sh-bracket w) (self (fx+ i 1))) ())) 0)))
-     (cost (fn (_) ((fn (self i) (if (fx<? i 25) (do (>= i 3) (self (fx+ i 1))) ())) 0)))))
+     (+ (cost (fn (_) ())) 9039)))
 ```
 ---
     #t

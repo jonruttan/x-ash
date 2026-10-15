@@ -9,8 +9,8 @@ of operators its first character starts, longest spelling first, and a name's
 value and a decimal literal are read where they stand.
 
 The first three cases are pins that hold on main too, and their expectations
-match `/bin/sh` and `dash`.  The costs are compared rather than counted, as
-spec 36 compares its tests.
+match `/bin/sh` and `dash`.  The costs are counted in comparisons, as spec 36
+counts them.
 
 ### every comparison, at and around its edge
 
@@ -72,7 +72,7 @@ and the lookup answers that entry.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-cs-end "$((i+1))" 2 8 0))) (cost (fn (_) (>= 5 1)))))
+  (< (cost (fn (_) (%sh-cs-end "$((i+1))" 2 8 0))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t
@@ -87,7 +87,7 @@ The variables are restored afterwards, so `i` is set for this case alone.
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (%sh-var-set! "i" "5")
   (let ((got (< (cost (fn (_) (%sh-arith-eval "i+1")))
-                (cost (fn (_) ((fn (self i) (if (fx<? i 8) (do (>= i 3) (self (fx+ i 1))) ())) 0))))))
+                (+ (cost (fn (_) ())) 2987))))
     (set! %sh-vars saved)
     got))
 ```

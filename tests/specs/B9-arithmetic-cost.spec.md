@@ -9,8 +9,8 @@ characters of the operator after it, since every assignment operator is one
 to three characters ending in `=`.
 
 Expectations match `/bin/sh` and `dash`.  The first four cases are pins that
-hold on main too.  The cost is compared rather than counted, as spec 36
-compares its tests.
+hold on main too.  The cost is counted in comparisons, as spec 36
+counts them.
 
 ### every binary operator, applied from its entry
 
@@ -54,7 +54,7 @@ The variables are restored afterwards, so `i` is set for this case alone.
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (%sh-var-set! "i" "5")
   (let ((got (< (cost (fn (_) (%sh-arith-eval "i+1")))
-                (cost (fn (_) ((fn (self i) (if (fx<? i 20) (do (>= i 3) (self (fx+ i 1))) ())) 0))))))
+                (+ (cost (fn (_) ())) 7259))))
     (set! %sh-vars saved)
     got))
 ```
