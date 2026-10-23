@@ -23,7 +23,7 @@ expectation from `/bin/sh` and `dash`.
     (guard (e (sh-exit 5))
       (alloc-limit! (+ (Heap count) 45000000))
       (sh-eval (string-append (Str8 repeat 32000 "\n") "d8_long=reached"))
-      (sh-exit (if (string=? (%sh-var-get "d8_long") "reached") 7 3)))
+      (sh-exit (if (string=? (sh-var-get "d8_long") "reached") 7 3)))
     (write (sh-wait pid)))
   ())
 ```
@@ -56,7 +56,7 @@ expectation from `/bin/sh` and `dash`.
     (guard (e (sh-exit 5))
       (alloc-limit! (+ (Heap count) 30000000))
       (def build (fn (self n x acc) (if (= n 0) acc (self (- n 1) x (pair x acc)))))
-      (def n (length (%sh-glob-fields (build 30000 (%sh-field "a" () ()) ()))))
+      (def n (length (%sh-glob-fields (build 30000 (sh-field "a" () ()) ()))))
       (sh-exit (if (= n 30000) 7 3)))
     (write (sh-wait pid)))
   ())

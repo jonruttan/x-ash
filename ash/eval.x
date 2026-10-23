@@ -13,7 +13,24 @@
 ;   simple    = (word|redirect)+
 ; --- Shell state ---
 
+(module ash/eval)
+(import ash/prims
+  convert char->integer string-length string-ref substring string-append
+  string=? string? length reverse append map filter drop nth last fx<? fx+
+  sh-fork sh-exec sh-wait sh-exit sh-getpid sh-open-read sh-open-write
+  sh-open-append sh-open-rdwr sh-open-new sh-open-existing sh-close sh-dup2
+  sh-pipe sh-getenv sh-setenv sh-unsetenv sh-environ sh-chdir sh-getcwd
+  sh-path-file-type sh-path-size sh-path-mode sh-lpath-file-type
+  sh-path-mtime sh-read-file sh-read-line-fd sh-read-hit-eof? sh-read-all-fd
+  sh-list-dir sh-sort-strings sh-fd-write ash-int-type ash-join
+  ash-number->str str-append-2 token-read-str fx* set-first! set-rest!)
+(import ash/tokens
+  sh-tokenize mk-tok-word sh-digit? sh-op-start? sh-ws? sh-hd-jit sh-hd-raw
+  sh-hd-jit-tick!)
 (def %sh-status 0)
+; The last command's status, read from outside through sh-status: the name
+; itself is rebound by every command, and an import holds a copy.
+(def sh-status (fn (_) %sh-status))
 
 ; $$ IS THIS PROCESS'S, and it is read once because it cannot change for the
 ; life of a shell.  That makes it a value a state image must
@@ -137,7 +154,7 @@
 (def %sh-mark-reserved?
   (fn (_ val state)
     (match
-      ((eq? state (lit cmd)) (%sh-word-in? val %sh-reserved-words))
+      ((eq? state (lit cmd)) (%sh-word-in? val sh-reserved-words))
       ((eq? state (lit for-list)) (%sh-word-in? val %sh-for-list-words))
       ((eq? state (lit case-in)) (string=? val "in"))
       ((eq? state (lit pattern)) (string=? val "esac"))
@@ -390,9 +407,9 @@
 ; spells, and is never substituted.
 (def %sh-alias-plain?
   (fn (_ name)
-    (not (or (%sh-str-has-char? name #\\) (%sh-str-has-char? name #\')
-             (%sh-str-has-char? name #\") (%sh-str-has-char? name #\$)
-             (%sh-str-has-char? name #\`)))))
+    (not (or (sh-str-has-char? name #\\) (sh-str-has-char? name #\')
+             (sh-str-has-char? name #\") (sh-str-has-char? name #\$)
+             (sh-str-has-char? name #\`)))))
 
 (def %sh-alias-in-use?
   (fn (self name subs)
@@ -564,7 +581,7 @@
   (fn (_ name) (when (string=? name "PATH") (set! %sh-hashed ()))))
 
 ; The value of NAME, or () when it is unset.
-(def %sh-var-get
+(def sh-var-get
   (fn (_ name)
     (do
       (def v (%sh-table-get name %sh-vars))
@@ -586,7 +603,7 @@
 
 ; An assignment to a marked name, or an unset of one, is refused here.  POSIX
 ; makes it an error of the special builtin that tried it, which ends a shell
-; that is not interactive: the raise does that, and %sh-report says nothing
+; that is not interactive: the raise does that, and sh-report says nothing
 ; more, the refusal having been written here.
 (def %sh-readonly-refuse
   (fn (_ name)
@@ -673,7 +690,7 @@
 
 (def %sh-var-state
   (fn (_ name)
-    (let ((v (%sh-var-get name)))
+    (let ((v (sh-var-get name)))
       (if (null? v) () (pair v (%sh-var-exported? name))))))
 
 (def %sh-local-save!
@@ -722,7 +739,7 @@
         ((%sh-var-exported? name) ())
         (#t (set! %sh-export-marks (pair name %sh-export-marks)))))))
 
-(def %sh-reserved-words
+(def sh-reserved-words
   (list "if" "then" "elif" "else" "fi"
         "while" "until" "for" "do" "done"
         "case" "in" "esac" "!" "{" "}"))
@@ -744,7 +761,7 @@
 (def %sh-block-closers (list "fi" "done" "esac" "}"))
 
 (def %reserved-word?
-  (fn (_ word) (%sh-word-in? word %sh-reserved-words)))
+  (fn (_ word) (%sh-word-in? word sh-reserved-words)))
 
 ; What a reserved word does, as the lists above say it, read once when the
 ; marking walk marks the word and kept as its mark, so that the scans that
@@ -853,7 +870,7 @@
 ;
 ; An unset variable expands to the empty string unless `set -u` is on.
 
-; %sh-digit? is tokens.x's.  These classify characters out of string-ref, so
+; sh-digit? is tokens.x's.  These classify characters out of string-ref, so
 ; they compare with the unchecked integer door -- see ash/prims.x.
 (def %sh-name-start?
   (fn (_ c)
@@ -865,7 +882,7 @@
       (#t (not (fx<? #\z c))))))
 
 (def %sh-name-char?
-  (fn (_ c) (match ((%sh-name-start? c) #t) (#t (%sh-digit? c)))))
+  (fn (_ c) (match ((%sh-name-start? c) #t) (#t (sh-digit? c)))))
 
 ; Is WORD a NAME: a letter or underscore, then letters, digits and
 ; underscores?  What every variable and function is called.
@@ -897,7 +914,7 @@
 ; caught.  The standard error in force is the one the message belongs on -- a
 ; subshell's, a pipeline stage's, a command substitution's -- and unwinding
 ; puts the shell's own back first, so a report written after it would go to the
-; wrong place.  The raise carries the sentinel %sh-report knows not to write
+; wrong place.  The raise carries the sentinel sh-report knows not to write
 ; again.  A simple command's own redirections are not in force yet, since a
 ; word is expanded before they are applied, which is where both shells write
 ; it too.
@@ -963,6 +980,7 @@
       (#t ()))))
 
 (def %sh-args ())
+(def sh-args! (fn (_ v) (set! %sh-args v)))
 (def %sh-functions ())
 (def %sh-fn-depth 0)
 (def %sh-dot-depth 0)
@@ -970,8 +988,8 @@
 
 ; `set -x` echoes the command as a person would have typed it, so it joins
 ; with a space whatever IFS happens to be.  Both joins are one concatenation
-; however many parameters there are (%ash-join).
-(def %sh-join-args (fn (_ args) (%ash-join " " args)))
+; however many parameters there are (ash-join).
+(def %sh-join-args (fn (_ args) (ash-join " " args)))
 
 ; WHAT GOES BETWEEN THE PARAMETERS in `$*`: the first character of IFS, and
 ; nothing at all when IFS is empty -- `IFS=:` makes `"$*"` `a:b:c`, `IFS=`
@@ -982,13 +1000,14 @@
     (let ((ifs (%sh-ifs)))
       (if (= (string-length ifs) 0) "" (substring ifs 0 1)))))
 
-(def %sh-join-params (fn (_ args) (%ash-join (%sh-ifs-join-char) args)))
+(def %sh-join-params (fn (_ args) (ash-join (%sh-ifs-join-char) args)))
 
 ; $0 is the shell itself, or what it was started to run: the script's path, or
 ; the name given after a `-c` command.  $1 upward index into %sh-args.  Out of
 ; range is the empty string, which is POSIX and is what `test -z "$1"` relies
 ; on.
 (def %sh-arg0 "ash")
+(def sh-arg0! (fn (_ v) (set! %sh-arg0 v)))
 (def %sh-arg-at
   (fn (_ n)
     (if (= n 0)
@@ -1000,11 +1019,11 @@
 ; The variables whose name is punctuation.  Thunks, because each is a question
 ; about the shell's current state rather than a stored value.
 (def %sh-special-vars
-  (list (pair "?" (fn (_) (%ash-number->str %sh-status)))
-        (pair "$" (fn (_) (%ash-number->str %sh-pid)))
-        (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (%ash-number->str %sh-bg-pid))))
+  (list (pair "?" (fn (_) (ash-number->str %sh-status)))
+        (pair "$" (fn (_) (ash-number->str %sh-pid)))
+        (pair "!" (fn (_) (if (null? %sh-bg-pid) "" (ash-number->str %sh-bg-pid))))
         (pair "-" (fn (_) (%sh-flags)))
-        (pair "#" (fn (_) (%ash-number->str (length %sh-args))))
+        (pair "#" (fn (_) (ash-number->str (length %sh-args))))
         ; $@ AND $* ARE THE SAME STRING ONLY HERE.  Quoted, they are not the
         ; same thing at all: `"$@"` is one field per parameter and never
         ; reaches this table -- %sh-add-all-params answers it directly, because
@@ -1036,7 +1055,7 @@
 ; there is no `set -u` here to make it an error.
 (def %sh-var-value-of-name
   (fn (_ name)
-    (def v (%sh-var-get name))
+    (def v (sh-var-get name))
     (match ((null? v) "") (#t v))))
 
 ; The end of the name run starting at I.
@@ -1179,7 +1198,7 @@
                       (pair (substring s start i) pieces)))
               (self s (fx+ i 2) n start pieces)))
           (#t (self s (fx+ i 1) n start pieces))))
-      (#t (%ash-join "" (reverse (pair (substring s start n) pieces)))))))
+      (#t (ash-join "" (reverse (pair (substring s start n) pieces)))))))
 
 (def %sh-bt-unescape
   (fn (_ text)
@@ -1294,10 +1313,10 @@
 (def %sh-prompt-defaults!
   (fn (_)
     (do
-      (when (null? (%sh-var-get "PS1"))
+      (when (null? (sh-var-get "PS1"))
         (%sh-var-set! "PS1" (if (= (Sys geteuid) 0) "# " "$ ")))
-      (when (null? (%sh-var-get "PS2")) (%sh-var-set! "PS2" "> "))
-      (when (null? (%sh-var-get "PS4")) (%sh-var-set! "PS4" "+ ")))))
+      (when (null? (sh-var-get "PS2")) (%sh-var-set! "PS2" "> "))
+      (when (null? (sh-var-get "PS4")) (%sh-var-set! "PS4" "+ ")))))
 (%sh-prompt-defaults!)
 (set! %image-recache-hooks
   (pair (fn (_) (%sh-prompt-defaults!)) %image-recache-hooks))
@@ -1307,9 +1326,9 @@
 ; tracing off, so a substitution in PS4 is not itself traced -- which would
 ; expand PS4 again -- and a value that fails to expand is shown as written, so
 ; a bad PS1 cannot stop the shell from reading.
-(def %sh-prompt
+(def sh-prompt
   (fn (_ name)
-    (let ((v (%sh-var-get name)) (trace %sh-opt-xtrace))
+    (let ((v (sh-var-get name)) (trace %sh-opt-xtrace))
       (if (null? v)
         ""
         (do
@@ -1323,7 +1342,7 @@
 (def %sh-ifs
   (fn (_)
     (match
-      ((null? %sh-ifs-kept) (%sh-ifs-keep (%sh-var-get "IFS")))
+      ((null? %sh-ifs-kept) (%sh-ifs-keep (sh-var-get "IFS")))
       (#t %sh-ifs-kept))))
 
 (def %sh-ifs-keep
@@ -1331,9 +1350,9 @@
     (set! %sh-ifs-kept (match ((null? v) %sh-ifs-default) (#t v)))
     %sh-ifs-kept))
 
-(def %sh-in-ifs? (fn (_ c ifs) (%sh-str-has-char? ifs c)))
+(def %sh-in-ifs? (fn (_ c ifs) (sh-str-has-char? ifs c)))
 
-(def %sh-str-has-char?
+(def sh-str-has-char?
   (fn (_ text c) (%sh-has-char-from? text c 0 (string-length text))))
 
 ; Whether TEXT holds C at I or after, before N.
@@ -1432,7 +1451,7 @@
 ; differs from the text in hand). The walk knows both as it writes.
 ; first/rest chains, not (nth n): nth is (List ref), a class dispatch that
 ; costs far more heap than a raw pair walk for the same reach.
-(def %sh-field (fn (_ text glob? esc?) (list text glob? esc?)))
+(def sh-field (fn (_ text glob? esc?) (list text glob? esc?)))
 (def %sh-field-text  (fn (_ f) (first f)))
 (def %sh-field-glob? (fn (_ f) (first (rest f))))
 (def %sh-field-esc?  (fn (_ f) (first (rest (rest f)))))
@@ -1459,7 +1478,7 @@
 
 ; The field in hand, materialized.  Only the two closers below need it.
 (def %sh-acc-cur
-  (fn (_ a) (%ash-join "" (reverse (%sh-acc-pieces a)))))
+  (fn (_ a) (ash-join "" (reverse (%sh-acc-pieces a)))))
 
 ; One piece, and what it contributes to the field in hand.  Anything literal
 ; starts a field, which is what makes `cmd ""` an empty argument.  Both flags
@@ -1482,7 +1501,7 @@
 (def %sh-acc-add-literal
   (fn (_ a text meta?)
     (%sh-acc-add-piece a
-      (match (meta? (%sh-glob-escape-all text)) (#t text))
+      (match (meta? (sh-glob-escape-all text)) (#t text))
       ()
       meta?)))
 
@@ -1513,7 +1532,7 @@
 
 ; The field in hand, as a field.
 (def %sh-acc-field
-  (fn (_ a) (%sh-field (%sh-acc-cur a) (%sh-acc-glob? a) (%sh-acc-esc? a))))
+  (fn (_ a) (sh-field (%sh-acc-cur a) (%sh-acc-glob? a) (%sh-acc-esc? a))))
 
 ; Close the field in hand and begin the next one -- which starts clean, so the
 ; flags do not leak from one field of a word into the next.
@@ -1594,10 +1613,10 @@
             (self text chars (fx+ i 1) i n
                   (pair "\\" (pair (substring text start i) pieces))))
           (#t (self text chars (fx+ i 1) start n pieces))))
-      (#t (%ash-join "" (reverse (pair (substring text start n) pieces)))))))
+      (#t (ash-join "" (reverse (pair (substring text start n) pieces)))))))
 
 ; Quoted text: nothing in it may match, so every metacharacter goes in escaped.
-(def %sh-glob-escape-all (fn (_ text) (%sh-escape-chars text %sh-glob-meta)))
+(def sh-glob-escape-all (fn (_ text) (%sh-escape-chars text %sh-glob-meta)))
 
 ; --- Splicing expanded text in --------------------------------------------
 ;
@@ -1923,7 +1942,7 @@
           (if (%sh-name-start? c)
             (substring inner 0 (%sh-name-end inner 0 n))
             (if (null? (%sh-table-get (substring inner 0 1) %sh-special-vars))
-              (if (%sh-digit? c) (substring inner 0 (%sh-ar-digits-end inner 0 n)) "")
+              (if (sh-digit? c) (substring inner 0 (%sh-ar-digits-end inner 0 n)) "")
               (substring inner 0 1))))))))
 
 ; Is the parameter unset?  `$!` is until a list has run in the background; any
@@ -1935,7 +1954,7 @@
       ((string=? name "!") (null? %sh-bg-pid))
       ((not (null? (%sh-table-get name %sh-special-vars))) ())
       ((%all-digits? name) (> (%sh-digits-int name) (length %sh-args)))
-      (#t (null? (%sh-var-get name))))))
+      (#t (null? (sh-var-get name))))))
 
 (def %sh-param-apply
   (fn (_ name op word)
@@ -1978,7 +1997,7 @@
         ; `${#:-x}` and `${##pat}`, which the arm below reads.
         ((and (> n 1) (= (string-ref inner 0) #\#)
               (= (string-length (%sh-param-name (substring inner 1 n))) (- n 1)))
-          (%ash-number->str
+          (ash-number->str
             (string-length (%sh-var-value-checked (substring inner 1 n)))))
         (else
           (let ((name (%sh-param-name inner)))
@@ -2083,7 +2102,7 @@
 (def %sh-tilde-home
   (fn (_ s i n assign? eq)
     (if (and (%sh-tilde-pos? s i assign? eq) (%sh-tilde-bare? s i n))
-      (let ((home (%sh-var-get "HOME")))
+      (let ((home (sh-var-get "HOME")))
         (if (or (null? home) (= (string-length home) 0)) () home))
       ())))
 
@@ -2158,7 +2177,7 @@
         (pair "/"  (fn (_ a b)
                      (if (= b 0)
                        (error "arithmetic: division by 0")
-                       (convert (/ a b) %ash-int-type))))
+                       (convert (/ a b) ash-int-type))))
         (pair "%"  (fn (_ a b)
                      (if (= b 0) (error "arithmetic: division by 0") (% a b))))
         ; Int-only operators, which is all POSIX arithmetic has: the tower's
@@ -2283,13 +2302,13 @@
   (fn (self s i n)
     (match
       ((fx<? i n)
-        (match ((%sh-digit? (string-ref s i)) (self s (fx+ i 1) n)) (#t i)))
+        (match ((sh-digit? (string-ref s i)) (self s (fx+ i 1) n)) (#t i)))
       (#t i))))
 
 (def %sh-hex-digit?
   (fn (_ c)
     (match
-      ((%sh-digit? c) #t)
+      ((sh-digit? c) #t)
       ((fx<? c #\A) ())
       ((not (fx<? #\F c)) #t)
       ((fx<? c #\a) ())
@@ -2300,7 +2319,7 @@
 (def %sh-digit-value
   (fn (_ c)
     (match
-      ((%sh-digit? c) (fx+ c -48))
+      ((sh-digit? c) (fx+ c -48))
       ((fx<? c #\a) (fx+ c -55))
       (#t (fx+ c -87)))))
 
@@ -2380,7 +2399,7 @@
     (match
       ((fx<? 1 n)
         (match
-          ((= (string-ref text 0) #\0) (%sh-digit? (string-ref text 1)))
+          ((= (string-ref text 0) #\0) (sh-digit? (string-ref text 1)))
           (#t ())))
       (#t ()))))
 
@@ -2408,7 +2427,7 @@
 
 (def %sh-ar-converted
   (fn (_ text)
-    (def v (guard (_ ()) (convert text %ash-int-type)))
+    (def v (guard (_ ()) (convert text ash-int-type)))
     (match ((null? v) 0) (#t v))))
 
 ; A variable's value is read as an integer constant with blanks around it and a
@@ -2430,7 +2449,7 @@
     (def len (string-length text))
     (match
       ((%sh-ar-decimal? text len) (%sh-ar-digits-value text 0 len 10))
-      ((%sh-digit? (string-ref text 0))
+      ((sh-digit? (string-ref text 0))
         (match
           ((%sh-ws-char? (string-ref text (fx+ len -1)))
             (%sh-ar-padded-num text len))
@@ -2448,7 +2467,7 @@
 ; parameter's, so the variables are asked directly.
 (def %sh-ar-var-num
   (fn (_ name)
-    (def v (%sh-var-get name))
+    (def v (sh-var-get name))
     (match ((null? v) 0) (#t (%sh-ar-value-num v)))))
 
 ; The index just past the last character of S before N that is not a blank.
@@ -2531,7 +2550,7 @@
   (fn (_ s i n c)
     (match
       ((%sh-name-start? c) (%sh-ar-name s i (%sh-name-end s (fx+ i 1) n)))
-      ((%sh-digit? c) (%sh-ar-literal s i (%sh-ar-number-end s i n)))
+      ((sh-digit? c) (%sh-ar-literal s i (%sh-ar-number-end s i n)))
       ((= c #\() (%sh-ar-closed s (%sh-ar-read-assignment s (fx+ i 1) n) n))
       ((= c #\-) (%sh-ar-unary (lit neg) (%sh-ar-read-primary s (fx+ i 1) n)))
       ((= c #\+) (%sh-ar-read-primary s (fx+ i 1) n))
@@ -2845,15 +2864,15 @@
 (def %sh-ar-store
   (fn (_ name op right)
     (def value (match ((null? op) right) (#t (op (%sh-ar-var-num name) right))))
-    (%sh-var-set! name (%ash-number->str value))
+    (%sh-var-set! name (ash-number->str value))
     value))
 
 ; The value of the expression TEXT, as the text of a number.
 (def %sh-arith-eval
-  (fn (_ text) (%ash-number->str (%sh-ar-run (%sh-ar-read text)))))
+  (fn (_ text) (ash-number->str (%sh-ar-run (%sh-ar-read text)))))
 
 (def %sh-arith-run
-  (fn (_ tree) (%ash-number->str (%sh-ar-run tree))))
+  (fn (_ tree) (ash-number->str (%sh-ar-run tree))))
 
 ; Is the `$(` text from I to E an arithmetic expansion rather than a command
 ; one: two characters or more, the first `(` and the last `)`?
@@ -3073,7 +3092,7 @@
         (%sh-expand-lone plan s split? assign? (rest plan)
           (%sh-plan-quoted-param? (rest plan))))
       ((%sh-plan-one-run? plan split?)
-        (list (%sh-field s (first (rest (rest (rest (first plan))))) ())))
+        (list (sh-field s (first (rest (rest (rest (first plan))))) ())))
       (#t (%sh-plan-run plan s (string-length s) split? assign? %sh-acc-empty)))))
 
 ; A word that is one parameter, bare or in double quotes -- `$x` or `"$x"`, the
@@ -3113,9 +3132,9 @@
   (fn (_ label v split?)
     (match
       ((%sh-has-glob-meta? v) (%sh-param-built label v split?))
-      ((= label %sh-label-dq) (list (%sh-field v () ())))
+      ((= label %sh-label-dq) (list (sh-field v () ())))
       ((%sh-splitting? split?) (%sh-param-split label v split?))
-      (#t (list (%sh-field v () ()))))))
+      (#t (list (sh-field v () ()))))))
 
 ; An unquoted value to split: none when empty, and the long way when it holds a
 ; character of IFS.
@@ -3125,7 +3144,7 @@
       ((= (string-length v) 0) ())
       ((%sh-has-ifs-from? v (%sh-ifs) 0 (string-length v))
         (%sh-param-built label v split?))
-      (#t (list (%sh-field v () ()))))))
+      (#t (list (sh-field v () ()))))))
 
 (def %sh-param-built
   (fn (_ label v split?)
@@ -3250,7 +3269,7 @@
       ((= c #\#) #t)
       ((= c #\@) #t)
       ((= c #\*) #t)
-      (#t (%sh-digit? c)))))
+      (#t (sh-digit? c)))))
 
 ; The `$` at I.  A `$` at the very end is a literal `$`.
 (def %sh-plan-dollar
@@ -3359,7 +3378,7 @@
                       (pair (substring text start i) pieces)))
               (#t (self text (fx+ i 1) start n pieces))))
           (#t (self text (fx+ i 1) start n pieces))))
-      (#t (%ash-join "" (reverse (pair (substring text start n) pieces)))))))
+      (#t (ash-join "" (reverse (pair (substring text start n) pieces)))))))
 
 ; Does this text hold a glob character the user meant AS one?  Escaped ones do
 ; not count, which is the whole point of the escaping, and neither does a `[`
@@ -3409,8 +3428,8 @@
   (fn (_ base name)
     (match
       ((= (string-length base) 0) name)
-      ((string=? base "/") (%str-append-2 "/" name))
-      (#t (%str-append-2 base (%str-append-2 "/" name))))))
+      ((string=? base "/") (str-append-2 "/" name))
+      (#t (str-append-2 base (str-append-2 "/" name))))))
 
 (def %sh-dir-of (fn (_ base) (match ((= (string-length base) 0) ".") (#t base))))
 
@@ -3548,12 +3567,12 @@
       (%sh-opt-noglob (list (%sh-field-plain f)))
       ((%sh-field-glob? f)
         (match
-          ((%sh-glob-pattern? (%sh-field-text f)) (%sh-glob-matches f))
+          ((%sh-glob-pattern? (%sh-field-text f)) (sh-glob-matches f))
           (#t (list (%sh-field-plain f)))))
       (#t (list (%sh-field-plain f))))))
 
 ; The names the pattern F matches, or F itself when it matches none.
-(def %sh-glob-matches
+(def sh-glob-matches
   (fn (_ f)
     (def segments (%sh-glob-split (%sh-field-text f)))
     (def hits
@@ -3574,7 +3593,7 @@
 (def %sh-glob-text
   (fn (_ text)
     (%sh-glob-field
-      (%sh-field text (%sh-glob-pattern? text) (%sh-has-backslash? text)))))
+      (sh-field text (%sh-glob-pattern? text) (%sh-has-backslash? text)))))
 
 ; One field is the common case, and its expansion is the answer, with nothing
 ; to append it to.  More are gathered in a loop onto an accumulator reversed
@@ -3652,7 +3671,7 @@
     (match
       ; No glob character and no backslash: its text is the pattern as it is.
       ((eq? (first tok) (lit tok-lit)) (%tok-word-val tok))
-      ((eq? (first tok) (lit tok-sq)) (%sh-glob-escape-all (%tok-word-val tok)))
+      ((eq? (first tok) (lit tok-sq)) (sh-glob-escape-all (%tok-word-val tok)))
       (#t (%sh-first-text
             (%sh-expand-plan (%sh-tok-plan tok ()) (%tok-word-val tok) (lit pattern)
                              ()))))))
@@ -3698,7 +3717,7 @@
   (fn (self s i len)
     (match
       ((= i len) #t)
-      ((%sh-digit? (string-ref s i)) (self s (fx+ i 1) len))
+      ((sh-digit? (string-ref s i)) (self s (fx+ i 1) len))
       (#t ()))))
 
 (def %all-digits?
@@ -3712,7 +3731,7 @@
   (fn (self word i n acc other)
     (match
       ((= i n) (match ((= n 0) (other word)) (#t acc)))
-      ((%sh-digit? (string-ref word i))
+      ((sh-digit? (string-ref word i))
         (self word (fx+ i 1) n (fx+ (fx* acc 10) (fx+ (string-ref word i) -48)) other))
       (#t (other word)))))
 
@@ -3725,7 +3744,7 @@
       ((fx<? 15 (string-length word)) (%sh-word-int-converted word))
       (#t (%sh-decimal-plain word 0 (string-length word) 0 %sh-word-int-converted)))))
 
-(def %sh-word-int-converted (fn (_ word) (convert word %ash-int-type)))
+(def %sh-word-int-converted (fn (_ word) (convert word ash-int-type)))
 
 ; The number S spells, S being digits only -- a descriptor, a here-document's
 ; index -- read by the arithmetic reader's digit loop rather than `convert`,
@@ -4029,7 +4048,7 @@
     (do
       (def suppress (if (null? wds) () (string=? (first wds) "-n")))
       (def r (%sh-echo-words (if suppress (rest wds) wds) () #t))
-      (display (%ash-join "" (reverse (rest r))))
+      (display (ash-join "" (reverse (rest r))))
       (if (if suppress #t (first r)) () (newline))
       0)))
 
@@ -4148,7 +4167,7 @@
                 (%sh-path-step kept (substring path start i)))
               (self (+ i 1) start kept)))))
       (let ((parts (reverse (walk 0 0 ()))))
-        (if (null? parts) "/" (string-append "/" (%ash-join "/" parts)))))))
+        (if (null? parts) "/" (string-append "/" (ash-join "/" parts)))))))
 
 ; Where an operand points, read against the logical directory rather than the
 ; resolved one.
@@ -4164,11 +4183,11 @@
 (def %sh-cd-destination
   (fn (_ wds)
     (if (null? wds)
-      (let ((home (%sh-var-get "HOME"))) (if (null? home) "/" home))
+      (let ((home (sh-var-get "HOME"))) (if (null? home) "/" home))
       (let ((operand (first wds)))
         (if (not (string=? operand "-"))
           operand
-          (let ((old (%sh-var-get "OLDPWD")))
+          (let ((old (sh-var-get "OLDPWD")))
             (if (or (null? old) (= (string-length old) 0)) () old)))))))
 
 ; `-L` and `-P`, for cd and pwd, and letters of them run together: whether the
@@ -4212,7 +4231,7 @@
 ; operand then stands as written.
 (def %sh-cdpath
   (fn (_ dir)
-    (let ((cdpath (%sh-var-get "CDPATH")))
+    (let ((cdpath (sh-var-get "CDPATH")))
       (match
         ((null? cdpath) ())
         ((= (string-length cdpath) 0) ())
@@ -4392,7 +4411,7 @@
 (def %sh-readonly-list
   (fn (self names)
     (unless (null? names)
-      (let ((v (%sh-var-get (first names))))
+      (let ((v (sh-var-get (first names))))
         (display "readonly ")
         (display (first names))
         (unless (null? v)
@@ -4861,7 +4880,7 @@
 (def %sh-read-unfold-from
   (fn (self line i n from out)
     (match
-      ((not (fx<? i n)) (%ash-join "" (reverse (pair (substring line from n) out))))
+      ((not (fx<? i n)) (ash-join "" (reverse (pair (substring line from n) out))))
       ((not (= (string-ref line i) #\\)) (self line (fx+ i 1) n from out))
       ((not (fx<? (fx+ i 1) n)) (self line n n from out))
       ((= (string-ref line (fx+ i 1)) #\newline)
@@ -4887,12 +4906,12 @@
     (def walk
       (fn (self j pieces)
         (if (>= j n)
-          (pair (%ash-join "" (reverse pieces)) j)
+          (pair (ash-join "" (reverse pieces)) j)
           (let ((c (string-ref line j)))
             (match
               ((and (not raw?) (= c #\\) (< (+ j 1) n))
                 (self (+ j 2) (pair (substring line (+ j 1) (+ j 2)) pieces)))
-              ((%sh-in-ifs? c ifs) (pair (%ash-join "" (reverse pieces)) j))
+              ((%sh-in-ifs? c ifs) (pair (ash-join "" (reverse pieces)) j))
               (#t (self (+ j 1) (pair (substring line j (+ j 1)) pieces))))))))
     (walk i ())))
 
@@ -4928,7 +4947,7 @@
     (def texts
       (fn (self rows out)
         (if (null? rows) out (self (rest rows) (pair (first (first rows)) out)))))
-    (%ash-join "" (texts kept ()))))
+    (ash-join "" (texts kept ()))))
 
 (def %sh-read-assign
   (fn (self names line i n ifs raw?)
@@ -4977,7 +4996,7 @@
           (unless (null? names)
             (%sh-read-assign names text 0 (string-length text)
                              (%sh-ifs) raw?))
-          (if (and (not (null? line)) (null? sh-read-hit-eof)) 0 1))))))
+          (if (and (not (null? line)) (null? (sh-read-hit-eof?))) 0 1))))))
 
 (def %sh-return
   (fn (_ wds)
@@ -5014,7 +5033,7 @@
       (let ((n (%sh-word-int (first wds))))
         (if (< n 1)
           (do
-            (%stderr (%ash-join "" (list "ash: " who ": " (first wds)
+            (%stderr (ash-join "" (list "ash: " who ": " (first wds)
                                          ": loop count out of range\n")))
             ())
           n)))))
@@ -5078,7 +5097,7 @@
 (def %sh-flag-letters
   (fn (self rows out)
     (if (null? rows)
-      (%ash-join "" (reverse out))
+      (ash-join "" (reverse out))
       (self (rest rows)
             (if (%sh-set-opt-on? (rest (first rows)))
               (pair (first (first rows)) out)
@@ -5144,7 +5163,7 @@
                 (do (%sh-set-opt-on! f on?) (self word on? (+ i 1) wds)))))))
       (#t (pair 0 wds)))))
 
-(def %sh-set
+(def sh-set
   (fn (self wds)
     (if (null? wds)
       0
@@ -5184,7 +5203,7 @@
 ; POSIX asks for a readable file.
 (def %sh-dot-text
   (fn (_ name)
-    (if (%sh-str-has-char? name #\/)
+    (if (sh-str-has-char? name #\/)
       (guard (e ()) (sh-read-file name))
       (%sh-dot-search name (%sh-split-char (%sh-var-value "PATH") #\:)))))
 
@@ -5255,7 +5274,7 @@
 
 (def %sh-exit
   (fn (_ wds)
-    (%sh-exit-shell
+    (sh-exit-shell
       (if (null? wds) %sh-status (%sh-word-int (first wds))))))
 
 ; `[ ... ]` is `test` with the closing bracket dropped.  Without one it is a
@@ -5394,7 +5413,7 @@
   (fn (self text rows)
     (if (null? rows)
       ()
-      (if (string=? text (%ash-number->str (rest (first rows))))
+      (if (string=? text (ash-number->str (rest (first rows))))
         (first (first rows))
         (self text (rest rows))))))
 
@@ -5422,7 +5441,7 @@
 (def %sh-escape-quotes
   (fn (self text i n out)
     (if (>= i n)
-      (%ash-join "" (reverse out))
+      (ash-join "" (reverse out))
       (self text (+ i 1) n
         (pair (if (= (string-ref text i) #\')
                 "'\\''"
@@ -5501,7 +5520,7 @@
 ; The exit trap sees the status the shell is leaving with as `$?`, and the
 ; shell still leaves with that status, whatever the trap's commands answer,
 ; unless the trap calls `exit` itself.
-(def %sh-exit-shell
+(def sh-exit-shell
   (fn (_ status)
     (set! %sh-status status)
     (%sh-run-exit-trap)
@@ -5511,7 +5530,7 @@
 ; structured error is rendered by the platform writer, since its memory read as
 ; a symbol name would print garbage bytes.
 (def %sh-write-to-str (prim-ref (lit io) (lit write-to-str)))
-(def %sh-report
+(def sh-report
   (fn (_ err)
     ; A raise carrying this sentinel was reported where it happened, and is
     ; raised to end the shell rather than to say anything more.
@@ -5521,21 +5540,21 @@
 ; The status an error ends a shell with: a forked child, a script run with -f,
 ; and a shell reading commands with no terminal.  dash says 2 for every error,
 ; bash 2 for a syntax error and 1 for the others.
-(def %sh-error-status 2)
+(def sh-error-status 2)
 
 ; What a forked child runs: THUNK answers the status the child exits with.  A
 ; raise ends the child here, since left to unwind it would carry on through the
 ; code of the shell that forked it, as a second copy of that shell.  A `return`
 ; or loop signal that nothing in the child caught ends it with the status the
 ; signal carries; any other error is reported, and ends it with
-; %sh-error-status.
+; sh-error-status.
 (def %sh-in-child
   (fn (_ thunk)
-    (%sh-exit-shell
+    (sh-exit-shell
       (guard (e (match
                   ((%sh-return? e) %sh-return-status)
                   ((not (null? (%sh-loop-signal-label e))) %sh-status)
-                  (#t (do (%sh-report e) %sh-error-status))))
+                  (#t (do (sh-report e) sh-error-status))))
         (thunk)))))
 
 ; --- getopts ------------------------------------------------------------------
@@ -5593,7 +5612,7 @@
 ; the script has moved OPTIND itself.
 (def %sh-getopts-optind
   (fn (_)
-    (let ((v (%sh-var-get "OPTIND")))
+    (let ((v (sh-var-get "OPTIND")))
       (let ((n (if (null? v) 1 (%sh-word-int v))))
         (unless (= n %sh-optind-seen) (set! %sh-optchar 1))
         n))))
@@ -5601,7 +5620,7 @@
 (def %sh-getopts-save
   (fn (_ optind)
     (set! %sh-optind-seen optind)
-    (%sh-var-set! "OPTIND" (%ash-number->str optind))))
+    (%sh-var-set! "OPTIND" (ash-number->str optind))))
 
 ; Finish one call: park OPTIND, set NAME and OPTARG, answer the status.
 (def %sh-getopts-yield
@@ -5731,7 +5750,7 @@
 (def %sh-where
   (fn (_ name)
     (match
-      ((%sh-str-has-char? name #\/)
+      ((sh-str-has-char? name #\/)
         (if (%sh-executable? name) (pair (lit file) name) ()))
       ((%reserved-word? name) (pair (lit keyword) name))
       ((not (null? (%sh-table-get name %sh-aliases)))
@@ -5955,7 +5974,7 @@
       status
       (do
         (def name (first ws))
-        (def w (if (%sh-str-has-char? name #\/) (lit path) (%sh-command-where name)))
+        (def w (if (sh-str-has-char? name #\/) (lit path) (%sh-command-where name)))
         (match
           ((null? w)
             (do (%stderr "ash: hash: " name ": not found\n") (self (rest ws) 1)))
@@ -5979,7 +5998,7 @@
 ; names are the table's keys rather than a separate list a dispatch repeats.
 ; `.` and `source` are the same handler under two names.  A name is found by
 ; walking the table, so the builtins a loop runs most come first.
-(def %sh-builtin-table
+(def sh-builtin-table
   (list (pair "["      %sh-bracket)
         (pair "test"   %sh-test)
         (pair "echo"   %sh-echo)
@@ -5988,7 +6007,7 @@
         (pair "false"  %sh-false)
         (pair "read"   %sh-read)
         (pair "shift"  %sh-shift)
-        (pair "set"    %sh-set)
+        (pair "set"    sh-set)
         (pair "local"  %sh-local)
         (pair "return" %sh-return)
         (pair "break"  %sh-break)
@@ -6013,7 +6032,7 @@
         (pair "hash"   %sh-hash)))
 
 (def %sh-builtin?
-  (fn (_ name) (not (null? (%sh-table-get name %sh-builtin-table)))))
+  (fn (_ name) (not (null? (%sh-table-get name sh-builtin-table)))))
 
 ; A builtin under redirection: park the descriptors, run, put them back. The
 ; guard restores and re-raises, so a builtin that raises with fd 1 still on a
@@ -6066,7 +6085,7 @@
 ; answer.
 (def %sh-command-exists?
   (fn (_ name)
-    (if (%sh-str-has-char? name #\/)
+    (if (sh-str-has-char? name #\/)
       (not (null? (sh-path-file-type name)))
       (%sh-path-has-file? name (%sh-split-char (%sh-var-value "PATH") #\:)))))
 
@@ -6135,7 +6154,7 @@
 
 (def %sh-lit-keep-facts
   (fn (_ tok text)
-    (def facts (pair (%sh-table-get text %sh-builtin-table) (%sh-declaration? text)))
+    (def facts (pair (%sh-table-get text sh-builtin-table) (%sh-declaration? text)))
     (set-rest! (rest tok) (list facts))
     facts))
 
@@ -6340,6 +6359,7 @@
 ; long script holds sweeps off until it ends (%sh-sweeps-held); a `for`
 ; list or parameters past that length are not held.
 (def %sh-sweeps? ())
+(def sh-sweeps! (fn (_ v) (set! %sh-sweeps? v)))
 (def %sh-sweep-every 64)
 (def %sh-sweep-left 64)
 (def %sh-sweep-holds 0)
@@ -6406,7 +6426,7 @@
   (fn (_ assigns remaining redirs)
     (match
       ((null? %sh-opt-xtrace) ())
-      (#t (%stderr (%sh-prompt "PS4") (%sh-join-args remaining) "\n")))
+      (#t (%stderr (sh-prompt "PS4") (%sh-join-args remaining) "\n")))
     (%sh-exit-on-error
      (%sh-set-status (%sh-run-scoped assigns remaining redirs)))))
 
@@ -6453,10 +6473,10 @@
   (fn (_ name args redirs)
     (def run
       (match
-        ((null? %sh-name-tok) (%sh-table-get name %sh-builtin-table))
+        ((null? %sh-name-tok) (%sh-table-get name sh-builtin-table))
         ((same? name (first (rest %sh-name-tok)))
           (first (%sh-lit-facts %sh-name-tok)))
-        (#t (%sh-table-get name %sh-builtin-table))))
+        (#t (%sh-table-get name sh-builtin-table))))
     (match
       ((null? run) (%sh-run-external name args redirs))
       (#t (%sh-run-builtin-redir name run args redirs)))))
@@ -6483,7 +6503,7 @@
 ; `set -e`: a failed command ends the shell, unless a condition is open.
 (def %sh-exit-on-error
   (fn (_ status)
-    (match ((%sh-should-exit? status) (%sh-exit-shell status)) (#t status))))
+    (match ((%sh-should-exit? status) (sh-exit-shell status)) (#t status))))
 
 ; A function under redirection, on the %sh-run-builtin-redir pattern.  Same
 ; guard, same reason: a body that raises with fd 1 pointing at a file would
@@ -7139,8 +7159,8 @@
   (fn (_ name c)
     (match
       ((string=? name "alpha") (%sh-name-start-letter? c))
-      ((string=? name "digit") (%sh-digit? c))
-      ((string=? name "alnum") (match ((%sh-digit? c) #t) (#t (%sh-name-start-letter? c))))
+      ((string=? name "digit") (sh-digit? c))
+      ((string=? name "alnum") (match ((sh-digit? c) #t) (#t (%sh-name-start-letter? c))))
       ((string=? name "upper") (match ((fx<? c #\A) ()) (#t (not (fx<? #\Z c)))))
       ((string=? name "lower") (match ((fx<? c #\a) ()) (#t (not (fx<? #\z c)))))
       ((string=? name "space")
@@ -7153,11 +7173,11 @@
         (match
           ((fx<? c 33) ())
           ((fx<? 126 c) ())
-          ((%sh-digit? c) ())
+          ((sh-digit? c) ())
           (#t (not (%sh-name-start-letter? c)))))
       ((string=? name "xdigit")
         (match
-          ((%sh-digit? c) #t)
+          ((sh-digit? c) #t)
           ((fx<? c #\A) ())
           ((fx<? c #\G) #t)
           ((fx<? c #\a) ())
@@ -8490,14 +8510,14 @@
     (match
       ((not (fx<? i n)) #t)
       ((%sh-ws-char? (string-ref line i)) #t)
-      (#t (%sh-op-start? (string-ref line i))))))
+      (#t (sh-op-start? (string-ref line i))))))
 
 ; The word from I.  PIECES holds its text so far with the quoting removed,
 ; latest first, and START is where the run not yet in PIECES began.
 (def %sh-hd-delim-from
   (fn (self line i n start pieces quoted?)
     (if (%sh-hd-delim-end? line i n)
-      (list (%ash-join "" (reverse (pair (substring line start i) pieces)))
+      (list (ash-join "" (reverse (pair (substring line start i) pieces)))
             i
             (not quoted?))
       (let ((c (string-ref line i)))
@@ -8590,7 +8610,7 @@
           (#t (%sh-hd-scan-bare line i n stack start? from out pending idx
                                 (string-ref line i)))))
       (#t
-        (list (%ash-join "" (reverse (pair (substring line from n) out)))
+        (list (ash-join "" (reverse (pair (substring line from n) out)))
               (reverse pending)
               stack)))))
 
@@ -8686,7 +8706,7 @@
       (let ((d (%sh-hd-delim line (if strip? (fx+ i 3) (fx+ i 2)) n)))
         (let ((e (first (rest d))))
           (%sh-hd-scan line e n stack () e
-            (pair (string-append "<<" (%ash-number->str idx))
+            (pair (string-append "<<" (ash-number->str idx))
                   (pair (substring line from i) out))
             (pair (list (first d) strip? (first (rest (rest d)))) pending)
             (fx+ idx 1)))))))
@@ -8788,10 +8808,10 @@
 (def %sh-hd-lines
   (fn (_ text)
     (do
-      (%sh-hd-jit-tick! (string-length text))
+      (sh-hd-jit-tick! (string-length text))
       (def s (string-append text "\n"))
-      (if (eq? %sh-hd-jit (lit active))
-        (pair #t (%token-read-str %sh-hd-raw s))
+      (if (eq? (sh-hd-jit) (lit active))
+        (pair #t (token-read-str (sh-hd-raw) s))
         (pair () (%sh-hd-cut s 0 0 (string-length s) ()))))))
 
 ; S, which ends in a newline, cut after each newline from I.
@@ -8892,9 +8912,9 @@
 (def %sh-comment-may-follow?
   (fn (_ c)
     (match
-      ((%sh-ws? c) #t)
+      ((sh-ws? c) #t)
       ((= c #\newline) #t)
-      (#t (%sh-op-start? c)))))
+      (#t (sh-op-start? c)))))
 
 ; For a `$` at I, the index of the `)` closing the `$(` it opens, or -1.
 (def %sh-subst-close
@@ -8970,7 +8990,7 @@
 (def %sh-apply-edits
   (fn (self s edits end acc)
     (match
-      ((null? edits) (%ash-join "" (pair (substring s 0 end) acc)))
+      ((null? edits) (ash-join "" (pair (substring s 0 end) acc)))
       ((pair? (first edits))
         (do
           (def from (first (first edits)))
@@ -9007,7 +9027,7 @@
 (def %sh-dsq-text
   (fn (self s i e out)
     (match
-      ((not (fx<? i e)) (%ash-join "" (reverse out)))
+      ((not (fx<? i e)) (ash-join "" (reverse out)))
       ((not (= (string-ref s i) #\\))
         (do
           (def j (%sh-backslash-from s i e))
@@ -10309,3 +10329,11 @@
 (def sh-eval
   (fn (_ input)
     (sh-eval-extracted (%sh-edit-text (%sh-heredoc-extract input)))))
+
+(provide ash/eval
+  sh-eval sh-eval-extracted
+  ; what ash/repl, ash/line and run.x read; the rebound state goes through
+  ; sh-status, sh-arg0!, sh-args! and sh-sweeps!
+  sh-status sh-arg0! sh-args! sh-sweeps! sh-exit-shell sh-error-status sh-report
+  sh-prompt sh-set sh-str-has-char? sh-var-get sh-field sh-builtin-table
+  sh-reserved-words sh-glob-escape-all sh-glob-matches)

@@ -82,13 +82,13 @@ and the lookup answers that entry.
 The variables are restored afterwards, so `i` is set for this case alone.
 
 ```sh
-(let ((saved %sh-vars)
+(let ((saved (%eval-ref (lit %sh-vars)))
       (cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (%sh-var-set! "i" "5")
   (let ((got (< (cost (fn (_) (%sh-arith-eval "i+1")))
                 (+ (cost (fn (_) ())) 2987))))
-    (set! %sh-vars saved)
+    (%eval-set! (lit %sh-vars) saved)
     got))
 ```
 ---

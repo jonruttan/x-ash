@@ -15,11 +15,10 @@
 ; So this printer's job is mostly to be quiet.  A nil result prints nothing, a
 ; status of 0 prints nothing, and anything else is displayed as-is.
 
-(provide ash/printer %ash-repl-print %ash-write)
-
 ; ash needs its own `write`: x's is round-trippable, so a token list renders as
 ; (('tok-word "a")) where the specs assert ((tok-word "a")). Only the rendering
 ; of a token differs; everything else delegates to x's writer.
+(module ash/printer)
 (def %ash-write ())
 (def %x-write write)
 (def %ash-write-items
@@ -37,7 +36,11 @@
       (if (symbol? v) (display v) (%x-write v)))))
 (def write %ash-write)
 
-(def %ash-repl-print
+(def ash-repl-print
   (fn (_ result)
     (unless (null? result) (%ash-write result))
     (newline)))
+
+; write is the platform's name, rebound to the shell's printer as before, now
+; by declaration.
+(provide ash/printer ash-repl-print (global write))

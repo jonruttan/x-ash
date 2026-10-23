@@ -19,15 +19,16 @@
 ; lang.xon declares, arms this bundle's root with import-path!, cats this file,
 ; and appends the launcher when no -f was given, so `import` below resolves
 ; against the bundle wherever it sits.
-(import ash/base)
-(import ash/repl)
-(import ash/line)
+(import ash/base ash-version)
+(import ash/repl ash-repl ash-banner ash-main)
+(import ash/printer ash-repl-print)
+(import ash/eval sh-sweeps!)
 
 (set! %lang-name "ASH Shell")
 (set! %lang-version ash-version)
 (set! %repl-prompt "$ ")
 ; A shell shows what the command printed; see ash/printer.x.
-(set! %repl-print %ash-repl-print)
+(set! %repl-print ash-repl-print)
 
 ; THE LOOP IS OURS, not the launcher's, and it always was: a shell's unit is a
 ; line of shell, not an s-expression.  These four lines were the whole of the
@@ -40,18 +41,18 @@
 ; Set as well as called: x.sh appends its own launcher (%banner then repl) when
 ; no file was named, and a bundle that only ever calls its loop leaves those two
 ; globals pointing at the sexp session for anything else that reaches them.
-(set! %banner %ash-banner)
-(set! repl %ash-repl)
+(set! %banner ash-banner)
+(set! repl ash-repl)
 
-; %ash-main reads the shell's arguments and starts what they ask for (see
+; ash-main reads the shell's arguments and starts what they ask for (see
 ; ash/repl.x).  With none it is the session, or batch (-f): stdin holds a shell
-; script, not a session, and %ash-repl's fd-3 swap would discard it unread.
+; script, not a session, and ash-repl's fd-3 swap would discard it unread.
 ; %batch? comes from the seam and means "a file was supplied". This line is
-; last and nothing structural may follow it -- %ash-main does not return.
+; last and nothing structural may follow it -- ash-main does not return.
 ;
 ; Not while this bundle is being imaged: the image writer loads this entry in a
 ; child to capture the booted lang, where %batch? is true and the child's stdin
-; is the writer's own script, which %ash-batch would run and (Sys exit) out of
+; is the writer's own script, which ash-batch would run and (Sys exit) out of
 ; the writer. %image-writing is bound in that child alone; a real boot raises
 ; Unbound and answers #f, so the guard chooses the session.
 ;
@@ -61,5 +62,5 @@
 (if (guard (_ #f) %image-writing)
   ()
   (do
-    (set! %sh-sweeps? #t)
-    (%ash-main (guard (_ ()) args))))
+    (sh-sweeps! #t)
+    (ash-main (guard (_ ()) args))))

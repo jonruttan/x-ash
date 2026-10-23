@@ -65,9 +65,9 @@ last counts the cursor's writes.
       (def thunk (run text))
       (thunk)
       (set! writes 0)
-      (set! set-first! (fn (_ p v) (set! writes (+ writes 1)) (saved p v)))
-      (guard (e (do (set! set-first! saved) (error e))) (thunk))
-      (set! set-first! saved)
+      (%ash-set! (lit set-first!) (fn (_ p v) (set! writes (+ writes 1)) (saved p v)))
+      (guard (e (do (%ash-set! (lit set-first!) saved) (error e))) (thunk))
+      (%ash-set! (lit set-first!) saved)
       writes))
   (list (count ":") (count ":; :") (count ": && :") (count "false || :")))
 ```

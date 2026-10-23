@@ -97,7 +97,7 @@
 ### runs two commands in sequence
 
 ```sh
-(do (sh-eval "echo a; echo b") %sh-status)
+(do (sh-eval "echo a; echo b") (sh-status))
 ```
 ---
     0
@@ -105,7 +105,7 @@
 ### last command in sequence sets status
 
 ```sh
-(do (sh-eval "true; false") %sh-status)
+(do (sh-eval "true; false") (sh-status))
 ```
 ---
     1
@@ -169,7 +169,7 @@
 ### iterates and sets variable
 
 ```sh
-(do (sh-eval "for i in a b c; do :; done") (string=? (%sh-var-get "i") "c"))
+(do (sh-eval "for i in a b c; do :; done") (string=? (sh-var-get "i") "c"))
 ```
 ---
     #t

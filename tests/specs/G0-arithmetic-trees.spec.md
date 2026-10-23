@@ -42,7 +42,7 @@ The expression in `: $((f9_i*2+1))` is scanned as often going round three times
 as going round once.
 
 ```sh
-(let ((saved %sh-ar-skip-ws)
+(let ((saved (%eval-ref (lit %sh-ar-skip-ws)))
       (scans 0)
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
@@ -51,12 +51,11 @@ as going round once.
     (fn (_ text)
       (def thunk (run text))
       (set! scans 0)
-      (set! %sh-ar-skip-ws
-        (fn (_ s i n)
+      (%eval-set! (lit %sh-ar-skip-ws) (fn (_ s i n)
           (set! scans (+ scans 1))
           (saved s i n)))
-      (guard (e (do (set! %sh-ar-skip-ws saved) (error e))) (thunk))
-      (set! %sh-ar-skip-ws saved)
+      (guard (e (do (%eval-set! (lit %sh-ar-skip-ws) saved) (error e))) (thunk))
+      (%eval-set! (lit %sh-ar-skip-ws) saved)
       scans))
   (= (count "for f9_i in 1; do : $((f9_i*2+1)); done")
      (count "for f9_i in 1 2 3; do : $((f9_i*2+1)); done")))
@@ -71,7 +70,7 @@ token is expanded once before it is measured, so it holds its plan, as a word
 in a loop's body does after the first time round.
 
 ```sh
-(let ((saved %sh-vars)
+(let ((saved (%eval-ref (lit %sh-vars)))
       (cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (tok (first (sh-tokenize "$((i*2+1))"))))
@@ -79,7 +78,7 @@ in a loop's body does after the first time round.
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
                 (+ (cost (fn (_) ())) 2987))))
-    (set! %sh-vars saved)
+    (%eval-set! (lit %sh-vars) saved)
     got))
 ```
 ---

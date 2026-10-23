@@ -39,7 +39,7 @@ The variables are restored afterwards, so `i` is set for this case alone.  The
 token is expanded once before it is measured, so it holds its plan.
 
 ```sh
-(let ((saved %sh-vars)
+(let ((saved (%eval-ref (lit %sh-vars)))
       (cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (tok (first (sh-tokenize "$i"))))
@@ -47,7 +47,7 @@ token is expanded once before it is measured, so it holds its plan.
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
                 (+ (cost (fn (_) ())) 1014))))
-    (set! %sh-vars saved)
+    (%eval-set! (lit %sh-vars) saved)
     got))
 ```
 ---
@@ -56,7 +56,7 @@ token is expanded once before it is measured, so it holds its plan.
 ### expanding `"$x"` costs less than three comparisons
 
 ```sh
-(let ((saved %sh-vars)
+(let ((saved (%eval-ref (lit %sh-vars)))
       (cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (tok (first (sh-tokenize "\"$x\""))))
@@ -64,7 +64,7 @@ token is expanded once before it is measured, so it holds its plan.
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
                 (+ (cost (fn (_) ())) 1014))))
-    (set! %sh-vars saved)
+    (%eval-set! (lit %sh-vars) saved)
     got))
 ```
 ---

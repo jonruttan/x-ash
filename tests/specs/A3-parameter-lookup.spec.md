@@ -59,11 +59,11 @@ A name that begins with a letter reaches the variables even when the table of
 specials is given an entry of its own.
 
 ```sh
-(let ((saved %sh-special-vars))
+(let ((saved (%eval-ref (lit %sh-special-vars))))
   (%sh-var-set! "pl" "variable")
-  (set! %sh-special-vars (pair (pair "pl" (fn (_) "special")) saved))
+  (%eval-set! (lit %sh-special-vars) (pair (pair "pl" (fn (_) "special")) saved))
   (let ((got (%sh-var-value "pl")))
-    (set! %sh-special-vars saved)
+    (%eval-set! (lit %sh-special-vars) saved)
     got))
 ```
 ---
@@ -74,7 +74,7 @@ specials is given an entry of its own.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-var-value "1"))) (cost (fn (_) (convert "1" %ash-int-type)))))
+  (< (cost (fn (_) (%sh-var-value "1"))) (cost (fn (_) (convert "1" ash-int-type)))))
 ```
 ---
     #t

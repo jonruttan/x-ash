@@ -21,7 +21,7 @@ are written out, so a faster `>=` leaves every bound where it was.
                (if (= i 256)
                  (list->string (reverse acc))
                  (self p (+ i 1) (if (p (integer->char i)) (pair (integer->char i) acc) acc))))))
-  (class %sh-digit? 0 ()))
+  (class sh-digit? 0 ()))
 ```
 ---
     "0123456789"
@@ -72,7 +72,7 @@ The reader passes its analyse hooks an integer rather than a character.
                 ((= i 256) #t)
                 ((eq? (if (p i) #t ()) (if (p (integer->char i)) #t ())) (self p (+ i 1)))
                 (#t i)))))
-  (list (same %sh-digit? 0) (same %sh-hex-digit? 0)
+  (list (same sh-digit? 0) (same %sh-hex-digit? 0)
         (same %sh-name-start? 0) (same %sh-name-char? 0)))
 ```
 ---
@@ -83,7 +83,7 @@ The reader passes its analyse hooks an integer rather than a character.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%sh-digit? #\5))) (+ (cost (fn (_) ())) 338)))
+  (< (cost (fn (_) (sh-digit? #\5))) (+ (cost (fn (_) ())) 338)))
 ```
 ---
     #t
@@ -103,7 +103,7 @@ The reader passes its analyse hooks an integer rather than a character.
 ```sh
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
-  (< (cost (fn (_) (%all-digits? "12"))) (cost (fn (_) (convert #\0 %ash-int-type)))))
+  (< (cost (fn (_) (%all-digits? "12"))) (cost (fn (_) (convert #\0 ash-int-type)))))
 ```
 ---
     #t

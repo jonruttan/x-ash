@@ -15,12 +15,12 @@
 ; The shell tokenizes on its own base, isolated from the sexp reader so that
 ; `;` and `#` mean what a shell means by them; see ash/prims.x.
 
-(import ash/prims)
+(module ash/base)
 (import ash/printer)
-
-(provide ash/base ash-version sh-tokenize sh-eval %sh-status %ash-repl-print)
 
 (def ash-version "0.1.0")
 
-(include-once "./tokens.x")
-(include-once "./eval.x")
+(import ash/tokens sh-tokenize)
+(import ash/eval sh-eval)
+
+(provide ash/base ash-version sh-tokenize sh-eval)

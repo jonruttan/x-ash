@@ -122,7 +122,7 @@ Cases that hold on main as well are stated as pins.
 ### the prompt does not wait for more after one holding \'
 
 ```sh
-(write (%ash-complete? "echo $'it\\'s'"))
+(write (ash-complete? "echo $'it\\'s'"))
 ```
 ---
     #t

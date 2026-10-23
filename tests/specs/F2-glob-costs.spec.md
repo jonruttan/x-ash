@@ -53,12 +53,12 @@ each of the two directories `*` reached.
 (let ((saved sh-path-file-type)
       (asked 0))
   (sh-eval "d=$(mktemp -d); mkdir -p \"$d/src\" \"$d/sub/a\" \"$d/sub/b\"; touch \"$d/src/x.c\" \"$d/sub/a/Makefile\"")
-  (set! sh-path-file-type (fn (_ path) (set! asked (+ asked 1)) (saved path)))
+  (%ash-set! (lit sh-path-file-type) (fn (_ path) (set! asked (+ asked 1)) (saved path)))
   (sh-eval "set -- $d/src/*.c")
   (def before asked)
   (sh-eval "set -- $d/sub/*/Makefile")
   (def after asked)
-  (set! sh-path-file-type saved)
+  (%ash-set! (lit sh-path-file-type) saved)
   (sh-eval "rm -rf \"$d\"")
   (list before (- after before)))
 ```
@@ -71,15 +71,15 @@ Forty names are read, none matches, and none is compared; the eleven that
 `n1*` keeps are.
 
 ```sh
-(let ((saved %str8-less)
+(let ((saved (%prims-ref (lit %str8-less)))
       (compared 0))
   (sh-eval "d=$(mktemp -d); i=0; while [ $i -lt 40 ]; do : > \"$d/n$i\"; i=$((i+1)); done")
-  (def dir (%sh-var-get "d"))
-  (set! %str8-less (fn (_ cls a b) (set! compared (+ compared 1)) (saved cls a b)))
+  (def dir (sh-var-get "d"))
+  (%prims-set! (lit %str8-less) (fn (_ cls a b) (set! compared (+ compared 1)) (saved cls a b)))
   (def none (length (%sh-glob-entries dir "*.nosuch")))
   (def none-compared compared)
   (def some (length (%sh-glob-entries dir "n1*")))
-  (set! %str8-less saved)
+  (%prims-set! (lit %str8-less) saved)
   (sh-eval "rm -rf \"$d\"")
   (list none none-compared some (< 0 compared)))
 ```

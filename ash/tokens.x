@@ -1,4 +1,6 @@
 ; tokens.x -- the shell's tokens, read by the platform's Lexer
+; lint-known: read-str
+; (read-str is sent to the lexer instance %sh-lexer, which the linter cannot see in a scoped module.)
 ;
 ; sh-tokenize reads a text into tokens through a Lexer (x/reader/lexer): the
 ; rules below become the types of a tokenizer base of its own, their states
@@ -15,12 +17,16 @@
 ; Usage:
 ;   (def tokens (sh-tokenize "echo hello | grep h"))
 ;   ; -> ((tok-word "echo") (tok-word "hello") (tok-op "|") (tok-word "grep") (tok-word "h"))
+(module ash/tokens)
+(import ash/prims
+  make-token-base base-make-type buffer-token char->integer string-length
+  string-ref substring fx<? fx+)
 (import x/reader/lexer)
 
 ; --- Helpers ---
 ; Predicate: is chr a shell whitespace (space or tab, NOT newline)?
 
-(def %sh-ws?
+(def sh-ws?
   (fn (_ c)
     (or
       (= c (char->integer #\space))
@@ -28,7 +34,7 @@
 ; Predicate: is chr a shell operator start character?
 ; | & ; < > ( )
 
-(def %sh-op-start?
+(def sh-op-start?
   (fn (_ c)
     (or
       (= c (char->integer #\|))
@@ -44,15 +50,15 @@
 (def %sh-word-break?
   (fn (_ c)
     (or
-      (%sh-ws? c)
+      (sh-ws? c)
       (= c (char->integer #\newline))
-      (%sh-op-start? c)
+      (sh-op-start? c)
       (= c (char->integer #\'))
       (= c (char->integer #\")))))
 
 ; A decimal digit -- the one definition; eval.x asks it too.  Its callers pass
 ; an integer and never nil, so the unchecked comparison is safe.
-(def %sh-digit?
+(def sh-digit?
   (fn (_ c) (match ((fx<? c #\0) ()) ((fx<? #\9 c) ()) (#t #t))))
 ; --- Token constructors ---
 
@@ -184,16 +190,18 @@
 (def %sh-hd-line-read (fn (_ . args) (list (buffer-token (first args)))))
 
 (def %sh-hd-raw ())             ; the raw base the lines are read with
+(def sh-hd-raw (fn (_) %sh-hd-raw))   ; read from ash/eval; the name is rebound
 (def %sh-hd-cbase ())           ; roots the base
 (def %sh-hd-jit-states ())
 (def %sh-hd-jit (lit off))      ; off | active | failed
+(def sh-hd-jit (fn (_) %sh-hd-jit))   ; likewise
 (def %sh-hd-jit-bytes 0)
 (def %sh-hd-jit-threshold 8192)
 
 (def %sh-hd-jit-compile!
   (fn (_)
     (do
-      (import x/tool/compile)
+      (import x/tool/compile compile-asm)   ; by name: inside a module a bare import binds nothing
       (def jc
         (fn (_ form)
           (do
@@ -220,7 +228,7 @@
       (set! %sh-hd-raw (Base raw-of b))
       (lit active))))
 
-(def %sh-hd-jit-tick!
+(def sh-hd-jit-tick!
   (fn (_ n)
     (if (eq? %sh-hd-jit (lit off))
       (do
@@ -242,3 +250,9 @@
   (pair (lit %sh-hd-raw) (pair (lit %sh-hd-cbase)
     (pair (lit %sh-hd-jit-states) %image-transients))))
 (set! %image-recache-hooks (pair (fn (_) (%sh-hd-reset!)) %image-recache-hooks))
+
+(provide ash/tokens
+  sh-tokenize mk-tok-newline mk-tok-op mk-tok-word mk-tok-sq mk-tok-dq mk-tok-io
+  ; what ash/eval reads: the character classes, and the heredoc lane's state
+  ; through sh-hd-jit and sh-hd-raw, since both names are rebound
+  sh-digit? sh-op-start? sh-ws? sh-hd-jit sh-hd-raw sh-hd-jit-tick!)

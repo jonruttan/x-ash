@@ -74,7 +74,7 @@ token is expanded once before it is measured, so it holds its plan, as a word
 in a loop's body does after the first time round.
 
 ```sh
-(let ((saved %sh-vars)
+(let ((saved (%eval-ref (lit %sh-vars)))
       (cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before))))
       (tok (first (sh-tokenize "$i"))))
@@ -83,7 +83,7 @@ in a loop's body does after the first time round.
   (%sh-expand-tok tok ())
   (let ((got (< (cost (fn (_) (%sh-expand-tok tok ())))
                 (+ (cost (fn (_) ())) 1690))))
-    (set! %sh-vars saved)
+    (%eval-set! (lit %sh-vars) saved)
     got))
 ```
 ---

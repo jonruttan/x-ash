@@ -21,7 +21,7 @@ The characters are printable ASCII, shown by code.
                (if (= c 127)
                  (reverse acc)
                  (self (+ c 1) mode tilde?
-                   (if (= 0 (%sh-run-end (%sh-plain-run (list->string (list (integer->char c))) 0 1 mode () tilde?)))
+                   (if (= 0 (%sh-run-end ((%eval-ref (lit %sh-plain-run)) (list->string (list (integer->char c))) 0 1 mode () tilde?)))
                      (pair c acc)
                      acc))))))
   (stops 32 %sh-label-bare () ()))
@@ -36,7 +36,7 @@ The characters are printable ASCII, shown by code.
                (if (= c 127)
                  (reverse acc)
                  (self (+ c 1) mode tilde?
-                   (if (= 0 (%sh-run-end (%sh-plain-run (list->string (list (integer->char c))) 0 1 mode () tilde?)))
+                   (if (= 0 (%sh-run-end ((%eval-ref (lit %sh-plain-run)) (list->string (list (integer->char c))) 0 1 mode () tilde?)))
                      (pair c acc)
                      acc))))))
   (stops 32 %sh-label-bare #t ()))
@@ -54,7 +54,7 @@ one word.
                (if (= c 127)
                  (reverse acc)
                  (self (+ c 1) mode tilde?
-                   (if (= 0 (%sh-run-end (%sh-plain-run (list->string (list (integer->char c))) 0 1 mode () tilde?)))
+                   (if (= 0 (%sh-run-end ((%eval-ref (lit %sh-plain-run)) (list->string (list (integer->char c))) 0 1 mode () tilde?)))
                      (pair c acc)
                      acc))))))
   (stops 32 %sh-label-dq () ()))
@@ -69,7 +69,7 @@ one word.
                (if (= c 127)
                  (reverse acc)
                  (self (+ c 1) mode tilde?
-                   (if (= 0 (%sh-run-end (%sh-plain-run (list->string (list (integer->char c))) 0 1 mode () tilde?)))
+                   (if (= 0 (%sh-run-end ((%eval-ref (lit %sh-plain-run)) (list->string (list (integer->char c))) 0 1 mode () tilde?)))
                      (pair c acc)
                      acc))))))
   (stops 32 %sh-label-sq () ()))
@@ -86,7 +86,7 @@ Read in single quotes, where a backslash does not end the run.
                (if (= c 127)
                  (reverse acc)
                  (self (+ c 1)
-                   (if (%sh-run-meta? (%sh-plain-run (list->string (list (integer->char c))) 0 1 %sh-label-sq () ()))
+                   (if (%sh-run-meta? ((%eval-ref (lit %sh-plain-run)) (list->string (list (integer->char c))) 0 1 %sh-label-sq () ()))
                      (pair c acc)
                      acc))))))
   (metas 32 ()))
@@ -97,9 +97,9 @@ Read in single quotes, where a backslash does not end the run.
 ### a run notes a metacharacter anywhere in it
 
 ```sh
-(list (%sh-run-meta? (%sh-plain-run "abc*def" 0 7 %sh-label-bare () ()))
-      (%sh-run-end (%sh-plain-run "abc*def" 0 7 %sh-label-bare () ()))
-      (%sh-run-end (%sh-plain-run "ab$cd" 0 5 %sh-label-bare () ())))
+(list (%sh-run-meta? ((%eval-ref (lit %sh-plain-run)) "abc*def" 0 7 %sh-label-bare () ()))
+      (%sh-run-end ((%eval-ref (lit %sh-plain-run)) "abc*def" 0 7 %sh-label-bare () ()))
+      (%sh-run-end ((%eval-ref (lit %sh-plain-run)) "ab$cd" 0 5 %sh-label-bare () ())))
 ```
 ---
     (#t 7 2)
@@ -113,7 +113,7 @@ comparisons would otherwise count that overhead ten times.
 (let ((cost (fn (_ thunk)
               (let ((before (Heap count))) (thunk) (- (Heap count) before)))))
   (let ((base (cost (fn (_) ()))))
-    (< (- (cost (fn (_) (%sh-plain-run "*bcdefghij" 0 10 %sh-label-bare () ()))) base)
+    (< (- (cost (fn (_) ((%eval-ref (lit %sh-plain-run)) "*bcdefghij" 0 10 %sh-label-bare () ()))) base)
        (* 10 338))))
 ```
 ---

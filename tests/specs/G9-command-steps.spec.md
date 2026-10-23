@@ -76,17 +76,16 @@ The walk that collects a simple command's words is made as often going round
 three times as going round once.
 
 ```sh
-(let ((saved %sh-collect-words)
+(let ((saved (%eval-ref (lit %sh-collect-words)))
       (walks 0))
   (def count
     (fn (_ text)
       (set! walks 0)
-      (set! %sh-collect-words
-        (fn (_ cur ts wds redirs assign?)
+      (%eval-set! (lit %sh-collect-words) (fn (_ cur ts wds redirs assign?)
           (set! walks (+ walks 1))
           (saved cur ts wds redirs assign?)))
-      (guard (e (do (set! %sh-collect-words saved) (error e))) (sh-eval text))
-      (set! %sh-collect-words saved)
+      (guard (e (do (%eval-set! (lit %sh-collect-words) saved) (error e))) (sh-eval text))
+      (%eval-set! (lit %sh-collect-words) saved)
       walks))
   (= (count "for g9_i in 1; do : a \"$g9_i\" >/dev/null; g9_x=$g9_i; g9_y=\"a $g9_x\"; done")
      (count "for g9_i in 1 2 3; do : a \"$g9_i\" >/dev/null; g9_x=$g9_i; g9_y=\"a $g9_x\"; done")))
