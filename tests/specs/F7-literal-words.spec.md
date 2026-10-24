@@ -28,7 +28,7 @@ The first case is a pin that holds on main too; its expectation matches
 ### a constant word is never read into a plan
 
 ```sh
-(let ((saved %sh-word-plan)
+(let ((saved (%eval-ref (lit %sh-word-plan)))
       (reads 0)
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
@@ -37,12 +37,11 @@ The first case is a pin that holds on main too; its expectation matches
     (fn (_ text)
       (def thunk (run text))
       (set! reads 0)
-      (set! %sh-word-plan
-        (fn (_ s n mode assign?)
+      (%eval-set! (lit %sh-word-plan) (fn (_ s n mode assign?)
           (set! reads (+ reads 1))
           (saved s n mode assign?)))
-      (guard (e (do (set! %sh-word-plan saved) (error e))) (thunk))
-      (set! %sh-word-plan saved)
+      (guard (e (do (%eval-set! (lit %sh-word-plan) saved) (error e))) (thunk))
+      (%eval-set! (lit %sh-word-plan) saved)
       reads))
   (list (count ": a b c") (count ": a $PWD c")))
 ```

@@ -39,17 +39,16 @@ The walk that finds where a command's stage ends is made as often going round
 three times as going round once.
 
 ```sh
-(let ((saved %sh-stage-end)
+(let ((saved (%eval-ref (lit %sh-stage-end)))
       (walks 0))
   (def count
     (fn (_ text)
       (set! walks 0)
-      (set! %sh-stage-end
-        (fn (_ ts wdepth pdepth)
+      (%eval-set! (lit %sh-stage-end) (fn (_ ts wdepth pdepth)
           (set! walks (+ walks 1))
           (saved ts wdepth pdepth)))
-      (guard (e (do (set! %sh-stage-end saved) (error e))) (sh-eval text))
-      (set! %sh-stage-end saved)
+      (guard (e (do (%eval-set! (lit %sh-stage-end) saved) (error e))) (sh-eval text))
+      (%eval-set! (lit %sh-stage-end) saved)
       walks))
   (= (count "for g5_i in 1; do if true; then : a; fi; case x in x) : b;; esac; { : c; }; done")
      (count "for g5_i in 1 2 3; do if true; then : a; fi; case x in x) : b;; esac; { : c; }; done")))

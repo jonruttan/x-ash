@@ -19,6 +19,7 @@
 ; chdir -- and importing it at the top of the platform layer is what makes an
 ; unsatisfiable requirement fail at ACQUISITION rather than at the first
 ; pipeline.  Base, Str8, Io and List are core; only this one is an opt-in.
+(module ash/prims)
 (import x/sys/posix)
 ; x/sys/file is the File class: stat (which is what `test -f` and `test -d`
 ; actually ask) and read-all (which is what `.` needs to source a script).
@@ -27,20 +28,6 @@
 (import x/sys/file)
 ; x/platform/syscall is syscall-door, which File opens and closes through.
 (import x/platform/syscall)
-
-(provide ash/prims
-  make-token-base base-make-type token-read-string
-  first-int set-first-int! convert buffer-token
-  char->integer integer->char string-length string-ref substring string-append
-  string=? string? make-string list->string length reverse append map filter
-  take drop nth last fx<? fx+
-  sh-fork sh-exec sh-wait sh-exit sh-getpid
-  sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-open-new
-  sh-open-existing sh-close sh-dup2 sh-pipe
-  sh-getenv sh-setenv sh-unsetenv sh-environ sh-chdir sh-getcwd
-  sh-path-file-type sh-path-size sh-path-mode sh-lpath-file-type sh-path-mtime
-  sh-read-file sh-read-line sh-read-line-fd
-  sh-read-hit-eof sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write)
 
 ; --- The tokenizer base ------------------------------------------------------
 ; (Base make-tok) is the isolated, type-free tokenizer base: ash's `;` is a
@@ -60,9 +47,9 @@
 ; lib/x/reader/lit-reader.x hold. It takes the raw base, and (Base make-tok)
 ; hands back a wrapped instance -- passing the instance crashes the prim on any
 ; input -- so the unwrap lives here, once.
-(def %token-read-str (prim-ref (lit tok) (lit read-str)))
+(def token-read-str (prim-ref (lit tok) (lit read-str)))
 (def token-read-string
-  (fn (_ base input) (%token-read-str (Base raw-of base) input)))
+  (fn (_ base input) (token-read-str (Base raw-of base) input)))
 
 ; The consumed token's text, inside a reader callback. The namespace is `buf`
 ; and the member is `tok` (not `token`). Unbound, this raises inside a
@@ -88,7 +75,7 @@
 
 ; The base types a conversion is asked for, through the door the platform
 ; names them by (x-lang v0.15.0): type/convert.x keeps its own handles private.
-(def %ash-int-type (Type named INTEGER))
+(def ash-int-type (Type named INTEGER))
 (def %ash-string-type (Type named STRING))
 
 ; The handful of Scheme-ish names tokens.x and eval.x reach for, spelled
@@ -96,7 +83,7 @@
 ; alias layer -- so these are only what those two files actually call.
 ;
 ; char->integer is the direct prim, not the convert dispatcher:
-; (%cvt c %ash-int-type) walks the type's from/to alists and allocates, and
+; (%cvt c ash-int-type) walks the type's from/to alists and allocates, and
 ; %sh-word-break? calls this six times per character inside a tokenizer
 ; callback, where a collection mid-token is a hazard. lib/x/reader/analyser.x
 ; holds the same reference:
@@ -119,13 +106,13 @@
 (def string-ref (prim-ref (lit str) (lit byte-ref)))
 (def %str-byte-sub (prim-ref (lit str) (lit byte-sub)))
 (def substring (fn (_ s a b) (%str-byte-sub s a (- b a))))
-(def %str-append-2 (prim-ref (lit str) (lit append)))
+(def str-append-2 (prim-ref (lit str) (lit append)))
 (def string-append (fn (_ . ss) (%ash-str-append ss)))
 (def %ash-str-append
   (fn (self ss)
     (if (null? ss)
       ""
-      (if (null? (rest ss)) (first ss) (%str-append-2 (first ss) (self (rest ss)))))))
+      (if (null? (rest ss)) (first ss) (str-append-2 (first ss) (self (rest ss)))))))
 (def string=? str=?)
 (def string? str?)
 (def make-string (fn (_ n c) (Str8 make n c)))
@@ -189,8 +176,8 @@
       ((p (first l)) (self p (rest l) (pair (first l) acc)))
       (#t (self p (rest l) acc)))))
 
-(def take (fn (_ n l) (%ash-rev (%ash-take n l ()) ())))
-(def %ash-take
+(def take (fn (_ n l) (%ash-rev (ash-take n l ()) ())))
+(def ash-take
   (fn (self n l acc)
     (match
       ((not (fx<? 0 n)) acc)
@@ -257,7 +244,7 @@
 ; A word's pieces are joined each time one of its fields closes, and a field
 ; is most often one piece, which Str8 join answers as it is; asking first
 ; skips the call.
-(def %ash-join
+(def ash-join
   (fn (_ sep pieces)
     (match
       ((null? pieces) "")
@@ -269,9 +256,9 @@
 ; of what `convert` costs.  It divides with the integer primitives, so any
 ; other number -- a bignum out of arithmetic -- goes through `convert`.
 (def %ash-type-of (prim-ref (lit type) (lit of)))
-(def %ash-number->str
+(def ash-number->str
   (fn (_ n)
-    (if (eq? (%ash-type-of n) %ash-int-type)
+    (if (eq? (%ash-type-of n) ash-int-type)
       (%number->str n)
       (convert n %ash-string-type))))
 
@@ -412,6 +399,9 @@
 ; a line to assign, which is what stops `while read line` on a file whose last
 ; line has no terminator.
 (def sh-read-hit-eof ())
+; Read from ash/eval through sh-read-hit-eof?, since the flag is rebound here
+; and an import holds a copy.
+(def sh-read-hit-eof? (fn (_) sh-read-hit-eof))
 
 (def sh-read-line-fd
   (fn (_ fd delim)
@@ -499,3 +489,20 @@
 ; Raw write to a descriptor -- what a here-document's writer child pushes into
 ; the pipe.  (Sys fd-write) answers the byte count; the shell has no use for it.
 (def sh-fd-write (fn (_ fd text) (%sys-fd-write Sys fd text)))
+
+(provide ash/prims
+  make-token-base base-make-type token-read-string
+  first-int set-first-int! convert buffer-token
+  char->integer integer->char string-length string-ref substring string-append
+  string=? string? make-string list->string length reverse append map filter
+  take drop nth last fx<? fx+
+  sh-fork sh-exec sh-wait sh-exit sh-getpid
+  sh-open-read sh-open-write sh-open-append sh-open-rdwr sh-open-new
+  sh-open-existing sh-close sh-dup2 sh-pipe
+  sh-getenv sh-setenv sh-unsetenv sh-environ sh-chdir sh-getcwd
+  sh-path-file-type sh-path-size sh-path-mode sh-lpath-file-type sh-path-mtime
+  sh-read-file sh-read-line sh-read-line-fd
+  sh-read-hit-eof? sh-read-all-fd sh-list-dir sh-sort-strings sh-fd-write
+  ; the helpers the other modules read
+  fx* set-first! set-rest!
+  ash-int-type ash-join ash-number->str ash-take str-append-2 token-read-str)

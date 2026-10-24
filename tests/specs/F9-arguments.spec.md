@@ -107,7 +107,7 @@ The expectations are BusyBox ash's reading of the same arguments.
 ### $0 is what the shell was started to run
 
 ```sh
-(do (set! %sh-arg0 "s.sh") (sh-eval "echo $0") (set! %sh-arg0 "ash") ())
+(do (sh-arg0! "s.sh") (sh-eval "echo $0") (sh-arg0! "ash") ())
 ```
 ---
     s.sh

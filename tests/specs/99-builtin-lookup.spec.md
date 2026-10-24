@@ -12,8 +12,8 @@ tests.
 ### each name once
 
 ```sh
-(= (length (List distinct (List map first %sh-builtin-table)))
-   (length %sh-builtin-table))
+(= (length (List distinct (List map first sh-builtin-table)))
+   (length sh-builtin-table))
 ```
 ---
     #t
@@ -24,8 +24,9 @@ tests.
 (let ((cost (fn (_ thunk)
               (do (thunk)
                   (let ((before (Heap count))) (thunk) (- (Heap count) before))))))
-  (< (cost (fn (_) (%sh-dispatch (list ":") () %sh-functions)))
-     (cost (fn (_) (%sh-builtin? "ls")))))
+  (let ((fns (%eval-ref (lit %sh-functions))))
+    (< (cost (fn (_) (%sh-dispatch (list ":") () fns)))
+       (cost (fn (_) (%sh-builtin? "ls"))))))
 ```
 ---
     #t

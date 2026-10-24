@@ -96,8 +96,8 @@ expression with a parameter in it keeps none, and is expanded and read each
 time.
 
 ```sh
-(list (null? (first (rest (rest (rest (first (%sh-word-plan "$((count + 1))" 14 %sh-label-bare ())))))))
-      (null? (first (rest (rest (rest (first (%sh-word-plan "$(($count + 1))" 15 %sh-label-bare ()))))))))
+(list (null? (first (rest (rest (rest (first ((%eval-ref (lit %sh-word-plan)) "$((count + 1))" 14 %sh-label-bare ())))))))
+      (null? (first (rest (rest (rest (first ((%eval-ref (lit %sh-word-plan)) "$(($count + 1))" 15 %sh-label-bare ()))))))))
 ```
 ---
     (#f #t)

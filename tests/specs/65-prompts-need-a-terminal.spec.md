@@ -12,7 +12,7 @@ session writes to a terminal has no terminal here to be written to.
 ### the suite is not a session
 
 ```sh
-(do (import ash/line) (write (if (%ash-interactive?) "yes" "no")) ())
+(do (import ash/line) (write (if (ash-interactive?) "yes" "no")) ())
 ```
 ---
     "no"
@@ -28,7 +28,7 @@ session writes to a terminal has no terminal here to be written to.
 ### and neither does the banner
 
 ```sh
-(do (import ash/repl) (%ash-banner) (write "after") ())
+(do (import ash/repl) (ash-banner) (write "after") ())
 ```
 ---
     "after"
@@ -41,16 +41,16 @@ stand-in exit lets the loop return rather than leaving the process.
 ```sh
 (do
   (import ash/repl)
-  (let ((read %ash-read-line)
-        (collect %ash-collect)
-        (leave %sh-exit-shell))
-    (set! %ash-collect (fn (_) ()))
-    (set! %ash-read-line (fn (_ prompt) ()))
-    (set! %sh-exit-shell (fn (_ status) status))
+  (let ((read ash-read-line)
+        (collect (%repl-ref (lit %ash-collect)))
+        (leave sh-exit-shell))
+    (%repl-set! (lit %ash-collect) (fn (_) ()))
+    (%ash-set! (lit ash-read-line) (fn (_ prompt) ()))
+    (%ash-set! (lit sh-exit-shell) (fn (_ status) status))
     (guard (e ()) (%ash-repl-loop))
-    (set! %ash-read-line read)
-    (set! %ash-collect collect)
-    (set! %sh-exit-shell leave))
+    (%ash-set! (lit ash-read-line) read)
+    (%repl-set! (lit %ash-collect) collect)
+    (%ash-set! (lit sh-exit-shell) leave))
   (write "after")
   ())
 ```

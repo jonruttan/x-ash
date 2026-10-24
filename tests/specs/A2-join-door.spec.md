@@ -10,8 +10,8 @@ The cost is compared rather than counted, as spec 36 compares its tests.
 ### what a join answers
 
 ```sh
-(list (%ash-join "" ()) (%ash-join "" (list "a")) (%ash-join "" (list "a" "b" "c"))
-      (%ash-join "/" (list "usr" "local" "bin")))
+(list (ash-join "" ()) (ash-join "" (list "a")) (ash-join "" (list "a" "b" "c"))
+      (ash-join "/" (list "usr" "local" "bin")))
 ```
 ---
     ("" "a" "abc" "usr/local/bin")

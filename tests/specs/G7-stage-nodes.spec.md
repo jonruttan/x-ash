@@ -34,17 +34,16 @@ The skip over a construct, made to find the redirections after it, is made as
 often going round three times as going round once.
 
 ```sh
-(let ((saved %sh-skip-compound-walk)
+(let ((saved (%eval-ref (lit %sh-skip-compound-walk)))
       (walks 0))
   (def count
     (fn (_ text)
       (set! walks 0)
-      (set! %sh-skip-compound-walk
-        (fn (_ ts depth paren?)
+      (%eval-set! (lit %sh-skip-compound-walk) (fn (_ ts depth paren?)
           (set! walks (+ walks 1))
           (saved ts depth paren?)))
-      (guard (e (do (set! %sh-skip-compound-walk saved) (error e))) (sh-eval text))
-      (set! %sh-skip-compound-walk saved)
+      (guard (e (do (%eval-set! (lit %sh-skip-compound-walk) saved) (error e))) (sh-eval text))
+      (%eval-set! (lit %sh-skip-compound-walk) saved)
       walks))
   (= (count "for g7_i in 1; do ( : a ); { : b; } > /dev/null; done")
      (count "for g7_i in 1 2 3; do ( : a ); { : b; } > /dev/null; done")))

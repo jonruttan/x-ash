@@ -49,7 +49,7 @@ fi
 #
 # ash/repl is imported and safe to import: it is defs and a provide with no
 # top-level effect (run.x calls the loop, not repl.x). It is here because
-# %ash-complete?, which decides whether the prompt keeps reading, is testable
+# ash-complete?, which decides whether the prompt keeps reading, is testable
 # logic and the session it drives is what a suite stopping at sh-eval
 # cannot see.
 #
@@ -61,7 +61,183 @@ cat > "$OUT" <<EOF
 (def %install-root "$X_ROOT")
 (include "$X_BASE")
 (import-path! "$BUNDLE")
-(import ash/base)
-(import ash/repl)
-(set! %repl-print %ash-repl-print)
+(import ash/base ash-version)
+; The public names the specs call, by name: an import of a scoped module
+; binds what it names and nothing else.
+(import ash/prims
+  convert integer->char string-length string-append string=? string?
+  make-string list->string length reverse append map filter take drop nth
+  last fx<? fx+ sh-fork sh-wait sh-exit sh-open-write sh-close sh-getenv
+  sh-path-file-type sh-read-line sh-sort-strings fx* set-first!
+  ash-int-type ash-join ash-number->str token-read-str)
+(import ash/tokens
+  sh-tokenize sh-digit? sh-hd-jit sh-hd-raw)
+(import ash/eval
+  sh-eval sh-status sh-arg0! sh-exit-shell sh-prompt sh-var-get sh-field
+  sh-builtin-table)
+(import ash/printer
+  ash-repl-print)
+(import ash/line
+  ash-read-line ash-interactive?)
+(import ash/repl
+  ash-batch ash-banner ash-complete? ash-operands ash-plan)
+(set! %repl-print ash-repl-print)
+; The specs read the modules' internals.  Each private a spec names is
+; reached through its module here; one that the module rebinds while it runs
+; is read and set through %MODULE-ref / %MODULE-set!, which evaluate in the
+; module, since a copy taken here would go stale.
+; A function a spec replaces to stand in for a terminal or an exit --
+; ash-read-line, sh-exit-shell, ash-interactive? -- is held by every module
+; that imported it, each with its own binding, so the stand-in goes into each.
+(def %ash-set!
+  (fn (_ name v)
+    ((fn (self ms)
+       (unless (null? ms)
+         (do (guard (_ ())
+               (let ((env (eval (list (lit module) (first ms)))))
+                 (do (eval name env)
+                     (eval (list (lit set!) name (list (lit lit) v)) env))))
+             (self (rest ms)))))
+     (list (lit ash/eval) (lit ash/line) (lit ash/repl) (lit ash/tokens) (lit ash/prims)))))
+(def %eval-ref (fn (_ name) (eval name (module ash/eval))))
+(def %eval-set! (fn (_ name v) (eval (list (lit set!) name (list (lit lit) v)) (module ash/eval))))
+(def %line-ref (fn (_ name) (eval name (module ash/line))))
+(def %line-set! (fn (_ name v) (eval (list (lit set!) name (list (lit lit) v)) (module ash/line))))
+(def %prims-ref (fn (_ name) (eval name (module ash/prims))))
+(def %prims-set! (fn (_ name v) (eval (list (lit set!) name (list (lit lit) v)) (module ash/prims))))
+(def %repl-ref (fn (_ name) (eval name (module ash/repl))))
+(def %repl-set! (fn (_ name v) (eval (list (lit set!) name (list (lit lit) v)) (module ash/repl))))
+(def %tokens-ref (fn (_ name) (eval name (module ash/tokens))))
+(def %tokens-set! (fn (_ name v) (eval (list (lit set!) name (list (lit lit) v)) (module ash/tokens))))
+; ash/eval
+(def %all-digits? (eval (lit %all-digits?) (module ash/eval)))
+; ash/repl
+; ash/line
+(def %ash-complete (eval (lit %ash-complete) (module ash/line)))
+(def %ash-paint (eval (lit %ash-paint) (module ash/line)))
+; ash/repl
+(def %ash-plan-get (eval (lit %ash-plan-get) (module ash/repl)))
+; ash/line
+(def %ash-show-prompt (eval (lit %ash-show-prompt) (module ash/line)))
+; ash/prims
+(def %ash-string-type (eval (lit %ash-string-type) (module ash/prims)))
+; ash/line
+(def %ash-word-at (eval (lit %ash-word-at) (module ash/line)))
+(def %ash-word-place (eval (lit %ash-word-place) (module ash/line)))
+; ash/prims
+(def %assoc-entry (eval (lit %assoc-entry) (module ash/prims)))
+; ash/eval
+(def %collect-stages (eval (lit %collect-stages) (module ash/eval)))
+(def %eval-list (eval (lit %eval-list) (module ash/eval)))
+; ash/prims
+(def %file-list-dir (eval (lit %file-list-dir) (module ash/prims)))
+(def %file-ltype (eval (lit %file-ltype) (module ash/prims)))
+(def %file-read-all (eval (lit %file-read-all) (module ash/prims)))
+(def %file-stat (eval (lit %file-stat) (module ash/prims)))
+(def %file-type (eval (lit %file-type) (module ash/prims)))
+; ash/eval
+(def %is-assignment? (eval (lit %is-assignment?) (module ash/eval)))
+(def %mk-cursor (eval (lit %mk-cursor) (module ash/eval)))
+(def %redir-op? (eval (lit %redir-op?) (module ash/eval)))
+(def %sh-acc-add (eval (lit %sh-acc-add) (module ash/eval)))
+(def %sh-acc-cur (eval (lit %sh-acc-cur) (module ash/eval)))
+(def %sh-acc-empty (eval (lit %sh-acc-empty) (module ash/eval)))
+(def %sh-add-split (eval (lit %sh-add-split) (module ash/eval)))
+(def %sh-ar-assign-groups (eval (lit %sh-ar-assign-groups) (module ash/eval)))
+(def %sh-ar-assign-ops (eval (lit %sh-ar-assign-ops) (module ash/eval)))
+(def %sh-ar-num (eval (lit %sh-ar-num) (module ash/eval)))
+(def %sh-ar-op-at (eval (lit %sh-ar-op-at) (module ash/eval)))
+(def %sh-ar-rank-groups (eval (lit %sh-ar-rank-groups) (module ash/eval)))
+(def %sh-ar-ranks (eval (lit %sh-ar-ranks) (module ash/eval)))
+(def %sh-arith-eval (eval (lit %sh-arith-eval) (module ash/eval)))
+(def %sh-assignment-name (eval (lit %sh-assignment-name) (module ash/eval)))
+(def %sh-assignment-value (eval (lit %sh-assignment-value) (module ash/eval)))
+(def %sh-block-openers (eval (lit %sh-block-openers) (module ash/eval)))
+(def %sh-brace-end (eval (lit %sh-brace-end) (module ash/eval)))
+(def %sh-bracket (eval (lit %sh-bracket) (module ash/eval)))
+(def %sh-builtin? (eval (lit %sh-builtin?) (module ash/eval)))
+(def %sh-cs-end (eval (lit %sh-cs-end) (module ash/eval)))
+(def %sh-digits-int (eval (lit %sh-digits-int) (module ash/eval)))
+(def %sh-dispatch (eval (lit %sh-dispatch) (module ash/eval)))
+(def %sh-expand-str (eval (lit %sh-expand-str) (module ash/eval)))
+(def %sh-expand-tok (eval (lit %sh-expand-tok) (module ash/eval)))
+(def %sh-glob-entries (eval (lit %sh-glob-entries) (module ash/eval)))
+(def %sh-glob-fields (eval (lit %sh-glob-fields) (module ash/eval)))
+(def %sh-glob-keep (eval (lit %sh-glob-keep) (module ash/eval)))
+(def %sh-glob-pattern? (eval (lit %sh-glob-pattern?) (module ash/eval)))
+(def %sh-glob-split (eval (lit %sh-glob-split) (module ash/eval)))
+(def %sh-glob-text (eval (lit %sh-glob-text) (module ash/eval)))
+(def %sh-glob-unescape (eval (lit %sh-glob-unescape) (module ash/eval)))
+(def %sh-glob-visible? (eval (lit %sh-glob-visible?) (module ash/eval)))
+(def %sh-has-active-glob? (eval (lit %sh-has-active-glob?) (module ash/eval)))
+(def %sh-has-glob-inert? (eval (lit %sh-has-glob-inert?) (module ash/eval)))
+(def %sh-has-glob-meta? (eval (lit %sh-has-glob-meta?) (module ash/eval)))
+(def %sh-has-pair? (eval (lit %sh-has-pair?) (module ash/eval)))
+(def %sh-hd-cut (eval (lit %sh-hd-cut) (module ash/eval)))
+; ash/tokens
+; ash/eval
+(def %sh-hd-line-text (eval (lit %sh-hd-line-text) (module ash/eval)))
+(def %sh-hd-lines (eval (lit %sh-hd-lines) (module ash/eval)))
+(def %sh-hd-passes? (eval (lit %sh-hd-passes?) (module ash/eval)))
+(def %sh-heredoc-extract (eval (lit %sh-heredoc-extract) (module ash/eval)))
+(def %sh-hex-digit? (eval (lit %sh-hex-digit?) (module ash/eval)))
+(def %sh-ifs (eval (lit %sh-ifs) (module ash/eval)))
+(def %sh-join-params (eval (lit %sh-join-params) (module ash/eval)))
+(def %sh-label-bare (eval (lit %sh-label-bare) (module ash/eval)))
+(def %sh-label-dq (eval (lit %sh-label-dq) (module ash/eval)))
+(def %sh-label-sq (eval (lit %sh-label-sq) (module ash/eval)))
+(def %sh-map-join-onto (eval (lit %sh-map-join-onto) (module ash/eval)))
+(def %sh-mark-command (eval (lit %sh-mark-command) (module ash/eval)))
+(def %sh-mark-keywords (eval (lit %sh-mark-keywords) (module ash/eval)))
+(def %sh-name-char? (eval (lit %sh-name-char?) (module ash/eval)))
+(def %sh-name-start? (eval (lit %sh-name-start?) (module ash/eval)))
+(def %sh-nest-delta (eval (lit %sh-nest-delta) (module ash/eval)))
+; ash/prims
+(def %sh-o-append (eval (lit %sh-o-append) (module ash/prims)))
+(def %sh-o-existing (eval (lit %sh-o-existing) (module ash/prims)))
+(def %sh-o-new (eval (lit %sh-o-new) (module ash/prims)))
+(def %sh-o-rdwr (eval (lit %sh-o-rdwr) (module ash/prims)))
+(def %sh-o-read (eval (lit %sh-o-read) (module ash/prims)))
+(def %sh-o-write (eval (lit %sh-o-write) (module ash/prims)))
+; ash/eval
+(def %sh-path-join (eval (lit %sh-path-join) (module ash/eval)))
+(def %sh-pattern-match? (eval (lit %sh-pattern-match?) (module ash/eval)))
+(def %sh-run-end (eval (lit %sh-run-end) (module ash/eval)))
+(def %sh-run-meta? (eval (lit %sh-run-meta?) (module ash/eval)))
+(def %sh-skip-compound (eval (lit %sh-skip-compound) (module ash/eval)))
+; ash/prims
+(def %sh-sort-merge (eval (lit %sh-sort-merge) (module ash/prims)))
+(def %sh-sort-split (eval (lit %sh-sort-split) (module ash/prims)))
+; ash/eval
+(def %sh-special-param? (eval (lit %sh-special-param?) (module ash/eval)))
+(def %sh-str-has-heredoc-op? (eval (lit %sh-str-has-heredoc-op?) (module ash/eval)))
+(def %sh-sweep-long (eval (lit %sh-sweep-long) (module ash/eval)))
+; ash/prims
+(def %sh-sys-close (eval (lit %sh-sys-close) (module ash/prims)))
+(def %sh-sys-open (eval (lit %sh-sys-open) (module ash/prims)))
+; ash/eval
+(def %sh-test-int (eval (lit %sh-test-int) (module ash/eval)))
+(def %sh-var-set! (eval (lit %sh-var-set!) (module ash/eval)))
+(def %sh-var-value (eval (lit %sh-var-value) (module ash/eval)))
+(def %sh-word-in? (eval (lit %sh-word-in?) (module ash/eval)))
+; ash/prims
+(def %str8-join (eval (lit %str8-join) (module ash/prims)))
+(def %sys-chdir (eval (lit %sys-chdir) (module ash/prims)))
+(def %sys-dup2 (eval (lit %sys-dup2) (module ash/prims)))
+(def %sys-exec (eval (lit %sys-exec) (module ash/prims)))
+(def %sys-exit (eval (lit %sys-exit) (module ash/prims)))
+(def %sys-fd-read (eval (lit %sys-fd-read) (module ash/prims)))
+(def %sys-fd-write (eval (lit %sys-fd-write) (module ash/prims)))
+(def %sys-fork (eval (lit %sys-fork) (module ash/prims)))
+(def %sys-getcwd (eval (lit %sys-getcwd) (module ash/prims)))
+(def %sys-getenv (eval (lit %sys-getenv) (module ash/prims)))
+(def %sys-getpid (eval (lit %sys-getpid) (module ash/prims)))
+(def %sys-pipe (eval (lit %sys-pipe) (module ash/prims)))
+(def %sys-setenv (eval (lit %sys-setenv) (module ash/prims)))
+(def %sys-unsetenv (eval (lit %sys-unsetenv) (module ash/prims)))
+(def %sys-wait (eval (lit %sys-wait) (module ash/prims)))
+; ash/eval
+(def %tok-role (eval (lit %tok-role) (module ash/eval)))
+; ash/repl
+(def %ash-repl-loop (eval (lit %ash-repl-loop) (module ash/repl)))
 EOF

@@ -44,7 +44,7 @@ where a token starts and is a byte inside a word.
 (do
   (def script "g8_out=$( g8_n=0; for g8_i in 1 2 3; do g8_n=$((g8_n+g8_i)); done; g8_f() { echo \"$1:$g8_n\" 'q r' ${g8_u:-d e} `echo bt`; }; g8_f a | tr a A; if [ \"$g8_n\" = 6 ]; then echo six; fi; [ $g8_n -lt 7 ] && echo less >&2 2>/dev/null; echo done )")
   (sh-eval script)
-  (%sh-var-get "g8_out"))
+  (sh-var-get "g8_out"))
 ```
 ---
     "A:6 q r d e bt\nsix\ndone"

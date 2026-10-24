@@ -16,16 +16,23 @@
 ; The platform loop customizes prompt and print only (lib/x/repl/loop.x): its
 ; read is the ambient sexp reader and its eval is eval!. A lang whose unit is
 ; not an s-expression must replace the loop, which run.x does with
-; (set! repl %ash-repl) -- as x-python's repl.x and x-logo's do. Setting
+; (set! repl ash-repl) -- as x-python's repl.x and x-logo's do. Setting
 ; %repl-prompt and %repl-print alone leaves x's reader underneath the shell
 ; prompt, so `ls` reports Unbound SYMBOL 'ls'.
 ;
 ; A shell's unit is a line until it is not: `for f in a b c; do echo $f; done`
-; is one entry whether typed on one line or four. %ash-complete? tells them
+; is one entry whether typed on one line or four. ash-complete? tells them
 ; apart.
 
-(import ash/base)
-(import ash/prims)
+(module ash/repl)
+(import ash/base ash-version)
+(import ash/prims
+  string-length string-ref substring string-append string=? length reverse
+  append sh-read-file sh-read-line)
+(import ash/eval
+  sh-eval sh-status sh-arg0! sh-args! sh-exit-shell sh-error-status
+  sh-report sh-prompt sh-set sh-str-has-char?)
+(import ash/line ash-read-line ash-interactive?)
 (import x/sys/posix)
 
 ; The line reader lives in ash/prims.x, because the `read` builtin needs the
@@ -66,7 +73,6 @@
 ;   - a trailing backslash (explicit continuation)
 ;   - a trailing |, && or || (the pipeline wants a right-hand side)
 ;   - an unbalanced if..fi, case..esac, loop..done, ( .. ) or { .. }
-
 
 (def %ash-ws?
   (fn (_ c) (or (= c #\space) (= c #\tab) (= c #\newline))))
@@ -297,9 +303,9 @@
               (if (< e 2) () (= (Str8 ref (- e 2) s) #\&)))
             (else ())))))))
 
-; %ash-complete? INPUT -> #t when the entry can be evaluated, () when the
+; ash-complete? INPUT -> #t when the entry can be evaluated, () when the
 ; prompt should keep reading.
-(def %ash-complete?
+(def ash-complete?
   (fn (_ s)
     (if (= (Str8 length s) 0)
       #t
@@ -318,9 +324,9 @@
   (fn (_ first-line)
     (def more
       (fn (self acc)
-        (if (%ash-complete? acc)
+        (if (ash-complete? acc)
           acc
-          (let ((line (%ash-read-line (%sh-prompt "PS2"))))
+          (let ((line (ash-read-line (sh-prompt "PS2"))))
             (match
               ; EOF mid-entry: hand back what there is and let sh-eval report
               ; the parse error, rather than looping on nil forever.
@@ -340,10 +346,10 @@
   (fn (_ form) (guard (%ash-e ()) (eval! form))))
 
 ; Told to whoever is at the terminal; a script piped in is told nothing (see
-; %ash-interactive? in ash/line.x).
-(def %ash-banner
+; ash-interactive? in ash/line.x).
+(def ash-banner
   (fn (_)
-    (when (%ash-interactive?)
+    (when (ash-interactive?)
       (display "ASH Shell v" ash-version " on x-lang")
       (let ((rel (%ash-global (lit %platform-release))))
         (unless (null? rel) (display " " rel)))
@@ -357,8 +363,8 @@
 ;
 ; A shell at a terminal reports to STDERR and carries on; one with no terminal
 ; reports and ends, as a script does (see the loop below).  The report is the
-; one a forked child makes too (%sh-report in ash/eval.x).
-(def %ash-report %sh-report)
+; one a forked child makes too (sh-report in ash/eval.x).
+(def %ash-report sh-report)
 
 ; --- the loop ----------------------------------------------------------------
 ;
@@ -371,8 +377,8 @@
 ; collect (x-lang#599).
 (def %ash-collect (prim-ref 'heap 'collect))
 
-(def %ash-repl ())
-(set! %ash-repl
+(def ash-repl ())
+(set! ash-repl
   (fn (_)
     ; FIRST CALL: reclaim terminal stdin from fd 3.  x.sh parks the user's
     ; stdin there while the boot stream occupies fd 0, so a loop that skips
@@ -390,17 +396,17 @@
     ; Through the line editor when there is a terminal (ash/line.x), which
     ; draws the prompt itself; through the byte reader otherwise.  The prompt
     ; is PS1, expanded afresh for each command.
-    (let ((line (%ash-read-line (%sh-prompt "PS1"))))
+    (let ((line (ash-read-line (sh-prompt "PS1"))))
       (match
         ; ctrl-d leaves, with the last command's status -- `x -l ash -f x.sh`
         ; and an interactive session both answer $? to the caller.  Through
-        ; %sh-exit-shell, so an EXIT trap set at the prompt still fires.  The
+        ; sh-exit-shell, so an EXIT trap set at the prompt still fires.  The
         ; newline moves the cursor off the prompt ctrl-d was typed at, so it
         ; belongs where the prompt went and happens only when there was one.
         ((null? line)
           (do
-            (when (%ash-interactive?) (%stderr "\n"))
-            (%sh-exit-shell %sh-status)))
+            (when (ash-interactive?) (%stderr "\n"))
+            (sh-exit-shell (sh-status))))
         ; ctrl-c abandons the line being typed.
         ((eq? line (lit cancel)) (%ash-repl-loop))
         (#t
@@ -410,7 +416,7 @@
                 ; With no terminal the commands are a script, and an error
                 ; ends a script (POSIX 2.8.1), as it ends one run with -f; at
                 ; a terminal it is reported and the prompt reads on.
-                (unless (%ash-interactive?) (%sh-exit-shell %sh-error-status)))
+                (unless (ash-interactive?) (sh-exit-shell sh-error-status)))
               (let ((entry (%ash-read-entry line)))
                 (unless (= (Str8 length entry) 0) (sh-eval entry))))
             (%ash-repl-loop)))))))
@@ -435,12 +441,12 @@
     ; script simply runs out, not only when it calls `exit`.
     (guard (err
         (%ash-report err)
-        (%sh-exit-shell %sh-error-status))
+        (sh-exit-shell sh-error-status))
       (unless (= (Str8 length src) 0) (sh-eval src))
-      (%sh-exit-shell %sh-status))))
+      (sh-exit-shell (sh-status)))))
 
-(def %ash-batch ())
-(set! %ash-batch
+(def ash-batch ())
+(set! ash-batch
   (fn (_)
     (def slurp
       (fn (self acc)
@@ -528,7 +534,7 @@
         opts
         (pair (string-append (substring w 0 1) kept) opts)))
     (def takes-name?
-      (if (%sh-str-has-char? kept #\o) (not (null? (rest ws))) #f))
+      (if (sh-str-has-char? kept #\o) (not (null? (rest ws))) #f))
     (if takes-name?
       (go (rest (rest ws)) (pair (first (rest ws)) opts1) mode1)
       (go (rest ws) opts1 mode1))))
@@ -565,7 +571,7 @@
       (#t (self key (rest plan))))))
 
 ; The caller's stdin is on descriptor 3 while the boot stream holds 0 (see
-; %ash-repl).  What a command or a script file runs reads the caller's.
+; ash-repl).  What a command or a script file runs reads the caller's.
 (def %ash-take-stdin
   (fn (_) (guard (%ash-e ()) (do (Sys dup2 3 0) (Sys close 3)))))
 
@@ -575,31 +581,30 @@
     (match
       ((null? text)
         (do (%stderr "ash: can't open '" path "'\n")
-            (%sh-exit-shell %sh-error-status)))
+            (sh-exit-shell sh-error-status)))
       (#t (do (%ash-take-stdin) (%ash-run-script text))))))
 
 ; The shell, started: it does not return.  With nothing asked for it is a
 ; session, or the script on stdin when the platform says a file was supplied.
-(def %ash-main
+(def ash-main
   (fn (_ raw)
     (def plan (ash-plan (ash-operands raw)))
     (def label (%ash-plan-get (lit label) plan))
     (def arg0 (%ash-plan-get (lit arg0) plan))
-    (def set-status (%sh-set (%ash-plan-get (lit opts) plan)))
-    (unless (null? arg0) (set! %sh-arg0 arg0))
+    (def set-status (sh-set (%ash-plan-get (lit opts) plan)))
+    (unless (null? arg0) (sh-arg0! arg0))
     (unless (null? (%ash-plan-get (lit params) plan))
-      (set! %sh-args (%ash-plan-get (lit params) plan)))
+      (sh-args! (%ash-plan-get (lit params) plan)))
     (match
-      ((not (= set-status 0)) (%sh-exit-shell %sh-error-status))
+      ((not (= set-status 0)) (sh-exit-shell sh-error-status))
       ((eq? label (lit usage))
         (do (%stderr "ash: -c requires an argument\n")
-            (%sh-exit-shell %sh-error-status)))
+            (sh-exit-shell sh-error-status)))
       ((eq? label (lit command))
         (do (%ash-take-stdin)
             (%ash-run-script (%ash-plan-get (lit text) plan))))
       ((eq? label (lit file)) (%ash-run-file (%ash-plan-get (lit text) plan)))
-      (%batch? (%ash-batch))
-      (#t (do (%ash-banner) (%ash-repl))))))
+      (%batch? (ash-batch))
+      (#t (do (ash-banner) (ash-repl))))))
 
-(provide ash/repl %ash-repl %ash-batch %ash-banner %ash-complete? %ash-main
-  ash-operands ash-plan)
+(provide ash/repl ash-repl ash-batch ash-banner ash-complete? ash-main ash-operands ash-plan)

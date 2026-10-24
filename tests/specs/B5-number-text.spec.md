@@ -36,7 +36,7 @@ counted, as spec 36 compares its tests.
 ### a bignum still has its digits
 
 ```sh
-(%ash-number->str (+ 12345678901234567890 1))
+(ash-number->str (+ 12345678901234567890 1))
 ```
 ---
     "12345678901234567891"

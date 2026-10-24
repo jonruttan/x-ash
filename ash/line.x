@@ -9,6 +9,13 @@
 ; Colour comes from a Lexer whose tokens cover every byte of the line, each
 ; drawn in the colour its tag names (see "colour" below).
 
+(module ash/line)
+(import ash/prims
+  length append map filter take sh-path-file-type sh-read-line)
+(import ash/tokens sh-tokenize)
+(import ash/eval
+  sh-var-get sh-field sh-builtin-table sh-reserved-words sh-glob-escape-all
+  sh-glob-matches)
 (import x/type/class)
 (import x/type/str)
 (import x/type/list)
@@ -36,10 +43,10 @@
 ; wrote and nothing else.
 ;
 ; x.sh parks the user's stdin on fd 3 while the boot stream holds fd 0, and
-; %ash-repl takes it back before the first read, so whichever of the two is a
+; ash-repl takes it back before the first read, so whichever of the two is a
 ; terminal is the shell's own input -- the question is asked on both sides of
 ; that swap.
-(def %ash-interactive?
+(def ash-interactive?
   (fn (_)
     (guard (_ ())
       (and (or (Sys isatty 0) (Sys isatty 3)) (Sys isatty 2)))))
@@ -47,9 +54,9 @@
 ; POSIX writes PS1 and PS2 to standard error.  On stdout they would land in
 ; whatever a session's output was piped or redirected into.
 (def %ash-show-prompt
-  (fn (_ prompt) (when (%ash-interactive?) (%stderr prompt))))
+  (fn (_ prompt) (when (ash-interactive?) (%stderr prompt))))
 
-(def %ash-read-line
+(def ash-read-line
   (fn (_ prompt)
     (if (%ash-editor?)
       (let ((r (Line read prompt)))
@@ -132,7 +139,7 @@
 (def %ash-word-code
   (fn (_ text)
     (match
-      ((List includes? text %sh-reserved-words) %ash-c-reserved-word)
+      ((List includes? text sh-reserved-words) %ash-c-reserved-word)
       ((List includes? text %ash-builtin-names) %ash-c-builtin)
       ((if (> (Str8 length text) 0) (eq? (Str8 ref 0 text) #\$) #f) %ash-c-variable)
       (#t ()))))
@@ -141,7 +148,7 @@
 
 (def %ash-painter-make
   (fn (_)
-    (set! %ash-builtin-names (List map first %sh-builtin-table))
+    (set! %ash-builtin-names (List map first sh-builtin-table))
     (Paint lexer (Lexer make (%ash-paint-rules) "\n")
       (list (pair (lit comment) (fn (_ t) %ash-c-comment))
             (pair (lit sq) (fn (_ t) %ash-c-string))
@@ -278,12 +285,12 @@
 
 (def %ash-paths
   (fn (_ word dirs-only?)
-    (let ((home (if (Str8 starts? "~/" word) (%sh-var-get "HOME") ())))
+    (let ((home (if (Str8 starts? "~/" word) (sh-var-get "HOME") ())))
       (let ((text (if (null? home) word
                     (Str8 append home (Str8 sub 1 (- (Str8 length word) 1) word))))
             (tail (if dirs-only? "*/" "*")))
-        (let ((hits (%sh-glob-matches
-                      (%sh-field (Str8 append (%sh-glob-escape-all text) tail) #t #t))))
+        (let ((hits (sh-glob-matches
+                      (sh-field (Str8 append (sh-glob-escape-all text) tail) #t #t))))
           (List filter (fn (_ name) (Str8 starts? word name))
             (List map
               (fn (_ hit)
@@ -298,7 +305,7 @@
   (fn (_ word)
     (if (= 0 (Str8 length word)) ()
       (List filter (fn (_ name) (%ash-prefix? word name))
-        (List append %sh-reserved-words
+        (List append sh-reserved-words
           (List append (%ash-builtin-names) (%ash-path-names!)))))))
 
 ; What a word could become where it stands.  At command position it is a
@@ -333,5 +340,4 @@
 (guard (_ ())
   (set! %image-recache-hooks (pair (fn (_) (%ash-line-install!)) %image-recache-hooks)))
 
-(provide ash/line %ash-read-line %ash-interactive? %ash-show-prompt %ash-paint
-  %ash-complete %ash-word-at)
+(provide ash/line ash-read-line ash-interactive?)

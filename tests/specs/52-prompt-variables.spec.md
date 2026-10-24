@@ -28,18 +28,18 @@ made with; when it has no lines left it raises, which ends the loop.
   (import ash/line)
   (let ((prompts ())
         (lines (list "PS1='mine> '; PS2='more? '" "if true" "then :; fi"))
-        (read %ash-read-line)
-        (collect %ash-collect))
-    (set! %ash-collect (fn (_) ()))
-    (set! %ash-read-line
+        (read ash-read-line)
+        (collect (%repl-ref (lit %ash-collect))))
+    (%repl-set! (lit %ash-collect) (fn (_) ()))
+    (%ash-set! (lit ash-read-line)
       (fn (_ prompt)
         (set! prompts (pair prompt prompts))
         (if (null? lines)
           (error "no more lines")
           (let ((line (first lines))) (set! lines (rest lines)) line))))
     (guard (e ()) (%ash-repl-loop))
-    (set! %ash-read-line read)
-    (set! %ash-collect collect)
+    (%ash-set! (lit ash-read-line) read)
+    (%repl-set! (lit %ash-collect) collect)
     (write (reverse prompts))))
 ```
 ---
@@ -48,7 +48,7 @@ made with; when it has no lines left it raises, which ends the loop.
 ### a prompt shows the value it is set to
 
 ```sh
-(do (sh-eval "PS1='my-prompt> '") (write (%sh-prompt "PS1")))
+(do (sh-eval "PS1='my-prompt> '") (write (sh-prompt "PS1")))
 ```
 ---
     "my-prompt> "
@@ -56,7 +56,7 @@ made with; when it has no lines left it raises, which ends the loop.
 ### it is expanded when it is shown, not when it is set
 
 ```sh
-(do (sh-eval "x=world; PS1='$x$ '; x=there") (write (%sh-prompt "PS1")))
+(do (sh-eval "x=world; PS1='$x$ '; x=there") (write (sh-prompt "PS1")))
 ```
 ---
     "there$ "
@@ -64,7 +64,7 @@ made with; when it has no lines left it raises, which ends the loop.
 ### a command substitution in a prompt runs
 
 ```sh
-(do (sh-eval "PS1='$(echo cs)> '") (write (%sh-prompt "PS1")))
+(do (sh-eval "PS1='$(echo cs)> '") (write (sh-prompt "PS1")))
 ```
 ---
     "cs> "
@@ -72,7 +72,7 @@ made with; when it has no lines left it raises, which ends the loop.
 ### the continuation prompt
 
 ```sh
-(do (sh-eval "PS2='more? '") (write (%sh-prompt "PS2")))
+(do (sh-eval "PS2='more? '") (write (sh-prompt "PS2")))
 ```
 ---
     "more? "
@@ -107,7 +107,7 @@ again, without end.  bash runs the substitution; dash shows PS4 as written.
 ### an unset prompt shows nothing
 
 ```sh
-(do (sh-eval "unset PS1") (write (%sh-prompt "PS1")))
+(do (sh-eval "unset PS1") (write (sh-prompt "PS1")))
 ```
 ---
     ""

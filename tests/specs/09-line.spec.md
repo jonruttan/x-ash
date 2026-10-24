@@ -24,11 +24,11 @@ empty; the reset code is empty for the same reason.
 ```sh
 (do (import ash/line)
     (eval (lit (set! %ansi? #t)) (module x/repl/ansi))
-    (set! %ash-c-reserved-word "<k>")
-    (set! %ash-c-builtin "<b>")
-    (set! %ash-c-string "<s>")
-    (set! %ash-c-variable "<v>")
-    (set! %ash-c-comment "<c>")
+    (%line-set! (lit %ash-c-reserved-word) "<k>")
+    (%line-set! (lit %ash-c-builtin) "<b>")
+    (%line-set! (lit %ash-c-string) "<s>")
+    (%line-set! (lit %ash-c-variable) "<v>")
+    (%line-set! (lit %ash-c-comment) "<c>")
     (let ((r (list (%ash-paint "if x \"a b\" $y 'c' 2>e # z")
                    (%ash-paint "echo \"a $(b \"c\") d")
                    (%ash-paint "b\" c" () "echo \"a ")
@@ -161,7 +161,7 @@ each answer so the expectations do not depend on it.
 ### a word starting ~/ is looked up under HOME and offered as typed
 
 ```sh
-(let ((home (%sh-var-get "HOME")))
+(let ((home (sh-var-get "HOME")))
   (sh-eval (Str8 append "HOME=" %spec-dir))
   (let ((r (%ash-complete (new %spec-buf text "ls ~/s"))))
     (sh-eval (Str8 append "HOME=" home))

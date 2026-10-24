@@ -3,7 +3,7 @@
 ### a plain command is complete
 
 ```sh
-(write (%ash-complete? "echo hi"))
+(write (ash-complete? "echo hi"))
 ```
 ---
     #t
@@ -11,7 +11,7 @@
 ### an empty line is complete
 
 ```sh
-(write (%ash-complete? ""))
+(write (ash-complete? ""))
 ```
 ---
     #t
@@ -19,7 +19,7 @@
 ### a one-line for loop is complete
 
 ```sh
-(write (%ash-complete? "for f in a b; do echo $f; done"))
+(write (ash-complete? "for f in a b; do echo $f; done"))
 ```
 ---
     #t
@@ -29,7 +29,7 @@
 ### a for without its done is not complete
 
 ```sh
-(write (%ash-complete? "for f in a b"))
+(write (ash-complete? "for f in a b"))
 ```
 ---
     ()
@@ -37,7 +37,7 @@
 ### a while without its done is not complete
 
 ```sh
-(write (%ash-complete? "while true"))
+(write (ash-complete? "while true"))
 ```
 ---
     ()
@@ -45,7 +45,7 @@
 ### an if without its fi is not complete
 
 ```sh
-(write (%ash-complete? "if test a = a"))
+(write (ash-complete? "if test a = a"))
 ```
 ---
     ()
@@ -53,7 +53,7 @@
 ### a case without its esac is not complete
 
 ```sh
-(write (%ash-complete? "case $x in"))
+(write (ash-complete? "case $x in"))
 ```
 ---
     ()
@@ -61,7 +61,7 @@
 ### an unclosed single quote is not complete
 
 ```sh
-(write (%ash-complete? "echo 'abc"))
+(write (ash-complete? "echo 'abc"))
 ```
 ---
     ()
@@ -69,7 +69,7 @@
 ### an unclosed double quote is not complete
 
 ```sh
-(write (%ash-complete? "echo \"abc"))
+(write (ash-complete? "echo \"abc"))
 ```
 ---
     ()
@@ -77,7 +77,7 @@
 ### a trailing pipe is not complete
 
 ```sh
-(write (%ash-complete? "echo hi |"))
+(write (ash-complete? "echo hi |"))
 ```
 ---
     ()
@@ -85,7 +85,7 @@
 ### a trailing && is not complete
 
 ```sh
-(write (%ash-complete? "true &&"))
+(write (ash-complete? "true &&"))
 ```
 ---
     ()
@@ -93,7 +93,7 @@
 ### a trailing backslash is not complete
 
 ```sh
-(write (%ash-complete? "echo a \\"))
+(write (ash-complete? "echo a \\"))
 ```
 ---
     ()
@@ -101,7 +101,7 @@
 ### an unclosed subshell is not complete
 
 ```sh
-(write (%ash-complete? "( echo hi"))
+(write (ash-complete? "( echo hi"))
 ```
 ---
     ()
@@ -111,7 +111,7 @@
 ### a lone background ampersand is complete
 
 ```sh
-(write (%ash-complete? "sleep 1 &"))
+(write (ash-complete? "sleep 1 &"))
 ```
 ---
     #t
@@ -119,7 +119,7 @@
 ### a keyword inside quotes does not open a block
 
 ```sh
-(write (%ash-complete? "echo 'if'"))
+(write (ash-complete? "echo 'if'"))
 ```
 ---
     #t
@@ -127,7 +127,7 @@
 ### a closed multi-line entry is complete
 
 ```sh
-(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append (string-append "for f in a b" nl) "do echo $f; done"))))
+(do (def nl (make-string 1 (integer->char 10))) (write (ash-complete? (string-append (string-append "for f in a b" nl) "do echo $f; done"))))
 ```
 ---
     #t
@@ -140,7 +140,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### an opened function body is not complete
 
 ```sh
-(write (%ash-complete? "greet() {"))
+(write (ash-complete? "greet() {"))
 ```
 ---
     ()
@@ -148,7 +148,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### a body still open after a command is not complete
 
 ```sh
-(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append "greet() {" (string-append nl "  echo hi")))))
+(do (def nl (make-string 1 (integer->char 10))) (write (ash-complete? (string-append "greet() {" (string-append nl "  echo hi")))))
 ```
 ---
     ()
@@ -156,7 +156,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### the closing brace completes it
 
 ```sh
-(do (def nl (make-string 1 (integer->char 10))) (write (%ash-complete? (string-append "greet() {" (string-append nl (string-append "  echo hi" (string-append nl "}")))))))
+(do (def nl (make-string 1 (integer->char 10))) (write (ash-complete? (string-append "greet() {" (string-append nl (string-append "  echo hi" (string-append nl "}")))))))
 ```
 ---
     #t
@@ -164,7 +164,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### a one-line definition is complete
 
 ```sh
-(write (%ash-complete? "greet() { echo hi; }"))
+(write (ash-complete? "greet() { echo hi; }"))
 ```
 ---
     #t
@@ -172,7 +172,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### a ${NAME} brace is not a body brace
 
 ```sh
-(write (%ash-complete? "echo ${HOME}"))
+(write (ash-complete? "echo ${HOME}"))
 ```
 ---
     #t
@@ -180,7 +180,7 @@ prompt evaluates `greet() {` on its own and reports a parse error.
 ### an unclosed ${ does not hang the prompt
 
 ```sh
-(write (%ash-complete? "echo ${HOME"))
+(write (ash-complete? "echo ${HOME"))
 ```
 ---
     #t

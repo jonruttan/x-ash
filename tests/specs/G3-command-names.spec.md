@@ -39,7 +39,7 @@ The first two cases are pins that hold on main too; their expectations match
 The builtins are looked up as often going round three times as going round once.
 
 ```sh
-(let ((saved %sh-table-get)
+(let ((saved (%eval-ref (lit %sh-table-get)))
       (looks 0)
       (run (fn (_ text)
              (let ((ts (first (%sh-mark-command (sh-tokenize text)))))
@@ -48,12 +48,11 @@ The builtins are looked up as often going round three times as going round once.
     (fn (_ text)
       (def thunk (run text))
       (set! looks 0)
-      (set! %sh-table-get
-        (fn (_ key table)
-          (match ((same? table %sh-builtin-table) (set! looks (+ looks 1))) (#t ()))
+      (%eval-set! (lit %sh-table-get) (fn (_ key table)
+          (match ((same? table sh-builtin-table) (set! looks (+ looks 1))) (#t ()))
           (saved key table)))
-      (guard (e (do (set! %sh-table-get saved) (error e))) (thunk))
-      (set! %sh-table-get saved)
+      (guard (e (do (%eval-set! (lit %sh-table-get) saved) (error e))) (thunk))
+      (%eval-set! (lit %sh-table-get) saved)
       looks))
   (= (count "for g3_i in 1; do : ; [ 1 = 1 ]; done")
      (count "for g3_i in 1 2 3; do : ; [ 1 = 1 ]; done")))
