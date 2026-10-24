@@ -247,8 +247,8 @@
       (set! %sh-hd-jit (lit off))
       (set! %sh-hd-jit-bytes 0))))
 (set! %image-transients
-  (pair (lit %sh-hd-raw) (pair (lit %sh-hd-cbase)
-    (pair (lit %sh-hd-jit-states) %image-transients))))
+  (pair (fn (_) (set! %sh-hd-raw ())) (pair (fn (_) (set! %sh-hd-cbase ()))
+    (pair (fn (_) (set! %sh-hd-jit-states ())) %image-transients))))
 (set! %image-recache-hooks (pair (fn (_) (%sh-hd-reset!)) %image-recache-hooks))
 
 (provide ash/tokens

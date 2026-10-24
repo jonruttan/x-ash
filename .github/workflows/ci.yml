@@ -60,6 +60,13 @@ jobs:
       # The gate is spec-gate: it compares failing test names against
       # tests/contract/known-failures.txt and is red when they differ in either
       # direction -- a new failure, or a recorded one that now passes.
+      # The image is what `x -l ash` boots from and what x-os ships; a write
+      # that fails here fails the job, where the spec runner would fall back
+      # to booting from source and say nothing.
+      # Run from inside the x-lang checkout: x.sh reads its mode from the
+      # working directory, and from anywhere else it looks for an install tree.
+      - name: Write the boot image
+        run: cd .x-lang && X_LANG_DIR="$(dirname "$GITHUB_WORKSPACE")/" sh x.sh --image -l ash
       - name: Run the ASH specs
         run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
 

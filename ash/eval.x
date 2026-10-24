@@ -38,7 +38,10 @@
 ; it would report the WRITER's pid for $$ forever.  Re-read after a load, the
 ; same way it is read here.
 (def %sh-pid (sh-getpid))
-(set! %image-transients (pair (lit %sh-pid) %image-transients))
+; Process-only state is put down for an image write by a thunk, not by name:
+; the writer clears a symbol in the child's root, and these names are this
+; module's.  A thunk made here closes over the module's binding.
+(set! %image-transients (pair (fn (_) (set! %sh-pid ())) %image-transients))
 (set! %image-recache-hooks
   (pair (fn (_) (set! %sh-pid (sh-getpid))) %image-recache-hooks))
 ; --- Cursor: mutable box holding remaining token list ---
@@ -383,7 +386,7 @@
 ; The aliases are this process's, as its variables are, so a state image does
 ; not carry them.
 (def %sh-aliases ())
-(set! %image-transients (pair (lit %sh-aliases) %image-transients))
+(set! %image-transients (pair (fn (_) (set! %sh-aliases ())) %image-transients))
 
 (def %sh-alias-here?
   (fn (_ tok state toks ax)
@@ -569,13 +572,13 @@
 (def %sh-vars ())
 (def %sh-export-marks ())
 (set! %image-transients
-  (pair (lit %sh-vars) (pair (lit %sh-export-marks) %image-transients)))
+  (pair (fn (_) (set! %sh-vars ())) (pair (fn (_) (set! %sh-export-marks ())) %image-transients)))
 
 ; The commands `hash` has been asked to remember, (NAME . PATH), latest first.
 ; Assigning or unsetting PATH forgets them, as it does in dash and bash (see
 ; %sh-hash).
 (def %sh-hashed ())
-(set! %image-transients (pair (lit %sh-hashed) %image-transients))
+(set! %image-transients (pair (fn (_) (set! %sh-hashed ())) %image-transients))
 
 (def %sh-hashed-forget
   (fn (_ name) (when (string=? name "PATH") (set! %sh-hashed ()))))
@@ -597,7 +600,7 @@
 ; The names `readonly` has marked.  The mark belongs to this process, as the
 ; variables do, so a state image carries none.
 (def %sh-readonly-names ())
-(set! %image-transients (pair (lit %sh-readonly-names) %image-transients))
+(set! %image-transients (pair (fn (_) (set! %sh-readonly-names ())) %image-transients))
 
 (def %sh-readonly? (fn (_ name) (%sh-word-in? name %sh-readonly-names)))
 
@@ -623,7 +626,7 @@
 ; and its putting back unset the name first, so they empty it too.  Above the
 ; setter, which the file calls as it loads.
 (def %sh-ifs-kept ())
-(set! %image-transients (pair (lit %sh-ifs-kept) %image-transients))
+(set! %image-transients (pair (fn (_) (set! %sh-ifs-kept ())) %image-transients))
 
 (def %sh-ifs-forget
   (fn (_ name) (match ((string=? name "IFS") (set! %sh-ifs-kept ())) (#t ()))))
@@ -686,7 +689,7 @@
 ; The frame belongs to this process, as the variables do, so no state image
 ; carries one.
 (def %sh-locals ())
-(set! %image-transients (pair (lit %sh-locals) %image-transients))
+(set! %image-transients (pair (fn (_) (set! %sh-locals ())) %image-transients))
 
 (def %sh-var-state
   (fn (_ name)
