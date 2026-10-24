@@ -74,7 +74,7 @@
 (def convert (fn (_ v target . extra) (apply %cvt (pair v (pair target extra)))))
 
 ; The base types a conversion is asked for, through the door the platform
-; names them by (x-lang v0.15.0): type/convert.x keeps its own handles private.
+; names them by (x-lang v0.15.0, release-ref: history): type/convert.x keeps its own handles private.
 (def ash-int-type (Type named INTEGER))
 (def %ash-string-type (Type named STRING))
 

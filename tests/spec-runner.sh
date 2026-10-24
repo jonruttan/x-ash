@@ -93,6 +93,6 @@ fi
 # other bundle. It once needed a seam-collect switch, an allocation ceiling and
 # a batch width because a type registered on an isolated tokenizer base did not
 # survive a collect (x-lang#599); the engine fix (x-engine-c v0.2.7, reaching
-# this bundle through x-lang v0.12.0) removed the cause and the knobs with it.
+# this bundle through x-lang v0.12.0 (release-ref: history)) removed the cause and the knobs with it.
 
 . "$X_ROOT/tests/spec-runner.sh"

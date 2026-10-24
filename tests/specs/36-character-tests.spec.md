@@ -10,7 +10,7 @@ objects a comparison.
 The classes are checked over every byte.  A character test must cost less
 than one platform comparison, and telling whether a name is all digits less
 than one conversion.  A comparison is counted as what `(>= 5 1)` allocates on
-x-lang v0.29.0, 338 objects over what measuring an empty call costs; a loop
+x-lang v0.29.0 (release-ref: history), 338 objects over what measuring an empty call costs; a loop
 of N comparisons, as the other specs write one, is 139 + 356N.  The counts
 are written out, so a faster `>=` leaves every bound where it was.
 

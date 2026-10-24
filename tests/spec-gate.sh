@@ -37,7 +37,7 @@ fi
 
 [ -f "$KIT/spec-gate.sh" ] || {
 	echo "x-ash: no spec-gate.sh under $KIT" >&2
-	echo "  The lang kit ships it as of x-lang v0.10.0; this bundle declares which release." >&2
+	echo "  The lang kit ships it as of x-lang v0.10.0 (release-ref: history); this bundle declares which release." >&2
 	exit 1
 }
 
