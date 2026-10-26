@@ -464,32 +464,6 @@
 ; Ahead of any of them, the options `set` takes: `ash -e FILE`, `ash -ec CMD`.
 ; `--` or `-` ends the options.
 
-; What the platform's wrapper hands the engine, which are not the shell's.
-(def %ash-engine-flag?
-  (fn (_ s)
-    (match
-      ((string=? s "--quiet") #t)
-      ((string=? s "--batch") #t)
-      ((string=? s "--no-color") #t)
-      (#t (string=? s "--verbose")))))
-
-(def %ash-without-engine-flags
-  (fn (self ws)
-    (match
-      ((null? ws) ())
-      ((%ash-engine-flag? (first ws)) (self (rest ws)))
-      (#t (pair (first ws) (self (rest ws)))))))
-
-; The shell's own arguments out of the engine's: past the engine's name and
-; its flags, and past the `--` the wrapper takes to end its own.
-(def ash-operands
-  (fn (_ raw)
-    (def ws (%ash-without-engine-flags (if (null? raw) () (rest raw))))
-    (match
-      ((null? ws) ws)
-      ((string=? (first ws) "--") (rest ws))
-      (#t ws))))
-
 ; An option word's letters with c and s taken out, as (LETTERS C? S?).
 (def %ash-option-letters
   (fn (self w i kept c? s?)
@@ -584,11 +558,12 @@
             (sh-exit-shell sh-error-status)))
       (#t (do (%ash-take-stdin) (%ash-run-script text))))))
 
-; The shell, started: it does not return.  With nothing asked for it is a
-; session, or the script on stdin when the platform says a file was supplied.
+; The shell, started on its operands, (Sys args 'program) past the engine's
+; path: it does not return.  With nothing asked for it is a session, or the
+; script on stdin when the platform says a file was supplied.
 (def ash-main
-  (fn (_ raw)
-    (def plan (ash-plan (ash-operands raw)))
+  (fn (_ operands)
+    (def plan (ash-plan operands))
     (def label (%ash-plan-get (lit label) plan))
     (def arg0 (%ash-plan-get (lit arg0) plan))
     (def set-status (sh-set (%ash-plan-get (lit opts) plan)))
@@ -607,4 +582,4 @@
       (%batch? (ash-batch))
       (#t (do (ash-banner) (ash-repl))))))
 
-(provide ash/repl ash-repl ash-batch ash-banner ash-complete? ash-main ash-operands ash-plan)
+(provide ash/repl ash-repl ash-batch ash-banner ash-complete? ash-main ash-plan)

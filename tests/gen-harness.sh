@@ -80,7 +80,7 @@ cat > "$OUT" <<EOF
 (import ash/line
   ash-read-line ash-interactive?)
 (import ash/repl
-  ash-batch ash-banner ash-complete? ash-operands ash-plan)
+  ash-batch ash-banner ash-complete? ash-plan)
 (set! %repl-print ash-repl-print)
 ; The specs read the modules' internals.  Each private a spec names is
 ; reached through its module here; one that the module rebinds while it runs
