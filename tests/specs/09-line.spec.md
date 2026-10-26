@@ -17,7 +17,9 @@ or a redirection target as a path, by the shell's own globbing.
 With colour on, a line is coloured by the tokens of the shell's colouring
 Lexer, each drawn as the bytes it read. These cases force colour on and set
 the codes to markers, since the harness has no terminal and its codes are
-empty; the reset code is empty for the same reason.
+empty.  The reset after a span is taken out: up to v0.39.0 it is empty for
+the same reason, and from v0.40.0 x/tool/syntax writes `\x1b[0m` after every
+span that has a code.
 
 ### each token takes its colour, and a string or comment left open runs to the end
 
@@ -34,7 +36,7 @@ empty; the reset code is empty for the same reason.
                    (%ash-paint "b\" c" () "echo \"a ")
                    (%ash-paint "x='a"))))
       (eval (lit (set! %ansi? #f)) (module x/repl/ansi))
-      r))
+      (List map (fn (_ s) (Str8 replace "\x1b[0m" "" s)) r)))
 ```
 ---
     ("<k>if x <s>\"a b\" <v>$y <s>'c' 2>e <c># z" "<b>echo <s>\"a $(b \"c\") d" "<s>b\" c" "x='a")
