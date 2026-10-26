@@ -63,4 +63,4 @@
   ()
   (do
     (sh-sweeps! #t)
-    (ash-main (guard (_ ()) args))))
+    (ash-main (guard (_ ()) (rest (Sys args (lit program)))))))

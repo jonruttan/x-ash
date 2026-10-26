@@ -1,16 +1,18 @@
 ## the shell's arguments
 
-`ash-operands` takes the shell's arguments out of the engine's, and `ash-plan`
-says what they ask for: a session, the script on stdin, a command, or a file.
+`ash-plan` says what the shell's arguments, (Sys args 'program) past the
+engine's path, ask for: a session, the script on stdin, a command, or a file.
 The expectations are BusyBox ash's reading of the same arguments.
 
-### the engine's name and flags, and the wrapper's `--`, are not the shell's
+### a word the engine also takes is the shell's
 
 ```sh
-(write (ash-operands (list "x-bin" "--batch" "--" "-c" "echo hi" "--quiet")))
+(let ((p (ash-plan (list "-c" "echo hi" "--quiet" "--batch"))))
+  (write (list (%ash-plan-get (lit label) p) (%ash-plan-get (lit text) p)
+               (%ash-plan-get (lit arg0) p) (%ash-plan-get (lit params) p))))
 ```
 ---
-    ("-c" "echo hi")
+    (command "echo hi" "--quiet" ("--batch"))
 
 ### no arguments is a session
 
