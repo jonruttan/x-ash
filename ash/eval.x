@@ -27,6 +27,14 @@
 (import ash/tokens
   sh-tokenize mk-tok-word sh-digit? sh-op-start? sh-ws? sh-hd-jit sh-hd-raw
   sh-hd-jit-tick!)
+
+; This file is most of the bundle, and reading it leaves about 22M objects of
+; garbage for 0.2M live.  The loader sweeps as each file ends, which here is
+; too late: an image writer held all of it at once, 1.8 GB.  So the load
+; sweeps as it goes, before a section header every 1.5M objects or so.  An
+; import from a state image runs none of this.
+(def %sh-collect (prim-ref (lit heap) (lit collect)))
+
 (def %sh-status 0)
 ; The last command's status, read from outside through sh-status: the name
 ; itself is rebound by every command, and an import holds a copy.
@@ -672,6 +680,7 @@
     (set! %sh-export-marks (%sh-words-without name %sh-export-marks))
     (sh-unsetenv name)))
 
+(%sh-collect)
 ; --- Variables that belong to a call ----------------------------------------
 ;
 ; `local x` inside a function gives x a value for the call and puts the old
@@ -1551,6 +1560,7 @@
         ((%sh-acc-started a) (pair (%sh-acc-field a) (%sh-acc-fields a)))
         (#t (%sh-acc-fields a))))))
 
+(%sh-collect)
 ; --- Keeping quoted glob characters literal ---------------------------------
 ;
 ; Pathname expansion happens after the word is built, by which point `"*"` and
@@ -2109,6 +2119,7 @@
         (if (or (null? home) (= (string-length home) 0)) () home))
       ())))
 
+(%sh-collect)
 ; --- Arithmetic expansion: $(( ... )) ---------------------------------------
 ;
 ; The tokenizer already hands this over whole -- %sh-cs-end counts parens, so
@@ -2913,6 +2924,7 @@
       ((null? (first (rest read))) (%sh-arith-eval (%sh-expand-str-dq (first read))))
       (#t (%sh-arith-run (first (rest read)))))))
 
+(%sh-collect)
 ; --- The walk ---------------------------------------------------------------
 ;
 ; LABEL says which region the scan is in.  A word is not uniformly
@@ -3615,6 +3627,7 @@
       acc
       (self (rest fields) (%sh-prepend-rev (%sh-glob-field (first fields)) acc)))))
 
+(%sh-collect)
 ; --- What the callers see ----------------------------------------------------
 ;
 ; A tok-sq is one field, always: single quotes suppress everything, splitting
@@ -4433,6 +4446,7 @@
 ; into that, once, instead of every arm spelling `(if p 0 1)`.
 (def %sh-bool (fn (_ p) (match (p 0) (#t 1))))
 
+(%sh-collect)
 ; --- test / [ -------------------------------------------------------------
 ;
 ; test knows -n, -z, =, != (string), the file predicates, and the numeric
@@ -5065,6 +5079,7 @@
           1
           (do (set! %sh-args (drop n %sh-args)) 0))))))
 
+(%sh-collect)
 ; --- set --------------------------------------------------------------------
 ;
 ;   set -- a b c     replace the positional parameters
@@ -5995,6 +6010,7 @@
       (newline)
       (self (rest rows)))))
 
+(%sh-collect)
 ; --- The builtin table ------------------------------------------------------
 ;
 ; One table, so "is this a builtin" and "what runs it" cannot diverge: the
@@ -6367,7 +6383,6 @@
 (def %sh-sweep-left 64)
 (def %sh-sweep-holds 0)
 (def %sh-sweep-long 25000)
-(def %sh-collect (prim-ref (lit heap) (lit collect)))
 
 (def %sh-sweep-tick!
   (fn (_)
@@ -6792,6 +6807,7 @@
     (set-first! cur ts)
     (error (string-append "parse error: unexpected EOF in " what))))
 
+(%sh-collect)
 ; --- Skipping a balanced token run -------------------------------------------
 ;
 ; One walk serves every skipper: through the tokens keeping a nesting count,
@@ -7589,6 +7605,8 @@
                 (if (= depth 0) () (%skip-to-close-paren cur (- depth 1)))
                 (%skip-to-close-paren cur depth))))
           (%skip-to-close-paren cur depth))))))
+
+(%sh-collect)
 ; --- Compound command dispatch ---
 
 ; The depth is bumped here, around the whole compound, rather than in each of
@@ -8440,6 +8458,8 @@
       ((= (string-length op) 1)
         (match ((= (string-ref op 0) #\;) #t) (#t (= (string-ref op 0) #\&))))
       (#t ()))))
+
+(%sh-collect)
 ; --- Here-documents ---------------------------------------------------------
 ;
 ;     cat <<EOF          the body is the LINES THAT FOLLOW, to a line that is
@@ -9083,6 +9103,7 @@
       ((%sh-hex-digit? (string-ref s i)) (self s (fx+ i 1) n limit))
       (#t i))))
 
+(%sh-collect)
 ; --- Loops and functions read into nodes -----------------------------------
 ;
 ; A while, until or for loop is read once, where the evaluator meets it, and a
@@ -9900,6 +9921,7 @@
   (fn (_ walk ts depth)
     (match ((= depth 0) ts) (#t (walk (rest ts) (fx+ depth -1))))))
 
+(%sh-collect)
 ; --- Running the nodes ---
 ;
 ; Each runs as the evaluator's walk over its tokens runs, and answers what it
