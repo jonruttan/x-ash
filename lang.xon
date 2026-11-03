@@ -11,6 +11,7 @@
 ;   (requires-lang "NAME" ["V"]) another lang this one is written on top
 ;                               of, optionally at an exact version
 ;   (entry "FILE")              loaded AFTER the dialect, not instead of it
+;   (grammar NAME (module M) ...) a highlighting grammar x/tool/syntax loads
 
 (lang "ash")
 
@@ -25,8 +26,14 @@
 ; for equality. v0.15.0 or later is required, not merely paired with: this
 ; bundle names the base types through the door that release added,
 ; `(Type named INTEGER)`, where it read type/convert.x's private handles
-; before. On anything earlier this bundle does not run.
+; before. On anything earlier this bundle does not run. v0.43.0 or later
+; reads the (grammar ...) form below, whose catalogue in x/tool/syntax that
+; release added; an earlier one refuses the form.
 
 (requires-release "v0.44.0")
 
 (entry "run.x")
+
+; The sh grammar, for any process that colours a script: ash/syntax imports
+; x-lang libraries only, never the shell.
+(grammar sh (module ash/syntax) (files ".sh") (names ".profile") (interpreters "sh" "ash" "dash"))
