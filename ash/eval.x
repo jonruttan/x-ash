@@ -33,7 +33,8 @@
 ; too late: an image writer held all of it at once, 1.8 GB.  So the load
 ; sweeps as it goes, before a section header every 1.5M objects or so.  An
 ; import from a state image runs none of this.
-(def %sh-collect (prim-ref (lit heap) (lit collect)))
+(import x/core/doors heap-collect io-write-to-str)
+(def %sh-collect heap-collect)
 
 (def %sh-status 0)
 ; The last command's status, read from outside through sh-status: the name
@@ -5547,13 +5548,12 @@
 ; Report an error the way the shell does: on stderr, after `ash: `.  A
 ; structured error is rendered by the platform writer, since its memory read as
 ; a symbol name would print garbage bytes.
-(def %sh-write-to-str (prim-ref (lit io) (lit write-to-str)))
 (def sh-report
   (fn (_ err)
     ; A raise carrying this sentinel was reported where it happened, and is
     ; raised to end the shell rather than to say anything more.
     (unless (%sh-signal? err "%sh-reported")
-      (%stderr "ash: " (if (str? err) err (%sh-write-to-str err)) "\n"))))
+      (%stderr "ash: " (if (str? err) err (io-write-to-str err)) "\n"))))
 
 ; The status an error ends a shell with: a forked child, a script run with -f,
 ; and a shell reading commands with no terminal.  dash says 2 for every error,
