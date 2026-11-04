@@ -1,6 +1,4 @@
 ; tokens.x -- the shell's tokens, read by the platform's Lexer
-; lint-known: read-str
-; (read-str is sent to the lexer instance %sh-lexer, which the linter cannot see in a scoped module.)
 ;
 ; sh-tokenize reads a text into tokens through a Lexer (x/reader/lexer): the
 ; rules below become the types of a tokenizer base of its own, their states
