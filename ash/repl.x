@@ -375,7 +375,8 @@
 ; (crafting-a-lang.md 6/7); this bundle could not take it until x-engine-c
 ; v0.2.7, because a type registered on its own tokenizer base did not survive a
 ; collect (x-lang#599).
-(def %ash-collect (prim-ref 'heap 'collect))
+(import x/core/doors heap-collect)
+(def %ash-collect heap-collect)
 
 (def ash-repl ())
 (set! ash-repl

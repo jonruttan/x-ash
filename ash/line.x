@@ -199,13 +199,12 @@
 ; Whether `name` starts with `word`, tested with the byte primitives: this
 ; runs once per name on PATH for every Tab, and a class door per name costs
 ; seconds where the primitives cost tenths.
-(def %ash-bsub (prim-ref (lit str) (lit byte-sub)))
-(def %ash-blen (prim-ref (lit str) (lit byte-len)))
+(import x/core/doors str-byte-sub str-byte-len)
 (def %ash-prefix?
   (fn (_ word name)
-    (let ((k (%ash-blen word)))
-      (if (> k (%ash-blen name)) #f
-        (str=? word (%ash-bsub name 0 k))))))
+    (let ((k (str-byte-len word)))
+      (if (> k (str-byte-len name)) #f
+        (str=? word (str-byte-sub name 0 k))))))
 
 ; --- where the word stands ----------------------------------------------------
 ;

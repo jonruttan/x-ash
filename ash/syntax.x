@@ -100,14 +100,12 @@
 ; outside any string, so spans need not read the script from its top.  A
 ; multi-line quoted string with such a line in it colours inverted from that
 ; line to the end of the window, as other editors' shell grammars do.
-(def %sh-syntax-bref (prim-ref (lit str) (lit byte-ref)))
-(def %sh-syntax-cint (prim-ref (lit char) (lit ->int)))
-(def %sh-syntax-blen (prim-ref (lit str) (lit byte-len)))
+(import x/core/doors str-byte-ref char->int str-byte-len)
 
 (def %sh-syntax-sync
   (fn (_ s ls)
-    (if (>= ls (%sh-syntax-blen s)) #f
-      (let ((b (%sh-syntax-cint (%sh-syntax-bref s ls))))
+    (if (>= ls (str-byte-len s)) #f
+      (let ((b (char->int (str-byte-ref s ls))))
         (match
           ((List includes? b (list 35 95 125)) #t)
           ((if (>= b 65) (<= b 90) #f) #t)

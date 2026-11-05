@@ -47,14 +47,15 @@
 ; lib/x/reader/lit-reader.x hold. It takes the raw base, and (Base make-tok)
 ; hands back a wrapped instance -- passing the instance crashes the prim on any
 ; input -- so the unwrap lives here, once.
-(def token-read-str (prim-ref (lit tok) (lit read-str)))
+(import x/core/doors tok-read-str buf-tok char->int int->char str-byte-len str-byte-ref str-byte-sub str-append int< int+ int* type-of)
+(def token-read-str tok-read-str)
 (def token-read-string
   (fn (_ base input) (token-read-str (Base raw-of base) input)))
 
 ; The consumed token's text, inside a reader callback. The namespace is `buf`
 ; and the member is `tok` (not `token`). Unbound, this raises inside a
 ; tokenizer callback, which surfaces as a crash rather than a message.
-(def buffer-token (prim-ref (lit buf) (lit tok)))
+(def buffer-token buf-tok)
 
 ; --- Tokenizer int cells -----------------------------------------------------
 ; These are real C cells built by the engine, so the raw-word accessors are
@@ -88,12 +89,12 @@
 ; callback, where a collection mid-token is a hazard. lib/x/reader/analyser.x
 ; holds the same reference:
 ;   (def %char->integer (prim-ref (lit char) (lit ->int)))
-(def char->integer (prim-ref (lit char) (lit ->int)))
+(def char->integer char->int)
 ; Conversions are keyed on the source type, so the pair is (char ->int) and
 ; (int ->char). (char from-int) exists as a Char method but not as a catalog
 ; member, and prim-ref answers nil for a missing member -- which would reach
 ; the reader as a garbage int rather than an error.
-(def integer->char (prim-ref (lit int) (lit ->char)))
+(def integer->char int->char)
 ; Byte doors, not class dispatch. These four are the expansion walk's inner
 ; loop -- every unquoted word is scanned three times, a byte at a time -- and
 ; the raw primitives cost about a fifth of the heap that (Str8 ref)/(Str8 sub)
@@ -102,11 +103,10 @@
 ; Bound to the primitive directly where the argument order already agrees; only
 ; substring (Scheme's [start, end) against the primitive's (start, length)) and
 ; the variadic string-append keep a wrapper.
-(def string-length (prim-ref (lit str) (lit byte-len)))
-(def string-ref (prim-ref (lit str) (lit byte-ref)))
-(def %str-byte-sub (prim-ref (lit str) (lit byte-sub)))
-(def substring (fn (_ s a b) (%str-byte-sub s a (- b a))))
-(def str-append-2 (prim-ref (lit str) (lit append)))
+(def string-length str-byte-len)
+(def string-ref str-byte-ref)
+(def substring (fn (_ s a b) (str-byte-sub s a (- b a))))
+(def str-append-2 str-append)
 (def string-append (fn (_ . ss) (%ash-str-append ss)))
 (def %ash-str-append
   (fn (self ss)
@@ -130,9 +130,9 @@
 ; out of string-ref or handed to a reader hook -- and never for a value from
 ; the script, which converts to nil when it is not a number.  `>=` is spelled
 ; (not (fx<? a b)).
-(def fx<? (prim-ref (lit int) (lit <)))
-(def fx+ (prim-ref (lit int) (lit +)))
-(def fx* (prim-ref (lit int) (lit *)))
+(def fx<? int<)
+(def fx+ int+)
+(def fx* int*)
 
 ; REVERSE AND list->string RUN INSIDE READER CALLBACKS, so neither may be a
 ; class dispatch.  lib/x/reader/analyser.x states the rule outright: reader
@@ -255,10 +255,9 @@
 ; number printer, which the printer uses for every integer it writes: a tenth
 ; of what `convert` costs.  It divides with the integer primitives, so any
 ; other number -- a bignum out of arithmetic -- goes through `convert`.
-(def %ash-type-of (prim-ref (lit type) (lit of)))
 (def ash-number->str
   (fn (_ n)
-    (if (eq? (%ash-type-of n) ash-int-type)
+    (if (eq? (type-of n) ash-int-type)
       (%number->str n)
       (convert n %ash-string-type))))
 
