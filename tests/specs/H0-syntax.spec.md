@@ -54,7 +54,7 @@ grammar takes lang.xon's suffixes, names and interpreters.
       "#!/bin/sh\nif [ \"$x\" = 'a b' ]; then\n  echo ${y:-z} $1 2>&1 # c\nfi\nf() { cd \\$HOME; }\n"))
 ```
 ---
-    ((0 9 comment) (10 2 keyword) (13 1 keyword) (15 4 string) (22 5 string) (29 1 operator) (31 4 keyword) (38 4 keyword) (43 7 name) (51 2 name) (54 1 number) (55 2 operator) (57 1 number) (59 3 comment) (63 2 keyword) (67 1 operator) (68 1 operator) (70 1 keyword) (72 2 keyword) (75 2 escape) (81 1 operator) (83 1 keyword))
+    ((0 9 comment) (10 2 keyword) (13 1 keyword) (15 1 string) (16 2 name) (18 1 string) (22 5 string) (29 1 operator) (31 4 keyword) (38 4 keyword) (43 7 name) (51 2 name) (54 1 number) (55 2 operator) (57 1 number) (59 3 comment) (63 2 keyword) (67 1 operator) (68 1 operator) (70 1 keyword) (72 2 keyword) (75 2 escape) (81 1 operator) (83 1 keyword))
 
 ### a command substitution's commands are read as any others
 
@@ -66,7 +66,20 @@ it would be on its own; `$'...'` is a string, a quote escaped inside it.
     ((Syntax named (lit sh)) spans "a=$(pwd) b=$((1+2)) `echo $'c\\'d'` e#f"))
 ```
 ---
-    ((2 2 operator) (4 3 keyword) (7 1 operator) (11 3 operator) (17 1 operator) (18 1 operator) (20 1 operator) (21 4 keyword) (26 7 string) (33 1 operator))
+    ((0 1 name) (2 2 operator) (4 3 keyword) (7 1 operator) (9 1 name) (11 3 operator) (17 1 operator) (18 1 operator) (20 1 operator) (21 4 keyword) (26 7 string) (33 1 operator))
+
+### a double-quoted string's expansions and an assignment's name colour
+
+Inside double quotes, $NAME, $1, $? and ${...} are names and the bytes
+between them strings; an escaped $ and a $( stay the string's.  A word
+starting name= colours its name, the = and the value left plain.
+
+```sh
+(do (import x/tool/syntax) (import ash/syntax)
+    ((Syntax named (lit sh)) spans "x=1 y=\"a $b ${c:-}\\$d $? $(e)\" 2=z"))
+```
+---
+    ((0 1 name) (4 1 name) (6 3 string) (9 2 name) (11 1 string) (12 6 name) (18 4 string) (22 2 name) (24 6 string))
 
 ### a string or an expansion left open runs to the end
 
