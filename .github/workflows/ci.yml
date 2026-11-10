@@ -1,98 +1,45 @@
 name: CI
 
-# The matrix runs two x-lang refs: the release this bundle declares in
-# lang.xon (requires-release ...) and current main. The pinned leg proves the
-# bundle still runs on the platform it declares; the main leg is an early
-# warning that x-lang has moved underneath it, and is allowed to fail.
+# The bundle CI the platform ships, in x-lang's .github/workflows/bundle.yml:
+# the suite against the release lang.xon declares, and against x-lang main on
+# a push to main, the weekly schedule and a manual dispatch.  The suite runs
+# on Ubuntu only, as it did before it moved there.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Weekly, to catch x-lang moving while this bundle sits still.
+  # Weekly, because x-lang can move while this repository sits still.
   schedule:
     - cron: '0 6 * * 1'
 
 jobs:
-  specs:
-    name: specs @ x-lang ${{ matrix.x-lang }}
-    runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.x-lang == 'main' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Keep the pinned row equal to lang.xon's (requires-release ...); the
-        # step below fails the build if they drift.
-        x-lang: ['v0.44.0', 'main']
+  ci:
+    uses: jonruttan/x-lang/.github/workflows/bundle.yml@main
+    with:
+      os: '["ubuntu-24.04"]'
 
+  # The image is what `x -l ash` boots from and what x-os ships; a write that
+  # fails here fails the job, where the spec runner would fall back to booting
+  # from source and say nothing.  Run from inside the x-lang checkout: x.sh
+  # reads its mode from the working directory, and from anywhere else it looks
+  # for an install tree.
+  image:
+    name: boot image writes @ declared release
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check out x-lang
-        uses: actions/checkout@v4
-        with:
-          repository: jonruttan/x-lang
-          ref: ${{ matrix.x-lang }}
-          path: .x-lang
-
-
-      # Fail loudly if the declared release and the matrix leg have drifted.
-      - name: Check the declared release against the checkout
-        if: matrix.x-lang != 'main'
+      - uses: actions/checkout@v7
+      - name: Check out x-lang at the declared release
         run: |
           declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
-          if [ "$declared" != "${{ matrix.x-lang }}" ]; then
-            echo "lang.xon declares $declared, matrix leg is ${{ matrix.x-lang }}" >&2
-            echo "update one or the other -- they are the same fact" >&2
-            exit 1
-          fi
-
-      # The engine is acquired, not built: x-lang pins one and knows how to
-      # fetch it.  Nothing here reimplements that.
+          git clone --depth 1 --branch "$declared" \
+            https://github.com/jonruttan/x-lang.git .x-lang
       - name: Build the platform
         working-directory: .x-lang
         run: |
-          make engine      # acquire the pinned engine
-          make             # x-bin at the repo root -- `make engine` does not build it
-          make boot        # the launcher-free amalgams the harness loads
-
-      # The gate is spec-gate: it compares failing test names against
-      # tests/contract/known-failures.txt and is red when they differ in either
-      # direction -- a new failure, or a recorded one that now passes.
-      # The image is what `x -l ash` boots from and what x-os ships; a write
-      # that fails here fails the job, where the spec runner would fall back
-      # to booting from source and say nothing.
-      # Run from inside the x-lang checkout: x.sh reads its mode from the
-      # working directory, and from anywhere else it looks for an install tree.
+          make engine
+          make
+          make boot
       - name: Write the boot image
         run: cd .x-lang && X_LANG_DIR="$(dirname "$GITHUB_WORKSPACE")/" sh x.sh --image -l ash
-      - name: Run the ASH specs
-        run: X="$PWD/.x-lang/x.sh" sh tests/spec-gate.sh
-
-  relocatable:
-    # Gate: a bundle needs no root-relative path literal, not even in run.x
-    # (x.sh boots the dialect and arms this root before run.x is read). One
-    # would nail the bundle to the directory it was written in, and the
-    # symptom only appears once someone moves it.
-    name: no path literals at all
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: No path literals outside run.x
-        run: |
-          # Ignore comments -- a file may quote a literal it does not use.
-          hits=$(grep -rn '(include "[a-zA-Z]' --include='*.x' . \
-                 | grep -Ev ':[0-9]+:[[:space:]]*;' || true)
-          if [ -n "$hits" ]; then
-            echo "root-relative include (a bundle needs none, not even in run.x):" >&2
-            echo "$hits" >&2
-            exit 1
-          fi
-      - name: The generated harness is not committed
-        run: |
-          if [ -e tests/lib/harness.gen.x ]; then
-            echo "tests/lib/harness.gen.x is generated and machine-specific;" >&2
-            echo "it must not be committed (see .gitignore)" >&2
-            exit 1
-          fi
