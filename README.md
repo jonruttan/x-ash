@@ -2,9 +2,11 @@
 
 <p align="center"><img src="docs/bitwise-banner.svg" alt="x-ash, with Bitwise the owl" width="100%"></p>
 
-A shell on [x-lang](https://github.com/jonruttan/x-lang): its own tokenizer on
-its own base, word expansion, redirection, pipelines, and the control
-structures.
+A POSIX shell written in [x-lang](https://github.com/jonruttan/x-lang), for
+scripts and for a terminal: word expansion, redirection, pipelines, the
+control structures, functions and aliases, and a prompt with line editing,
+history, completion and colour. It is ash, not bash: it implements the
+standard and stops there.
 
 ```
 $ x -l ash
@@ -100,8 +102,9 @@ if need be.
 Builtins: `echo` (with `-n`), `cd`, `pwd`, `export`, `local`, `unset` (`-f`
 for functions, `-v` for variables), `read` (`-r`, and `-d DELIM` to read to a
 byte other than newline, `-d ''` to a NUL), `set`, `test` / `[`, `.` /
-`source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap` (EXIT only),
-`return`, `shift`, `exit`, `true`, `false`, `:`, `alias`, `unalias`, `hash`.
+`source`, `eval`, `exec`, `getopts`, `command`, `type`, `trap`, `wait`,
+`readonly`, `break`, `continue`, `return`, `shift`, `exit`, `true`, `false`,
+`:`, `alias`, `unalias`, `hash`.
 A word one of them takes as a variable's name must be a NAME — a letter or
 underscore, then letters, digits and underscores — and so must a function's
 name and a `for` loop's variable. `.` looks for a file named without a `/` in
@@ -168,12 +171,13 @@ comparisons `-eq` `-ne` `-lt` `-le` `-gt` `-ge`, whose operands are decimal
 integers, blanks around them and a sign allowed. Up to four words are read
 by how many there are, as POSIX sets out; more are an expression, where `!`
 binds tighter than `-a` and `-a` tighter than `-o`, and `(` `)` group. An
-unknown operator is a usage error (status 2), not a silent false. `-r`, `-w`,
-`-x` and `-ef` are not implemented: they need access(2) and device and inode
-numbers, which the platform does not yet reach.
+unknown operator is a usage error (status 2), not a silent false.
 
-Not implemented: an action on a signal (`trap` takes one for EXIT alone), and
-job control.
+`trap ACTION EXIT` runs its action when the shell exits. For a signal,
+`trap "" INT` ignores it and `trap - INT` restores the default; `trap` alone
+prints what is set, and a subshell starts with none. `wait` waits for every
+asynchronous list, or for the ones whose pids it is given, and answers the
+last one's status.
 
 Subshells: `( ... )` forks, and the interpreter has no flush primitive, so a
 child's buffered output can be lost if the parent exits first. It prints
@@ -184,6 +188,12 @@ At the prompt, an entry that is not finished continues on a `> ` line — an
 unclosed quote, a trailing `|` or `&&` or backslash, an `if`/`for`/`while`/
 `until`/`case` whose closer has not been typed yet, or a function body whose
 closer is still to come.
+
+The prompt is x-lang's line editor: the arrow keys and the readline chords,
+history, and colour applied as the line is typed, from the shell's own
+tokens. Tab completes a command's name from the builtins, the reserved words
+and the executables on PATH, and a path anywhere else, a directory coming
+with its `/`.
 
 There is a prompt when there is someone to prompt: the banner and PS1 and PS2
 appear when the shell's own input and its reports are both terminals, and the
@@ -205,16 +215,31 @@ commands rather than starting a comment, and `#` starts one rather than
 dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 [lang contract](https://github.com/jonruttan/x-lang/blob/main/docs/lang-contract.md).
 
+## Not implemented
+
+- An action on a signal: `trap 'cmd' INT` is refused. The platform's signal
+  door takes ignore and default only.
+- Job control: `jobs`, `fg` and `bg`.
+- `test`'s `-r`, `-w`, `-x` and `-ef`.
+- `command -p`, which is refused rather than ignored.
+
 ## Status
 
 The specs are green against x-lang **v0.51.0**, the release `lang.xon`
-declares. v0.15.0 or later is required: this shell names the base types
-through the door that release added, `(Type named INTEGER)`, rather than the
-handles type/convert.x keeps to itself.
+declares. This README describes `main`. The latest release, v0.1.4
+(2026-09-01), is older: it pairs with x-lang v0.10.0 and has none of the
+aliases, `hash`, `set -o pipefail`, or the line editor.
 
 ## Install
 
-From any directory, nothing cloned:
+From a clone, which installs what this README describes:
+
+```bash
+make install                      # into the x on your PATH
+PREFIX=$HOME/.local make install  # or a particular prefix
+```
+
+The latest release, from any directory with nothing cloned:
 
 ```bash
 x --install-lang https://github.com/jonruttan/x-ash/releases/latest/download/lang.pin.xon
@@ -224,13 +249,6 @@ x -l ash
 x fetches the published pin, then the tarball it names, verifies the digest,
 and installs to `<share>/langs/ash`, where `x -l` looks. A failed upgrade
 leaves the working install untouched.
-
-From a clone:
-
-```bash
-make install                      # into the x on your PATH
-PREFIX=$HOME/.local make install  # or a particular prefix
-```
 
 `make uninstall` removes it either way. An installed x searches
 `<share>/langs/*/lang.xon`; a lang is installed when its files are there.
@@ -262,9 +280,8 @@ X_LANG_DIR=$HOME/.local/share/x/langs/ x -l ash   # the installed one
 X_LANG_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
 ```
 
-The dialect is helium: what the shell needs from the platform is `x/sys/posix`
-and `x/sys/file`, imported by name in `ash/prims.x`, and nothing in the larger
-dialects.
+The dialect is helium. What the shell needs from the platform beyond it is
+imported by name.
 
 ## Pin it for a project
 
@@ -351,13 +368,18 @@ bundle shows up as a red build.
 ## Layout
 
 ```
-lang.xon          name, dialect, and the x-lang release this pairs with
+lang.xon          name, dialect, the x-lang release this pairs with, grammar
 run.x             the entry point
+ash/base.x        the language, assembled
 ash/prims.x       the platform layer, under the names ash was written against
 ash/tokens.x      shell token types, on an isolated tokenizer base
 ash/eval.x        parser and evaluator in one pass
 ash/printer.x     Scheme-style `write` for token lists
 ash/repl.x        the $ prompt and the -f batch reader
+ash/line.x        the line editor's colour and completion
+ash/syntax.x      the sh highlighting grammar, for x/tool/syntax
+tests/            markdown specs, run by the platform's runner
+tools/bundle.sh   rolls a release tarball
 ```
 
 ## Background
