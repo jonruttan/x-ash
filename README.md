@@ -226,20 +226,11 @@ dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 ## Status
 
 The specs are green against x-lang **v0.51.0**, the release `lang.xon`
-declares. This README describes `main`. The latest release, v0.1.4
-(2026-09-01), is older: it pairs with x-lang v0.10.0 and has none of the
-aliases, `hash`, `set -o pipefail`, or the line editor.
+declares.
 
 ## Install
 
-From a clone, which installs what this README describes:
-
-```bash
-make install                      # into the x on your PATH
-PREFIX=$HOME/.local make install  # or a particular prefix
-```
-
-The latest release, from any directory with nothing cloned:
+From any directory, nothing cloned:
 
 ```bash
 x --install-lang https://github.com/jonruttan/x-ash/releases/latest/download/lang.pin.xon
@@ -249,6 +240,13 @@ x -l ash
 x fetches the published pin, then the tarball it names, verifies the digest,
 and installs to `<share>/langs/ash`, where `x -l` looks. A failed upgrade
 leaves the working install untouched.
+
+From a clone:
+
+```bash
+make install                      # into the x on your PATH
+PREFIX=$HOME/.local make install  # or a particular prefix
+```
 
 `make uninstall` removes it either way. An installed x searches
 `<share>/langs/*/lang.xon`; a lang is installed when its files are there.
@@ -292,8 +290,8 @@ verifies it against a digest before unpacking. In the project's
 
 ```x
 (lang "ash")
-(release "v0.1.4")
-(bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.4/x-ash-v0.1.4.tar.gz")
+(release "v0.1.5")
+(bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.5/x-ash-v0.1.5.tar.gz")
 (source "https://github.com/jonruttan/x-ash.git")
 ```
 
@@ -302,7 +300,7 @@ Each release's notes carry this block with its digest, ready to paste. Then:
 ```x-repl
 > (import x/tool/pin)
 > (Pin bundle "deps/langs")
-"deps/langs/ash-v0.1.4"
+"deps/langs/ash-v0.1.5"
 ```
 
 `deps/langs/` is where `x -l` looks in a checkout; `X_LANG_DIR` overrides it.
