@@ -30,7 +30,7 @@
 ; reads the (grammar ...) form below, whose catalogue in x/tool/syntax that
 ; release added; an earlier one refuses the form.
 
-(requires-release "v0.54.0")
+(requires-release "v0.55.0")
 
 (entry "run.x")
 

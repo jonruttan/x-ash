@@ -225,7 +225,7 @@ dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 
 ## Status
 
-The specs are green against x-lang **v0.54.0**, the release `lang.xon`
+The specs are green against x-lang **v0.55.0**, the release `lang.xon`
 declares.
 
 ## Install
