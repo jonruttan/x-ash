@@ -337,7 +337,11 @@ Run the specs against an x-lang checkout or install:
 X=/path/to/x-lang/x.sh make test    # the suite
 X=/path/to/x-lang/x.sh make check   # the suite against the contract, which CI gates on
 make bundle                         # roll a release tarball and print its pin
+make card                           # docs/card.md: its format, and every script run
 ```
+
+[docs/card.md](docs/card.md) is the reference page: the shell's forms in
+tables, and scripts that are run, each line beside what it prints.
 
 Pass `X` explicitly: without it the suite takes the `x` on your PATH, and an
 installed x that trails the checkout — or a locally built `x-bin` older than
