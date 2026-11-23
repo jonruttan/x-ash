@@ -49,21 +49,16 @@
 ; %batch? comes from the seam and means "a file was supplied".  ash-main does
 ; not return.
 ;
-; Not while this bundle is being imaged: the image writer boots this bundle in
-; a child to capture it, where the child's stdin is the writer's own script,
-; which ash-batch would run and (Sys exit) out of the writer.  %image-writing
-; is bound in that child alone; a real boot raises Unbound and answers #f, so
-; the guard chooses the session.
+; The image writer imports this module and never calls main, so main needs no
+; %image-writing guard: the module captures that binding while the writer has
+; it set, and a guard here would skip the shell on every boot from the image.
 ;
 ; A session or a script sweeps as it runs (%sh-sweeps? in ash/eval.x).  It is
-; switched on here, past the image guard, so the image keeps it off and the
-; suite, which never calls main, counts objects unswept.
+; switched on here, in main, so the image keeps it off and the suite, which
+; never calls main, counts objects unswept.
 (def main
   (fn (_)
-    (if (guard (_ #f) %image-writing)
-      ()
-      (do
-        (sh-sweeps! #t)
-        (ash-main (guard (_ ()) (rest (Sys args (lit program)))))))))
+    (sh-sweeps! #t)
+    (ash-main (guard (_ ()) (rest (Sys args (lit program)))))))
 
 (provide ash/run main)
