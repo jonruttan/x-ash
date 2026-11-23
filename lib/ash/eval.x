@@ -6369,7 +6369,7 @@
 ; x collects only when asked.  The prompt asks before each line (ash/repl.x),
 ; but a script run with -f is one evaluation, and so is a loop typed on one
 ; line, so the evaluator asks as well: once every %sh-sweep-every simple
-; commands, while %sh-sweeps? is on.  run.x turns it on for a session and a
+; commands, while %sh-sweeps? is on.  ash/run's main turns it on for a session and a
 ; script; the suite leaves it off, so a case that counts objects counts what
 ; was allocated.
 ;
@@ -10357,7 +10357,7 @@
 
 (provide ash/eval
   sh-eval sh-eval-extracted
-  ; what ash/repl, ash/line and run.x read; the rebound state goes through
+  ; what ash/repl, ash/line and ash/run read; the rebound state goes through
   ; sh-status, sh-arg0!, sh-args! and sh-sweeps!
   sh-status sh-arg0! sh-args! sh-sweeps! sh-exit-shell sh-error-status sh-report
   sh-prompt sh-set sh-str-has-char? sh-var-get sh-field sh-builtin-table

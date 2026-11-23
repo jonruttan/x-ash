@@ -69,7 +69,7 @@ else
 	_builder="$X_ROOT/tools/dev/image-build.sh"
 	if [ ! -f "$_builder" ]; then
 		echo "x-ash: no image writer at $_builder (not a checkout) -- the suite boots from source" >&2
-	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/ash"; then
+	elif X_BIN="$X_BIN" sh "$_builder" "$LANG_LIB" "$BUNDLE/tests/lib/.images" "$BUNDLE/lib/ash"; then
 		X_IMG_DIR="$BUNDLE/tests/lib/.images"; export X_IMG_DIR
 	else
 		echo "x-ash: no state image -- the suite boots from source" >&2

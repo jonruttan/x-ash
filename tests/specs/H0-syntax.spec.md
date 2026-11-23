@@ -1,30 +1,30 @@
 ## ash/syntax -- the sh highlighting grammar
 
-The bundle's lang.xon declares a grammar, `sh`, that x/tool/syntax colours
+The bundle's bundle.xon declares a grammar, `sh`, that x/tool/syntax colours
 shell scripts with. Its module, `ash/syntax`, imports only x-lang libraries
 and registers the grammar as it loads.
 
 The cases share one process, and a registered grammar stays registered, so
-the catalogue's case comes first: it finds the grammar through lang.xon,
+the catalogue's case comes first: it finds the grammar through bundle.xon,
 before anything has imported the module.
 
 ### the catalogue finds sh by suffix, by name, by #! and by modeline
 
-The langs directory holds this bundle, linked as `ash`. The row comes from
-lang.xon, its module not loaded until a file asks for the grammar, and the
-grammar takes lang.xon's suffixes, names and interpreters.
+The bundles directory holds this bundle, linked as `ash`. The row comes from
+bundle.xon, its module not loaded until a file asks for the grammar, and the
+grammar takes bundle.xon's suffixes, names and interpreters.
 
 ```sh
 (do (import x/sys/posix) (import x/sys/file) (import x/tool/syntax)
-    (def root (Str8 replace "/ash/syntax.x" "" (%module-resolve-file "ash/syntax.x")))
-    (def tmp (File temp "/tmp/x-ash-spec-langs-"))
+    (def root (Str8 replace "/lib/ash/syntax.x" "" (%module-resolve-file "ash/syntax.x")))
+    (def tmp (File temp "/tmp/x-ash-spec-bundles-"))
     (File close (first tmp))
     (def d (rest tmp))
     (File unlink d)
     (File mkdir d)
     (File symlink root (Str8 append d "/ash"))
-    (def was (Sys getenv "X_LANG_DIR"))
-    (Sys setenv "X_LANG_DIR" d)
+    (def was (Sys getenv "X_BUNDLE_DIR"))
+    (Sys setenv "X_BUNDLE_DIR" d)
     (Syntax forget!)
     (def row (List find (fn (_ r) (eq? (first r) (lit sh))) (Syntax catalogue)))
     (def name (fn (_ path . text)
@@ -39,7 +39,7 @@ grammar takes lang.xon's suffixes, names and interpreters.
             (let ((g (Syntax named (lit sh)))) (list (g files) (g names) (g interpreters)))))
     (File unlink (Str8 append d "/ash"))
     (File rmdir d)
-    (Sys setenv "X_LANG_DIR" (if (null? was) "" was))
+    (Sys setenv "X_BUNDLE_DIR" (if (null? was) "" was))
     (Syntax forget!)
     seen)
 ```

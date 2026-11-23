@@ -8,7 +8,7 @@
 ; @copyright 2026 Jon Ruttan
 ; @license MIT No Attribution (MIT-0)
 ;
-; No path literals and no dialect boot here: run.x owns both. This file must
+; No path literals and no dialect boot here: x.sh owns both. This file must
 ; not re-include a platform module either -- on a booted tower that crashes
 ; rather than raising (x-lang#515).
 ;

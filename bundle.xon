@@ -1,19 +1,19 @@
-; lang.xon -- what this bundle is.
+; bundle.xon -- what this bundle is.
 ;
 ; xon: read with the ordinary reader and never evaluated, like every manifest
 ; in the x-lang world (pin.xon, engine.pin.xon). An unknown form is a loud
 ; error, never a silent skip.
 ;
 ; FORMAT (one form per line):
-;   (lang "NAME")               the -l name
+;   (name "NAME")               the -l name
 ;   (dialect NAME)              he | xe | rn -- a requirement
 ;   (requires-release "TAG")    the x-lang this bundle was built against
-;   (requires-lang "NAME" ["V"]) another lang this one is written on top
+;   (requires-bundle "NAME" ["V"]) another lang this one is written on top
 ;                               of, optionally at an exact version
-;   (entry "FILE")              loaded AFTER the dialect, not instead of it
+;   (entry NAME)                the module ash/NAME, imported after the dialect; its main starts it
 ;   (grammar NAME (module M) ...) a highlighting grammar x/tool/syntax loads
 
-(lang "ash")
+(name "ash")
 
 ; Helium plus the two modules ash imports. ash forks, execs, dup2s and opens
 ; files, but that needs one module -- x/sys/posix, imported by name in
@@ -30,9 +30,9 @@
 ; reads the (grammar ...) form below, whose catalogue in x/tool/syntax that
 ; release added; an earlier one refuses the form.
 
-(requires-release "v0.59.0")
+(requires-release "v0.61.0")
 
-(entry "run.x")
+(entry run)
 
 ; The sh grammar, for any process that colours a script: ash/syntax imports
 ; x-lang libraries only, never the shell.
