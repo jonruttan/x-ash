@@ -149,7 +149,7 @@
 (def %ash-painter-make
   (fn (_)
     (set! %ash-builtin-names (List map first sh-builtin-table))
-    (Paint lexer (Lexer make (%ash-paint-rules) "\n")
+    (Paint lexer (Lexer make (%ash-paint-rules))
       (list (pair (lit comment) (fn (_ t) %ash-c-comment))
             (pair (lit sq) (fn (_ t) %ash-c-string))
             (pair (lit dq) (fn (_ t) %ash-c-string))
