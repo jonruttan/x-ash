@@ -109,7 +109,7 @@
   (fn (_)
     (list
       (Lexer skip " \t")
-      (Lexer until () "#" "\n")
+      (Lexer until () "#" "\n" (lit to-end))
       (Lexer table (lit tok-newline) (list "\n"))
       (Lexer run (lit tok-io) (list (pair 48 57)) (list (pair 48 57)) "<>")
       (Lexer table (lit tok-op)
@@ -121,7 +121,7 @@
 ; Made at load, so a boot image carries it with its cache group's entries and
 ; plan: after an image load the Lexer remakes its own base from what the image
 ; holds, with no file read and no form made.
-(def %sh-lexer (Lexer make (%sh-lexer-rules) "\n"))
+(def %sh-lexer (Lexer make (%sh-lexer-rules)))
 
 ; --- Reading ------------------------------------------------------------------
 ; The Lexer's tokens are fresh lists in this heap, so a token whose label or

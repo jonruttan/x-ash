@@ -15,7 +15,7 @@
 ;
 ; The platform loop customizes prompt and print only (lib/x/repl/loop.x): its
 ; read is the ambient sexp reader and its eval is eval!. A lang whose unit is
-; not an s-expression must replace the loop, which run.x does with
+; not an s-expression must replace the loop, which ash/run does with
 ; (set! repl ash-repl) -- as x-python's repl.x and x-logo's do. Setting
 ; %repl-prompt and %repl-print alone leaves x's reader underneath the shell
 ; prompt, so `ls` reports Unbound SYMBOL 'ls'.
@@ -425,7 +425,7 @@
 ; --- batch (-f) --------------------------------------------------------------
 ;
 ; x.sh cats the named file onto the engine's stdin AFTER this bundle's entry,
-; so by the time run.x's last form runs, stdin holds the shell script -- and it
+; so by the time ash/run's main runs, stdin holds the shell script -- and it
 ; is shell syntax, which the C read-eval loop that would otherwise resume
 ; cannot parse.  Slurp it and push it through sh-eval, then exit with the
 ; status the script ended on, the way `sh script.sh` does.

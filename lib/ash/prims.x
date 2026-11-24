@@ -14,7 +14,7 @@
 ; read as a tokenizer and a shell rather than as platform glue.
 
 ; THE DIALECT IS HELIUM, so the doors this file forwards to arrive by NAME.
-; lang.xon carries the arithmetic; the operative half is here.  x/sys/posix is
+; bundle.xon carries the arithmetic; the operative half is here.  x/sys/posix is
 ; the Sys class -- fork, exec, wait, pipe, dup2, open and its variants, getenv and
 ; chdir -- and importing it at the top of the platform layer is what makes an
 ; unsatisfiable requirement fail at ACQUISITION rather than at the first

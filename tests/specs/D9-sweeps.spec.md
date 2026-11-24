@@ -1,6 +1,6 @@
 ## sh-eval sweeps while a script runs
 
-With `(%eval-ref (lit %sh-sweeps?))` on, as run.x turns it on for a session and a script, the
+With `(%eval-ref (lit %sh-sweeps?))` on, as ash/run's main turns it on for a session and a script, the
 evaluator collects once every `(%eval-ref (lit %sh-sweep-every))` simple commands, so a loop
 holds what it keeps and not everything it has allocated.  An evaluation whose
 token list is longer than `%sh-sweep-long` holds sweeps off until it ends,
