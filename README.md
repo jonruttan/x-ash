@@ -225,7 +225,7 @@ dispatching. It tokenizes on its own base to do that. The terms are in x-lang's
 
 ## Status
 
-The specs are green against x-lang **v0.59.0**, the release `lang.xon`
+The specs are green against x-lang **v0.59.0**, the release `bundle.xon`
 declares.
 
 ## Install
@@ -233,12 +233,12 @@ declares.
 From any directory, nothing cloned:
 
 ```bash
-x --install-lang https://github.com/jonruttan/x-ash/releases/latest/download/lang.pin.xon
+x --install-bundle https://github.com/jonruttan/x-ash/releases/latest/download/bundle.pin.xon
 x -l ash
 ```
 
 x fetches the published pin, then the tarball it names, verifies the digest,
-and installs to `<share>/langs/ash`, where `x -l` looks. A failed upgrade
+and installs to `<share>/bundles/ash`, where `x -l` looks. A failed upgrade
 leaves the working install untouched.
 
 From a clone:
@@ -249,7 +249,7 @@ PREFIX=$HOME/.local make install  # or a particular prefix
 ```
 
 `make uninstall` removes it either way. An installed x searches
-`<share>/langs/*/lang.xon`; a lang is installed when its files are there.
+`<share>/bundles/*/bundle.xon`; a lang is installed when its files are there.
 There is no registry.
 
 `make install` ends with `x --image -l ash`, which saves the booted shell to
@@ -259,23 +259,23 @@ the library and the engine. The tokenizer base and `$$` belong to the running
 process rather than the heap and are remade after an image loads.
 `x --no-image -l ash` boots from source.
 
-`x` resolves langs relative to the directory it runs in. Inside an x-lang
-checkout it searches `deps/langs/` only, so an installed lang is not found
+`x` resolves bundles relative to the directory it runs in. Inside an x-lang
+checkout it searches `deps/bundles/` only, so an installed lang is not found
 there:
 
 ```
 $ cd path/to/x-lang && x -l ash
-Error: no library, app or lang named 'ash'
+Error: no library, app or bundle named 'ash'
   searched lib/ash.x, apps/ash/run.x
-      and deps/langs/*/lang.xon
+      and deps/bundles/*/bundle.xon
 ```
 
-Run `x` from another directory, or set `X_LANG_DIR`, which takes precedence in
+Run `x` from another directory, or set `X_BUNDLE_DIR`, which takes precedence in
 both cases:
 
 ```bash
-X_LANG_DIR=$HOME/.local/share/x/langs/ x -l ash   # the installed one
-X_LANG_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
+X_BUNDLE_DIR=$HOME/.local/share/x/bundles/ x -l ash   # the installed one
+X_BUNDLE_DIR=/path/to/x-ash/.. x -l ash             # a checkout, uninstalled
 ```
 
 The dialect is helium. What the shell needs from the platform beyond it is
@@ -286,10 +286,10 @@ imported by name.
 An install is unversioned and machine-wide. When a project must build against
 a specific version, pin it: `Pin bundle` fetches the release tarball and
 verifies it against a digest before unpacking. In the project's
-`lang.pin.xon`:
+`bundle.pin.xon`:
 
 ```x
-(lang "ash")
+(name "ash")
 (release "v0.1.5")
 (bundle "sha256:…" "https://github.com/jonruttan/x-ash/releases/download/v0.1.5/x-ash-v0.1.5.tar.gz")
 (source "https://github.com/jonruttan/x-ash.git")
@@ -299,11 +299,11 @@ Each release's notes carry this block with its digest, ready to paste. Then:
 
 ```x-repl
 > (import x/tool/pin)
-> (Pin bundle "deps/langs")
-"deps/langs/ash-v0.1.5"
+> (Pin bundle "deps/bundles")
+"deps/bundles/ash-v0.1.5"
 ```
 
-`deps/langs/` is where `x -l` looks in a checkout; `X_LANG_DIR` overrides it.
+`deps/bundles/` is where `x -l` looks in a checkout; `X_BUNDLE_DIR` overrides it.
 
 Install when you just want `x -l ash` to work. Pin when a build depends on it:
 the digest is what makes the version reproducible.
@@ -326,8 +326,8 @@ x -l ash -- -e script.sh               # with the options set takes
 
 A file that cannot be opened, and `-c` with no command, answer 2.
 
-x-lang boots the dialect `lang.xon` declares, arms this bundle's module root,
-and loads `run.x` on top.
+x-lang boots the dialect `bundle.xon` declares, arms this bundle's `lib/`,
+and imports `ash/run`, whose `main` starts the shell.
 
 ## Development
 
@@ -350,9 +350,9 @@ failures the platform has already fixed.
 
 Do not `make install` into an x-lang checkout. The Makefile asks
 `$(X) --share-dir` where to put the bundle, and a checkout answers with its own
-root, so the files land in `<checkout>/langs/ash`, which `-l` does not search
+root, so the files land in `<checkout>/bundles/ash`, which `-l` does not search
 there. The install reports success and the lang is still not found. Install
-into a real `<share>` tree, or use `X_LANG_DIR`.
+into a real `<share>` tree, or use `X_BUNDLE_DIR`.
 
 Known failures are recorded by name in
 [`tests/contract/known-failures.txt`](tests/contract/known-failures.txt).
@@ -363,25 +363,25 @@ any failure is a regression.
 The release tarball is byte-reproducible: it is built from the tag with
 `git archive` and a timestamp-free gzip, so the same tag always yields the same
 digest. Pushing a `v*` tag runs the suite and, only if it is green, publishes
-the tarball, its `.sha256` and `lang.pin.xon` as a GitHub release. CI runs the
+the tarball, its `.sha256` and `bundle.pin.xon` as a GitHub release. CI runs the
 declared release and x-lang `main`, so a platform change that breaks this
 bundle shows up as a red build.
 
 ## Layout
 
 ```
-lang.xon          name, dialect, the x-lang release this pairs with, grammar
-run.x             the entry point
-ash/base.x        the language, assembled
-ash/prims.x       the platform layer, under the names ash was written against
-ash/tokens.x      shell token types, on an isolated tokenizer base
-ash/eval.x        parser and evaluator in one pass
-ash/printer.x     symbols written bare, and the REPL printer
-ash/repl.x        the $ prompt and the -f batch reader
-ash/line.x        the line editor's colour and completion
-ash/syntax.x      the sh highlighting grammar, for x/tool/syntax
-tests/            markdown specs, run by the platform's runner
-tools/bundle.sh   rolls a release tarball
+bundle.xon            name, dialect, the x-lang release this pairs with, grammar
+lib/ash/run.x         the entry
+lib/ash/base.x        the language, assembled
+lib/ash/prims.x       the platform layer, under the names ash was written against
+lib/ash/tokens.x      shell token types, on an isolated tokenizer base
+lib/ash/eval.x        parser and evaluator in one pass
+lib/ash/printer.x     symbols written bare, and the REPL printer
+lib/ash/repl.x        the $ prompt and the -f batch reader
+lib/ash/line.x        the line editor's colour and completion
+lib/ash/syntax.x      the sh highlighting grammar, for x/tool/syntax
+tests/                markdown specs, run by the platform's runner
+tools/bundle.sh       rolls a release tarball
 ```
 
 ## Background

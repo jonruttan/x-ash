@@ -1,7 +1,7 @@
 name: CI
 
 # The bundle CI the platform ships, in x-lang's .github/workflows/bundle.yml:
-# the suite against the release lang.xon declares, and against x-lang main on
+# the suite against the release bundle.xon declares, and against x-lang main on
 # a push to main, the weekly schedule and a manual dispatch.  The suite runs
 # on Ubuntu only, as it did before it moved there.
 
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check out x-lang at the declared release
         run: |
-          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' lang.xon)
+          declared=$(sed -n 's/^(requires-release "\(.*\)")$/\1/p' bundle.xon)
           git clone --depth 1 --branch "$declared" \
             https://github.com/jonruttan/x-lang.git .x-lang
       - name: Build the platform
@@ -42,4 +42,4 @@ jobs:
           make
           make boot
       - name: Write the boot image
-        run: cd .x-lang && X_LANG_DIR="$(dirname "$GITHUB_WORKSPACE")/" sh x.sh --image -l ash
+        run: cd .x-lang && X_BUNDLE_DIR="$(dirname "$GITHUB_WORKSPACE")/" sh x.sh --image -l ash

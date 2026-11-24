@@ -1,12 +1,12 @@
 # x-ash -- the ASH lang for x-lang
 #
-# Install copies this bundle to <share>/langs/ash, where `x -l` looks: a lang
+# Install copies this bundle to <share>/bundles/ash, where `x -l` looks: a lang
 # is installed when its files are there. No registry, no database.
 #
 #   make install                        into the x on PATH
 #   PREFIX=$HOME/.local make install    into a particular prefix
 #
-# A pin (lang.pin.xon + Pin bundle) freezes a verified tarball for one project
+# A pin (bundle.pin.xon + Pin bundle) freezes a verified tarball for one project
 # and is what a build should depend on. An install is one unversioned copy for
 # the whole machine. Pin when the version matters; install to get `x -l ash`
 # working.
@@ -15,7 +15,7 @@ X ?= x
 
 # The version is derived from git describe, never committed: a version literal
 # is true only at the commit it is tagged on and wrong on every commit after.
-# lang.xon declares what this bundle requires; the installed artifact carries
+# bundle.xon declares what this bundle requires; the installed artifact carries
 # what it is, in a version stamp -- the same split as x-lang's own
 # $(X_RELEASE) -> <lib>/contract/release.
 LANG_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -23,14 +23,14 @@ LANG_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo
 # install`.  Otherwise ask the x on PATH where its tree is -- the question
 # --share-dir exists to answer.
 SHARE := $(if $(PREFIX),$(PREFIX)/share/x,$(shell $(X) --share-dir))
-DEST  := $(SHARE)/langs/ash
+DEST  := $(SHARE)/bundles/ash
 
 # What a consumer needs to run the lang: the declaration, the entry, the
 # modules. Not the suite, the tooling, or CI.
-PAYLOAD := lang.xon run.x ash
+PAYLOAD := bundle.xon lib
 
 .PHONY: install
-install: ## Install into <share>/langs/ash
+install: ## Install into <share>/bundles/ash
 	@test -n "$(SHARE)" || { echo "x-ash: cannot find an x tree -- set PREFIX or X" >&2; exit 1; }
 	@test -d "$(SHARE)" || { echo "x-ash: no x tree at $(SHARE)" >&2; exit 1; }
 	rm -rf "$(DEST)"
@@ -56,13 +56,13 @@ check: ## Run the suite against tests/contract/known-failures.txt -- what CI gat
 	X="$(X)" sh tests/spec-gate.sh
 
 # The card runs from here, so X is an installed x: a checkout's wrapper runs
-# only from its own root.  X_LANG_DIR is the directory holding this bundle,
+# only from its own root.  X_BUNDLE_DIR is the directory holding this bundle,
 # so `x -l ash` loads this tree and not an installed copy.  CARD_SH is the
 # check: the installed x-lang's, or a newer one named here.
 .PHONY: card
 card: ## Hold docs/card.md to the card format and run its scripts
-	X_LANG_DIR="$${X_LANG_DIR:-$(CURDIR)/..}" BUNDLE=. X="$(X)" \
-		sh "$${CARD_SH:-$$("$(X)" --share-dir)/tools/lang-kit/card.sh}"
+	X_BUNDLE_DIR="$${X_BUNDLE_DIR:-$(CURDIR)/..}" BUNDLE=. X="$(X)" \
+		sh "$${CARD_SH:-$$("$(X)" --share-dir)/tools/bundle-kit/card.sh}"
 
 .PHONY: bundle
 bundle: ## Roll a release tarball and print its pin
