@@ -376,7 +376,7 @@ lib/ash/base.x        the language, assembled
 lib/ash/prims.x       the platform layer, under the names ash was written against
 lib/ash/tokens.x      shell token types, on an isolated tokenizer base
 lib/ash/eval.x        parser and evaluator in one pass
-lib/ash/printer.x     Scheme-style `write` for token lists
+lib/ash/printer.x     symbols written bare, and the REPL printer
 lib/ash/repl.x        the $ prompt and the -f batch reader
 lib/ash/line.x        the line editor's colour and completion
 lib/ash/syntax.x      the sh highlighting grammar, for x/tool/syntax
