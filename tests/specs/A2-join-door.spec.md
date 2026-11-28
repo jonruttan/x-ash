@@ -5,8 +5,6 @@ Str8's own, resolved once through `method-of` as the Sys methods are, and a
 field of one piece -- the most common -- is that piece, with no call at all.
 What a join answers is what `Str8 join` answers.
 
-The cost is compared rather than counted, as spec 36 compares its tests.
-
 ### what a join answers
 
 ```sh
@@ -32,14 +30,13 @@ The cost is compared rather than counted, as spec 36 compares its tests.
 ---
     "abc"
 
-### closing a field of one piece costs less than a join call
+### closing a field of one piece answers the piece itself
+
+No new string is made: the field's text is the piece that went in.
 
 ```sh
-(let ((cost (fn (_ thunk)
-              (let ((before (Heap count))) (thunk) (- (Heap count) before))))
-      (field (%sh-acc-add %sh-acc-empty "p" ())))
-  (< (cost (fn (_) (%sh-acc-cur field)))
-     (cost (fn (_) (Str8 join "" (list "p"))))))
+(let ((piece (Str8 join "" (list "p" "q"))))
+  (same? piece (%sh-acc-cur (%sh-acc-add %sh-acc-empty piece ()))))
 ```
 ---
     #t
